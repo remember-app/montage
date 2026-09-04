@@ -38,14 +38,16 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-export DATABASE_URL='postgres://remember:remember@localhost:5432/remember'
-# те же четыре имени, что читает API, — можно взять его ../api/.env целиком
-export R2_ENDPOINT='http://localhost:9000' R2_BUCKET='remember'
-export R2_ACCESS_KEY_ID='remember' R2_SECRET_ACCESS_KEY='remember-secret'
+cp .env.example .env             # база и локальное хранилище
+set -a && . ./.env && set +a     # внести в окружение: воркер читает только его
 
 python worker.py init            # создать таблицу jobs
 python worker.py run             # цикл разбора очереди, Ctrl-C для остановки
 ```
+
+Своего чтения `.env` у воркера нет — переменные приходят из окружения, и на хостинге их задаёт
+сам сервис. Имена хранилища — те же четыре, что читает API, так что вместо своего `.env` можно
+внести его `../api/.env` целиком.
 
 `init` можно звать сколько угодно раз: `schema.sql` идемпотентен (`CREATE TABLE IF NOT EXISTS`),
 на чистой базе накатывается с нуля.
@@ -55,7 +57,7 @@ python worker.py run             # цикл разбора очереди, Ctrl-
 
 ## Фиктивная задача
 
-В другом терминале (с тем же `DATABASE_URL`):
+В другом терминале (с тем же окружением):
 
 ```sh
 python worker.py enqueue dummy         # воркер её возьмёт и поставит done
@@ -96,9 +98,7 @@ python worker.py enqueue dummy fail    # ref=fail — упадёт и уйдёт
 ## Тесты
 
 ```sh
-DATABASE_URL='postgres://remember:remember@localhost:5432/remember' \
-R2_ENDPOINT='http://localhost:9000' R2_BUCKET='remember' \
-R2_ACCESS_KEY_ID='remember' R2_SECRET_ACCESS_KEY='remember-secret' \
+set -a && . ./.env && set +a
 python -m pytest
 ```
 
