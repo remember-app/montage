@@ -15,9 +15,12 @@ import time
 
 import psycopg
 
+import media
+
 MAX_ATTEMPTS = 3
 BACKOFF_SECONDS = 30  # attempt n is retried after BACKOFF_SECONDS * 2 ** (n - 1)
 IDLE_SLEEP_SECONDS = 5
+SWEEP_INTERVAL_SECONDS = 3600  # «раз в час» (architecture.md, «Обработка ошибок»)
 SCHEMA = pathlib.Path(__file__).with_name("schema.sql")
 
 log = logging.getLogger("montage")
@@ -41,18 +44,17 @@ def enqueue(conn, type_, ref=None):
 
 
 # --- handlers ---------------------------------------------------------------
-# One dummy type, enough to prove the loop cycles and retries.
-# `media_preview` arrives with m-1, `montage` with m-2.
+# Every handler takes the worker's connection and the job's `ref`. `montage` arrives with m-2.
 
 
-def dummy(ref):
+def dummy(conn, ref):
     """Does nothing and succeeds — unless ref is 'fail', which exercises the retry path."""
     if ref == "fail":
         raise RuntimeError("dummy job was asked to fail")
     log.info("dummy job did nothing, successfully")
 
 
-HANDLERS = {"dummy": dummy}
+HANDLERS = {"dummy": dummy, "media_preview": media.media_preview}
 
 
 # --- the loop ---------------------------------------------------------------
@@ -85,7 +87,7 @@ def run_once(conn):
         handler = HANDLERS.get(type_)
         if handler is None:
             raise LookupError(f"no handler for job type {type_!r}")
-        handler(ref)
+        handler(conn, ref)
     except Exception as exc:
         attempts += 1
         delay = BACKOFF_SECONDS * 2 ** (attempts - 1)
@@ -102,6 +104,10 @@ def run_once(conn):
             job_id, type_, attempts, MAX_ATTEMPTS, exc,
             "given up" if status == "failed" else f"retrying in {delay}s",
         )
+        if status == "failed" and type_ == "media_preview":
+            # The job is done retrying, and the item it was about has to say so too — the gallery
+            # would otherwise wait on `processing` forever.
+            media.give_up(conn, ref)
     else:
         conn.execute(
             "UPDATE jobs SET status = 'done', updated_at = now() WHERE id = %s", (job_id,)
@@ -112,7 +118,16 @@ def run_once(conn):
 
 def run(conn):
     log.info("polling for jobs, handlers: %s", ", ".join(HANDLERS))
+    next_sweep = 0.0  # once at start-up, then hourly
     while True:
+        if time.monotonic() >= next_sweep:
+            next_sweep = time.monotonic() + SWEEP_INTERVAL_SECONDS
+            try:
+                media.sweep_stale_uploads(conn)
+            except Exception:
+                # Housekeeping rides along with the queue rather than in a process of its own, so a
+                # bucket that is unreachable must not take the queue down with it.
+                log.exception("the sweep of abandoned uploads failed, trying again in an hour")
         if not run_once(conn):
             time.sleep(IDLE_SLEEP_SECONDS)
 
