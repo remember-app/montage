@@ -171,3 +171,48 @@ def test_the_sweep_takes_an_abandoned_upload_with_its_multipart(conn, s3, memory
     assert read_item(conn, fresh) is not None, "a day has to pass before a row is given up on"
     live = s3.list_multipart_uploads(Bucket=media.bucket(), Prefix=key).get("Uploads", [])
     assert upload_id not in [upload["UploadId"] for upload in live], "the parts are released"
+
+
+def test_the_sweep_leaves_an_upload_that_finished_while_it_ran(conn, memory, monkeypatch):
+    """The race the status guard is there for: the row is found stale, and the phone finishes it
+    before the sweep gets round to freeing it. The api has counted those bytes by then, so sweeping
+    the row would put the memory's counters permanently over and delete a live original."""
+    item_id, _ = add_item(conn, memory, "photo", status="pending_upload", age_hours=25)
+
+    # `storage()` is called after the stale rows are read and before any of them is claimed, which
+    # is exactly the window the api's «загружено» lands in.
+    real_storage = media.storage
+
+    def finish_the_upload_first():
+        conn.execute(
+            "UPDATE media_items SET status = 'processing' WHERE id = %s", (item_id,)
+        )
+        return real_storage()
+
+    monkeypatch.setattr(media, "storage", finish_the_upload_first)
+
+    assert media.sweep_stale_uploads(conn) == 0
+    assert read_item(conn, item_id)[0] == "processing", "the finished upload survives the sweep"
+
+
+def test_a_playlist_dressed_up_as_a_photo_is_refused(conn, s3, memory, tmp_path):
+    """ffmpeg picks its demuxer by probing, and nothing before this worker looks inside an upload.
+    A playlist naming local files would have ffmpeg read them into a preview the uploader can then
+    open from the gallery."""
+    item_id, key = add_item(conn, memory, "photo")
+    playlist = tmp_path / "original"
+    playlist.write_text(
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1.0,\nfile:///etc/hosts\n#EXT-X-ENDLIST\n"
+    )
+    s3.upload_file(str(playlist), media.bucket(), key)
+    worker.enqueue(conn, "media_preview", item_id)
+
+    assert worker.run_once(conn) is True
+
+    # Refused, not previewed: the job carries the reason and the item never went `ready`.
+    job = conn.execute(
+        "SELECT status, last_error FROM jobs WHERE type = 'media_preview' AND ref = %s", (item_id,)
+    ).fetchone()
+    assert job[0] == "queued", "the first refusal is a retry like any other failure"
+    assert "playlist" in job[1]
+    assert read_item(conn, item_id)[0] == "processing"

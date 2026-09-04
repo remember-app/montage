@@ -18,6 +18,16 @@ import boto3
 from botocore.config import Config
 
 STALE_UPLOAD_HOURS = 24  # a day in `pending_upload` means the phone is not coming back
+
+# Containers that are not media but a list of *other* files to go and fetch. ffmpeg picks its
+# demuxer by probing the bytes, and the api never looks inside an upload — `kind` is the phone's
+# word for it — so a «photo» whose bytes are an HLS playlist would have ffmpeg open whatever paths
+# the playlist names and encode them into a preview the uploader can then open from the gallery.
+# That is a read of this worker's own disk, which is where DATABASE_URL and the R2 keys live.
+#
+# A denylist and not an allowlist on purpose: format names vary by build and by camera, and being
+# wrong here must mean «one exotic container slips through», never «every photo is refused».
+PLAYLIST_FORMATS = {"hls", "applehttp", "concat", "ffconcat", "dash", "sdp", "rtsp", "rtp"}
 THUMBNAIL_WIDTH = 640  # the gallery grid
 PREVIEW_HEIGHT = 720  # «версия 720p H.264» (architecture.md)
 
@@ -66,19 +76,40 @@ def _run(*args):
 
 
 def _ffmpeg(*args):
-    _run("ffmpeg", "-nostdin", "-loglevel", "error", "-y", *args)
+    # `-protocol_whitelist file`: whatever the input turns out to be, it may not reach the network.
+    # Belt to the braces of `_refuse_playlists` — that one stops the demuxers that go looking, this
+    # one stops where they could look.
+    _run("ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-protocol_whitelist", "file", *args)
+
+
+def _ffprobe(entry, path):
+    """One `format=` field as ffprobe reports it, stripped. Empty when it does not say."""
+    return _run(
+        "ffprobe", "-v", "error", "-protocol_whitelist", "file",
+        "-show_entries", f"format={entry}",
+        "-of", "default=noprint_wrappers=1:nokey=1", str(path),
+    ).strip()
 
 
 def _duration(path):
     """Seconds as the container reports them, or None when it does not say."""
-    seconds = _run(
-        "ffprobe", "-v", "error", "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1", str(path),
-    ).strip()
     try:
-        return float(seconds)
+        return float(_ffprobe("duration", path))
     except ValueError:
         return None
+
+
+def _refuse_playlists(path):
+    """Stop before encoding anything if the «media» is really a list of other files to fetch.
+
+    Raising here fails the job, which after three tries fails the item — the gallery then shows the
+    placeholder it shows for anything that could not be prepared.
+    """
+    # ffprobe answers with a comma-separated list of every name the container goes by.
+    named = {name for name in _ffprobe("format_name", path).split(",") if name}
+    playlists = named & PLAYLIST_FORMATS
+    if playlists:
+        raise RuntimeError(f"refusing {'/'.join(sorted(playlists))}: a playlist is not media")
 
 
 # --- the handler ------------------------------------------------------------
@@ -104,6 +135,9 @@ def media_preview(conn, ref):
             workdir / "original", workdir / "thumbnail.jpg", workdir / "preview.mp4"
         )
         s3.download_file(bucket(), original_key, str(original))
+        # Before ffmpeg is pointed at it for anything else: these bytes came off somebody's phone
+        # and nothing between there and here has looked inside them.
+        _refuse_playlists(original)
 
         if kind == "video":
             duration = _duration(original)
@@ -131,13 +165,23 @@ def media_preview(conn, ref):
     # ponytail: `width`/`height` stay untouched — ffprobe reports the stored dimensions and ffmpeg
     # previews the EXIF-rotated ones, so the two disagree on every sideways phone photo. Fill them
     # when the gallery needs the aspect ratio before the thumbnail loads.
-    conn.execute(
+    landed = conn.execute(
         """UPDATE media_items
            SET status = 'ready', thumbnail_key = %s, preview_key = %s,
                duration_seconds = coalesce(%s, duration_seconds), updated_at = now()
-           WHERE id = %s""",
+           WHERE id = %s
+           RETURNING id""",
         (thumbnail_key, preview_key, duration, ref),
-    )
+    ).fetchone()
+    if landed is None:
+        # Deleted while this job was running — the member walked out, or somebody deleted the item.
+        # The api drops the keys the *row* carried, and these two were not on it yet, so nothing
+        # else will ever come for them.
+        log.info("media item %s went away mid-preview, taking its derivatives back", ref)
+        for key in (thumbnail_key, preview_key):
+            if key:
+                s3.delete_object(Bucket=bucket(), Key=key)
+        return
     log.info("media item %s (%s) is ready", ref, kind)
 
 
@@ -170,6 +214,17 @@ def sweep_stale_uploads(conn):
 
     s3, swept = storage(), 0
     for item_id, original_key, upload_id in stale:
+        # The row is claimed first, and only if it is still the row that was found. A phone can
+        # finish a day-old upload in the seconds between the SELECT above and this line — the api
+        # then moves it to `processing` and counts its bytes — and freeing R2 for that one would
+        # delete a live original and leave the memory's counters permanently over.
+        claimed = conn.execute(
+            "DELETE FROM media_items WHERE id = %s AND status = 'pending_upload' RETURNING id",
+            (item_id,),
+        ).fetchone()
+        if claimed is None:
+            log.info("upload %s finished while the sweep ran, leaving it alone", item_id)
+            continue
         try:
             if upload_id:
                 try:
@@ -177,17 +232,15 @@ def sweep_stale_uploads(conn):
                         Bucket=bucket(), Key=original_key, UploadId=upload_id
                     )
                 except s3.exceptions.NoSuchUpload:
-                    pass  # already gone; the row still has to follow it
+                    pass  # already gone; the row has followed it either way
             # And whatever landed under the key anyway, for the client that completed its upload in
             # R2 and never told the api.
             s3.delete_object(Bucket=bucket(), Key=original_key)
         except Exception as exc:
-            # The row stays and the next hour tries again: deleting it now would throw away the only
-            # record of the upload id, and the parts would sit in the bucket with nothing to name them.
-            log.warning("could not free %s in R2, leaving the row for the next sweep: %s",
-                        original_key, exc)
-            continue
-        conn.execute("DELETE FROM media_items WHERE id = %s", (item_id,))
+            # The row is already gone, so nothing will ever name these again and the next hour will
+            # not find them. The log is the only record left — hence the upload id in it.
+            log.warning("swept %s but could not free it in R2 (upload %s), left behind: %s",
+                        original_key, upload_id, exc)
         swept += 1
 
     log.info("swept %s abandoned upload(s) of %s found", swept, len(stale))
