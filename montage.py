@@ -48,8 +48,8 @@ MUSIC_FADE_SECONDS = 1.5
 DEDUP_SECONDS = 2.0  # two shots this close together are one moment, not two
 
 # Every frame is judged on a small grey copy of itself: blur and exposure both survive the scaling,
-# and 96×54 is 5k pixels rather than 2M — which keeps both passes below cheap enough to run on
-# every sampled second of every file in the memory.
+# and 96×54 is 5k pixels rather than 2M — cheap enough to judge every sampled second of every file
+# in the memory.
 SAMPLE_WIDTH, SAMPLE_HEIGHT = 96, 54
 SAMPLE_FPS = 1.0  # «семпл кадров ≈1/сек»
 MIN_SHARPNESS = 5.0  # variance of the Laplacian under which a frame is just blur
@@ -106,14 +106,9 @@ def _sharpness(frame):
     """Variance of the Laplacian: how much the frame changes from pixel to pixel. A photograph in
     focus is full of edges and scores high; a smeared one has almost none and scores near zero.
 
-    This function is the whole reason the worker depends on numpy. The same sum as a Python loop
-    over `bytes` measured ~1.2ms a frame, and it runs on every sampled second of every file in a
-    memory; tightening that loop without leaving the stdlib bought ~30%, because the cost is the
-    interpreter visiting five thousand pixels, not the arithmetic. Done over the whole interior at
-    once it is ~0.01ms — two orders of magnitude, for the same number: the shifted slices are the
-    same five neighbours, and `.var()` (ddof=0) is `statistics.pvariance` under another name.
-    architecture.md has this worker growing an OpenCV/NIMA scoring stack later, which brings numpy
-    along regardless — this only takes delivery of it early, for a measured win.
+    The shifted slices are the same five neighbours a per-pixel loop would visit, over the same
+    interior, and `.var()` (ddof=0) is `statistics.pvariance` under another name — this is the old
+    Python loop's number, ~100x faster. That win is the whole reason the worker depends on numpy.
     """
     # Signed before the subtraction: as `uint8` the neighbours would wrap around instead of going
     # negative, and a dark pixel next to a bright one is exactly what this is looking for.
