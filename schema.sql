@@ -16,3 +16,18 @@ CREATE TABLE IF NOT EXISTS jobs (
 
 -- The only query the worker runs against this table.
 CREATE INDEX IF NOT EXISTS jobs_due_idx ON jobs (run_after) WHERE status = 'queued';
+
+-- Postgres wakes the idle worker itself instead of it guessing when to look again. On the table,
+-- so it covers everyone who inserts — the API and the worker's own `enqueue` alike. Per statement,
+-- not per row: the payload is empty anyway, and one nudge is enough for a loop that then drains the
+-- queue. The notification is delivered on commit, when the row is actually visible.
+CREATE OR REPLACE FUNCTION jobs_notify() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    PERFORM pg_notify('jobs', '');
+    RETURN NULL;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS jobs_notify ON jobs;
+CREATE TRIGGER jobs_notify AFTER INSERT ON jobs
+    FOR EACH STATEMENT EXECUTE FUNCTION jobs_notify();

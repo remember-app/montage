@@ -1,8 +1,8 @@
-"""Montage worker: polls the shared `jobs` table in Postgres and runs one handler per job.
+"""Montage worker: takes jobs from the shared `jobs` table in Postgres, one handler per job.
 
     python worker.py init                  # create the jobs table (idempotent)
     python worker.py enqueue <type> [ref]  # put one job in the queue
-    python worker.py run                   # poll loop, Ctrl-C to stop
+    python worker.py run                   # the loop, Ctrl-C to stop
 
 Needs DATABASE_URL. See README.md.
 """
@@ -20,7 +20,7 @@ import montage as montages  # the module and its handler share the job's name; t
 
 MAX_ATTEMPTS = 3
 BACKOFF_SECONDS = 30  # attempt n is retried after BACKOFF_SECONDS * 2 ** (n - 1)
-IDLE_SLEEP_SECONDS = 5
+IDLE_POLL_SECONDS = 30  # fallback only: a queued job normally wakes the worker by NOTIFY
 SWEEP_INTERVAL_SECONDS = 3600  # «раз в час» (architecture.md, «Обработка ошибок»)
 SCHEMA = pathlib.Path(__file__).with_name("schema.sql")
 
@@ -129,8 +129,18 @@ def run_once(conn):
     return True
 
 
+def wait_for_job(conn):
+    """Block until the queue says there is something new — or until the fallback poll is due.
+
+    A notification sent while this worker was busy (or lost with the connection) is a normal case,
+    not a stuck queue: the timeout makes the loop look again anyway.
+    """
+    next(conn.notifies(timeout=IDLE_POLL_SECONDS), None)
+
+
 def run(conn):
-    log.info("polling for jobs, handlers: %s", ", ".join(HANDLERS))
+    log.info("waiting for jobs, handlers: %s", ", ".join(HANDLERS))
+    conn.execute("LISTEN jobs")  # every insert into `jobs` notifies this channel — see schema.sql
     next_sweep = 0.0  # once at start-up, then hourly
     while True:
         if time.monotonic() >= next_sweep:
@@ -142,7 +152,7 @@ def run(conn):
                 # bucket that is unreachable must not take the queue down with it.
                 log.exception("the sweep of abandoned uploads failed, trying again in an hour")
         if not run_once(conn):
-            time.sleep(IDLE_SLEEP_SECONDS)
+            wait_for_job(conn)
 
 
 if __name__ == "__main__":
