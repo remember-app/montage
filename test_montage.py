@@ -11,6 +11,7 @@ R2_ENDPOINT points at.
 
 import datetime
 import json
+import random
 
 import pytest
 
@@ -82,7 +83,7 @@ def test_the_first_piece_is_taken_however_long_it_is():
 # --- judging a frame ---------------------------------------------------------
 # `choose`'s own tests hand it a sharpness directly and never touch the arithmetic that produces
 # one. These do: tiny grey frames built by hand, the same size ffmpeg hands `_sharpness`/`_exposed`
-# for real, no ffmpeg needed to check the pure-Python maths itself is right.
+# for real, no ffmpeg needed to check the maths itself is right.
 
 FRAME_SIZE = montage.SAMPLE_WIDTH * montage.SAMPLE_HEIGHT
 
@@ -103,6 +104,38 @@ def test_a_checkerboard_is_sharp():
     """Every neighbouring pixel is as different as it gets — the opposite end of the scale from a
     flat frame, and well past `MIN_SHARPNESS`."""
     assert montage._sharpness(grey(0, 255)) > montage.MIN_SHARPNESS
+
+
+def laplacian_variance(frame):
+    """The same number `_sharpness` promises, written out the long obvious way and owing nothing to
+    how `_sharpness` happens to compute it: the Laplacian at every pixel that has four neighbours,
+    then the variance of those values over the whole population."""
+    width, height = montage.SAMPLE_WIDTH, montage.SAMPLE_HEIGHT
+
+    def at(x, y):
+        return frame[y * width + x]
+
+    values = [
+        4 * at(x, y) - at(x - 1, y) - at(x + 1, y) - at(x, y - 1) - at(x, y + 1)
+        for y in range(1, height - 1)
+        for x in range(1, width - 1)
+    ]
+    mean = sum(values) / len(values)
+    return sum((value - mean) ** 2 for value in values) / len(values)
+
+
+@pytest.mark.parametrize("frame", [
+    grey(128),  # flat
+    grey(0, 255),  # checkerboard
+    grey(3, 200, 17, 250, 99),  # a period that does not divide the row: no two rows alike
+    random.Random(59).randbytes(FRAME_SIZE),  # noise, the same noise every run
+], ids=["flat", "checkerboard", "irregular", "noise"])
+def test_sharpness_is_the_variance_of_the_laplacian(frame):
+    """«A flat frame scores nothing, a checkerboard scores a lot» is true of half a dozen different
+    formulas, so those two alone would let the number drift while the tests stayed green — and the
+    number is what decides which frames end up in the video. This one pins it: the value itself,
+    against the definition spelled out here rather than against `_sharpness`'s own arithmetic."""
+    assert montage._sharpness(frame) == pytest.approx(laplacian_variance(frame), rel=1e-12)
 
 
 def test_a_mid_grey_varied_frame_is_exposed():
