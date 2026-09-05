@@ -115,8 +115,12 @@ def run_once(conn):
             media.give_up(conn, ref)
         elif status == "failed" and type_ == "montage":
             # Same for the video that was ordered: the organizer's «повторить» has to appear, and
-            # it only appears under a montage that says it failed and why.
-            montages.give_up(conn, ref, str(exc))
+            # it only appears under a montage that says it failed. Not `str(exc)` though — the api
+            # serves `error_text` to every member of the memory, and this one is an ffmpeg stderr
+            # tail or a botocore message: temp paths, and the storage endpoint, which in production
+            # carries the Cloudflare account id. The full text stays in `last_error` above, which
+            # is the operator's to read.
+            montages.give_up(conn, ref, "не удалось собрать ролик")
     else:
         conn.execute(
             "UPDATE jobs SET status = 'done', updated_at = now() WHERE id = %s", (job_id,)

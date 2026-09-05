@@ -21,7 +21,9 @@ import worker
 # The fixtures and the ffmpeg-drawn material are `test_media.py`'s — a second copy of a Postgres
 # fixture is a second thing to keep true. pytest resolves fixtures by name in this module, so they
 # have to be imported by name and not through the module.
-from test_media import add_item, conn, fetch, memory, photo, probe, s3, video  # noqa: F401
+from test_media import (  # noqa: F401
+    add_item, conn, ffmpeg, fetch, memory, photo, probe, s3, video,
+)
 
 
 # --- choosing ---------------------------------------------------------------
@@ -131,6 +133,85 @@ def test_a_memory_of_photos_and_a_clip_becomes_one_playable_video(conn, s3, memo
     assert (tracks["video"]["width"], tracks["video"]["height"]) == (
         montage.CANVAS_WIDTH, montage.CANVAS_HEIGHT
     ), "everything is padded onto the one canvas, whichever way it was shot"
+
+
+def unopenable(path):
+    """Bytes in the bucket that ffmpeg will not open — a truncated upload, a file the phone
+    mislabelled. Not a playlist: that is the security case and `test_media.py` has it."""
+    path.write_bytes(b"this is not a photo and never was")
+    return path
+
+
+def lopsided(path):
+    """Two seconds of picture under three and a half of sound, so the container calls it 3.5 —
+    `format=duration` is the longest stream, and `-t` cuts against the picture."""
+    ffmpeg(
+        "-f", "lavfi", "-i", "testsrc=size=640x480:rate=30:duration=2",
+        "-f", "lavfi", "-i", "sine=frequency=440:duration=3.5",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(path),
+    )
+    return path
+
+
+def test_a_file_that_will_not_open_is_left_out_rather_than_failing_the_video(
+    conn, s3, memory, tmp_path
+):
+    """One corrupt upload is that file's problem, not the memory's. It used to raise straight out
+    of the handler: three retries, then a montage failed for good — and «повторить» met the same
+    file, so any one member could deny the organizer a video permanently."""
+    montage_id = order(conn, memory, {"target_seconds": 30})
+    material(conn, s3, memory, tmp_path)
+    _, key = add_item(conn, memory, "photo", status="ready")
+    s3.upload_file(str(unopenable(tmp_path / "broken")), media.bucket(), key)
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    status, _, duration, error_text = read_montage(conn, montage_id)
+    assert (status, error_text) == ("ready", None)
+    assert 10 <= duration <= 11, "the four that opened went in, the broken one was left out"
+
+
+def test_too_little_material_that_actually_opens_fails_without_retrying(conn, s3, memory, tmp_path):
+    """The floor is about material that can go in the video, not rows in the table: three rows of
+    which two are unreadable would otherwise have been assembled into one three-second still."""
+    montage_id = order(conn, memory, {})
+    _, key = add_item(conn, memory, "photo", status="ready")
+    s3.upload_file(str(photo(tmp_path / "good.jpg")), media.bucket(), key)
+    for index in range(montage.MIN_ITEMS - 1):
+        _, key = add_item(conn, memory, "photo", status="ready")
+        s3.upload_file(str(unopenable(tmp_path / f"broken-{index}")), media.bucket(), key)
+    job_id = worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    assert conn.execute("SELECT status FROM jobs WHERE id = %s", (job_id,)).fetchone()[0] == "done"
+    status, _, _, error_text = read_montage(conn, montage_id)
+    assert status == "failed"
+    assert "не годится" in error_text
+
+
+def test_a_clip_is_laid_into_the_chain_at_the_length_it_really_is(conn, s3, memory, tmp_path):
+    """The crossfade offsets step along by each clip's length. Booking a clip in at the length it
+    was *asked* for, when its picture is shorter than its container says, walks the rest of the
+    chain off the end — and ffmpeg truncates the montage without a word of complaint."""
+    montage_id = order(conn, memory, {"target_seconds": 30})
+    # Oldest, so the chronological order puts it first and the drift hits every join after it.
+    _, key = add_item(conn, memory, "video", status="ready", age_hours=5)
+    s3.upload_file(str(lopsided(tmp_path / "lopsided.mp4")), media.bucket(), key)
+    for index in range(3):
+        _, key = add_item(conn, memory, "photo", status="ready")
+        s3.upload_file(str(photo(tmp_path / f"photo-{index}.jpg")), media.bucket(), key)
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    status, video_key, duration, _ = read_montage(conn, montage_id)
+    assert status == "ready"
+    # Two seconds of picture and three stills of three, less half a second for each of three
+    # joins: 9.5. Booked at the container's 3.5 instead, the file comes out visibly shorter.
+    assert 9.3 <= duration <= 9.7, "the clip went in at its real two seconds"
+    assert 9.3 <= float(probe(fetch(s3, video_key, tmp_path / "m.mp4"))["format"]["duration"]) <= 9.7
 
 
 def test_too_little_material_fails_the_montage_instead_of_retrying(conn, memory):
