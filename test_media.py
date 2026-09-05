@@ -210,9 +210,24 @@ def test_a_playlist_dressed_up_as_a_photo_is_refused(conn, s3, memory, tmp_path)
     assert worker.run_once(conn) is True
 
     # Refused, not previewed: the job carries the reason and the item never went `ready`.
+    # Whose reason it is depends on the ffmpeg: `_refuse_playlists` on one that opens a playlist
+    # whatever it is called, ffprobe's own on 4.3 and up, which will not touch an m3u8 that is not
+    # named like one — and an upload is always the extension-less `original`. Either way nothing is
+    # encoded, so the assertion is on the refusal and the test below on the half that is ours.
     job = conn.execute(
         "SELECT status, last_error FROM jobs WHERE type = 'media_preview' AND ref = %s", (item_id,)
     ).fetchone()
     assert job[0] == "queued", "the first refusal is a retry like any other failure"
-    assert "playlist" in job[1]
+    assert job[1], "and it says what went wrong"
     assert read_item(conn, item_id)[0] == "processing"
+
+
+def test_the_guard_refuses_what_ffmpeg_calls_a_playlist(tmp_path):
+    """The refusal that is ours rather than ffmpeg's, on the one playlist a current ffmpeg still
+    opens unprompted: a concat list naming media beside it."""
+    video(tmp_path / "local.mp4")
+    playlist = tmp_path / "original"
+    playlist.write_text("ffconcat version 1.0\nfile local.mp4\nduration 1\n")
+
+    with pytest.raises(RuntimeError, match="playlist"):
+        media._refuse_playlists(playlist)
