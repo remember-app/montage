@@ -79,6 +79,51 @@ def test_the_first_piece_is_taken_however_long_it_is():
     assert montage.choose([at(0, 10, dated=False)], target_seconds=1) == [at(0, 10, dated=False)]
 
 
+# --- judging a frame ---------------------------------------------------------
+# `choose`'s own tests hand it a sharpness directly and never touch the arithmetic that produces
+# one. These do: tiny grey frames built by hand, the same size ffmpeg hands `_sharpness`/`_exposed`
+# for real, no ffmpeg needed to check the pure-Python maths itself is right.
+
+FRAME_SIZE = montage.SAMPLE_WIDTH * montage.SAMPLE_HEIGHT
+
+
+def grey(*values):
+    """`FRAME_SIZE` grey bytes, `values` repeated to fill it — one value is a flat frame, two
+    alternated is a checkerboard."""
+    return bytes(values[i % len(values)] for i in range(FRAME_SIZE))
+
+
+def test_a_flat_frame_has_no_sharpness():
+    """No edges anywhere: the Laplacian is zero at every pixel, so its variance is too — this is
+    what a smeared, out-of-focus frame looks like to `_sharpness`."""
+    assert montage._sharpness(grey(128)) == 0.0
+
+
+def test_a_checkerboard_is_sharp():
+    """Every neighbouring pixel is as different as it gets — the opposite end of the scale from a
+    flat frame, and well past `MIN_SHARPNESS`."""
+    assert montage._sharpness(grey(0, 255)) > montage.MIN_SHARPNESS
+
+
+def test_a_mid_grey_varied_frame_is_exposed():
+    assert montage._exposed(grey(100, 150)) is True
+
+
+def test_a_flat_dark_frame_is_not_exposed():
+    assert montage._exposed(grey(5)) is False
+
+
+def test_a_flat_bright_frame_is_not_exposed():
+    assert montage._exposed(grey(250)) is False
+
+
+def test_a_frame_split_between_black_and_blown_is_not_exposed():
+    """Mean brightness alone would wave this one through — half black, half blown averages to a mid
+    grey. The clipped-pixel count is what catches a frame that is really crushed shadow next to
+    blown highlight and nothing usable in between."""
+    assert montage._exposed(grey(0, 255)) is False
+
+
 # --- the whole thing --------------------------------------------------------
 
 
@@ -142,6 +187,18 @@ def unopenable(path):
     return path
 
 
+def crushed(path):
+    """A photo with the same edges `photo()` has — sharp, easily past `MIN_SHARPNESS` — pushed
+    almost to black. ffmpeg opens it without complaint, unlike `unopenable`; only the exposure
+    check has anything to say about it, which is the point: a flat black frame would be rejected on
+    blur alone and prove nothing about the histogram half of `_best_moment`."""
+    ffmpeg(
+        "-f", "lavfi", "-i", "testsrc=size=640x480:duration=1", "-vf", "eq=brightness=-0.85",
+        "-frames:v", "1", str(path),
+    )
+    return path
+
+
 def lopsided(path):
     """Two seconds of picture under three and a half of sound, so the container calls it 3.5 —
     `format=duration` is the longest stream, and `-t` cuts against the picture."""
@@ -170,6 +227,25 @@ def test_a_file_that_will_not_open_is_left_out_rather_than_failing_the_video(
     status, _, duration, error_text = read_montage(conn, montage_id)
     assert (status, error_text) == ("ready", None)
     assert 10 <= duration <= 11, "the four that opened went in, the broken one was left out"
+
+
+def test_a_badly_exposed_photo_is_left_out_rather_than_failing_the_video(
+    conn, s3, memory, tmp_path
+):
+    """A different code path from a file ffmpeg refuses to open: this one decodes fine and
+    `_best_moment` itself returns none because the one frame in it fails exposure. The unit tests
+    on `choose` never exercise this — they score every piece by hand."""
+    montage_id = order(conn, memory, {"target_seconds": 30})
+    material(conn, s3, memory, tmp_path)
+    _, key = add_item(conn, memory, "photo", status="ready")
+    s3.upload_file(str(crushed(tmp_path / "crushed.jpg")), media.bucket(), key)
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    status, _, duration, error_text = read_montage(conn, montage_id)
+    assert (status, error_text) == ("ready", None)
+    assert 10 <= duration <= 11, "the crushed photo had no usable frame and was left out uncounted"
 
 
 def test_too_little_material_that_actually_opens_fails_without_retrying(conn, s3, memory, tmp_path):
@@ -257,7 +333,9 @@ def test_a_montage_that_keeps_failing_fails_the_row(conn, memory):
     # And the montage with it, so the organizer gets «повторить» and the reason it fell over.
     status, _, _, error_text = read_montage(conn, montage_id)
     assert status == "failed"
-    assert error_text, "the last error is what the organizer is shown"
+    # A fixed, human sentence — never the exception's own text. `error_text` goes out to every
+    # member of the memory, and the exception here is a botocore message naming the bucket host.
+    assert error_text == "не удалось собрать ролик"
 
 
 @pytest.mark.parametrize("track_id", sorted(montage.TRACKS))
