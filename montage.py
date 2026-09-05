@@ -6,9 +6,12 @@ the memory's ready originals are pulled out of R2, looked at frame by frame, the
 cut and crossfaded into one 1080p file with a track over it, and the row is left `ready` with the
 key on it — then the api is knocked on so the phones get told.
 
-The steps are architecture.md, «Montage-пайплайн», in its order. `montages` and `media_items` belong
-to the api's migrations; this module only reads and writes rows by id. ffmpeg is called through
-`media.py`'s helpers — one worker, one way of running the tool.
+The steps are architecture.md, «Montage-пайплайн», with one departure: selection (its step 4) runs
+before normalisation (its step 3), so only the pieces that made the cut are ever encoded to 1080p
+instead of every file the memory holds. `montages` and `media_items` belong to the api's migrations;
+this module only reads and writes rows by id. Encoding goes through `media.py`'s helpers — one
+worker, one way of running the tool; only `_grey_frames` runs ffmpeg itself, because it needs raw
+pixels back on stdout.
 """
 
 import collections
@@ -55,7 +58,9 @@ CLIPPED_LIMIT = 0.5  # and so is one whose histogram is mostly at either end
 
 # The tracks, drawn by ffmpeg itself out of nothing (`aevalsrc`): three sine tones a chord apart
 # under a slow swell. Not a licence, not a file in the repository, not an account to buy them from —
-# a placeholder that plays. Real music is a question for the human, not a thing to pick here.
+# a placeholder that plays.
+# ponytail: synthesized tones stand in for music. Three real royalty-free tracks replace this dict
+# and nothing else, once the human has settled where they come from and under what licence.
 _SWELL = "(0.75+0.25*sin(2*PI*0.15*t))"
 TRACKS = {
     "warm": f"{_SWELL}*(0.25*sin(2*PI*220*t)+0.18*sin(2*PI*277.18*t)+0.12*sin(2*PI*329.63*t))",
@@ -79,15 +84,16 @@ def _grey_frames(path, per_second=None):
     is decoded twice and no image library is needed to ask how sharp a frame is.
     """
     sampling = f"fps={per_second}," if per_second else ""
-    args = [
-        "-i", str(path),
-        "-vf", f"{sampling}scale={SAMPLE_WIDTH}:{SAMPLE_HEIGHT},format=gray",
-        "-f", "rawvideo", "-pix_fmt", "gray", "-",
-    ]
-    if not per_second:
-        args[2:2] = ["-frames:v", "1"]
+    framing = () if per_second else ("-frames:v", "1")  # a photo has the one frame to look at
+    # Run rather than `media._ffmpeg`: this is the only call whose *output* is the point, and it
+    # comes back as raw pixels on stdout, which `media._run`'s `text=True` would mangle.
     done = subprocess.run(
-        ("ffmpeg", "-nostdin", "-loglevel", "error", "-protocol_whitelist", "file", *args),
+        (
+            "ffmpeg", "-nostdin", "-loglevel", "error", "-protocol_whitelist", "file",
+            "-i", str(path), *framing,
+            "-vf", f"{sampling}scale={SAMPLE_WIDTH}:{SAMPLE_HEIGHT},format=gray",
+            "-f", "rawvideo", "-pix_fmt", "gray", "-",
+        ),
         capture_output=True,
     )
     if done.returncode != 0:
@@ -144,14 +150,16 @@ def _best_moment(path, kind):
 @dataclasses.dataclass
 class Piece:
     """One cut of one file, ready to be laid into the montage. Every field has a default so a test
-    can name only the two the choosing actually reads."""
+    can name only the ones the choosing actually reads."""
 
     sharpness: float = 0.0
     seconds: float = PHOTO_SECONDS
     when: datetime.datetime = datetime.datetime.min  # chronological place in the finished video
     captured_at: datetime.datetime | None = None  # None → this file takes no part in the dedup
     kind: str = "photo"
-    key: str = ""
+    # On disk in the workdir, not in R2 — every other `…_key` in this worker is a bucket key, and
+    # this one is what ffmpeg is pointed at: first the downloaded original, then the cut of it.
+    path: pathlib.Path = pathlib.Path()
     start: float = 0.0  # where in the original the cut begins
 
 
@@ -200,16 +208,16 @@ def choose(pieces, target_seconds):
 # --- cutting and assembling --------------------------------------------------
 
 
-def _normalise(source, piece, out):
+def _normalise(piece, out):
     """One piece onto the common canvas: 1080p, 30 fps, padded, and silent.
 
     Silent because the finished video's only sound is the track (architecture.md: «звук исходных
     клипов по умолчанию убираем»), which also makes every clip's audio identical by having none.
     """
     if piece.kind == "photo":
-        opened = ("-loop", "1", "-t", f"{piece.seconds}", "-i", str(source))
+        opened = ("-loop", "1", "-t", f"{piece.seconds}", "-i", str(piece.path))
     else:
-        opened = ("-ss", f"{piece.start}", "-t", f"{piece.seconds}", "-i", str(source))
+        opened = ("-ss", f"{piece.start}", "-t", f"{piece.seconds}", "-i", str(piece.path))
     media._ffmpeg(
         *opened, "-vf", CANVAS, "-an",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", str(out),
@@ -237,9 +245,18 @@ def _assemble(clips, track_id, out):
         f"afade=t=out:st={total - fade:.3f}:d={fade:.3f}[a]"
     )
 
-    inputs = [argument for clip in clips for argument in ("-i", str(clip.key))]
+    # `-protocol_whitelist` is an *input* option: ffmpeg scopes it to the group it precedes, so the
+    # one `media._ffmpeg` puts at the front guards input 0 and nothing else. This is the worker's
+    # only multi-input call, so it is the only place that has to repeat it — every clip and the
+    # generated track get their own, and the whitelist means the same thing on all of them.
+    inputs = [
+        argument
+        for clip in clips
+        for argument in ("-protocol_whitelist", "file", "-i", str(clip.path))
+    ]
     media._ffmpeg(
-        *inputs, "-f", "lavfi", "-i", f"aevalsrc={TRACKS[track_id]}:d={total:.3f}",
+        *inputs, "-protocol_whitelist", "file",
+        "-f", "lavfi", "-i", f"aevalsrc={TRACKS[track_id]}:d={total:.3f}",
         "-filter_complex", ";".join(chain),
         # A single clip is never crossfaded, so there is no filter output to map — the input itself
         # is the video, and it is named the way ffmpeg names inputs rather than filter outputs.
@@ -292,36 +309,59 @@ def montage(conn, ref):
         pieces = []
         for index, (kind, original_key, captured_at, created_at) in enumerate(items):
             original = workdir / f"original-{index}"
+            # A download that fails is left fatal on purpose: the bytes may well arrive next time,
+            # and swallowing an unreachable bucket would quietly cut a video out of half a memory.
             s3.download_file(media.bucket(), original_key, str(original))
-            # Before ffmpeg is pointed at it: these bytes came off somebody's phone, and a playlist
-            # dressed up as a photo would have ffmpeg go and read this worker's own disk.
-            media._refuse_playlists(original)
-            best = _best_moment(original, kind)
+            try:
+                # Before ffmpeg is pointed at it: these bytes came off somebody's phone, and a
+                # playlist dressed up as a photo would have ffmpeg go and read this worker's own
+                # disk.
+                media._refuse_playlists(original)
+                best = _best_moment(original, kind)
+                duration = media._duration(original) if kind == "video" else None
+            except RuntimeError as exc:
+                # Bytes we do have and cannot use — a refused playlist, a file ffmpeg will not
+                # decode. Fetching them again would fail identically, so one bad file costs the
+                # memory that file and not its whole video: anyone who can upload could otherwise
+                # deny the organizer a montage for good, and «повторить» would meet the same file.
+                log.info("cannot read %s, leaving it out: %s", original_key, exc)
+                continue
             if best is None:
                 log.info("nothing usable in %s, leaving it out", original_key)
                 continue
             second, sharpness = best
             seconds, start = PHOTO_SECONDS, 0.0
             if kind == "video":
-                duration = media._duration(original) or CLIP_SECONDS
+                duration = duration or CLIP_SECONDS
                 seconds = min(CLIP_SECONDS, duration)
                 # Centred on the best moment, then pulled back inside the file at both ends.
                 start = min(max(second - seconds / 2, 0.0), max(duration - seconds, 0.0))
             pieces.append(Piece(
                 sharpness=sharpness, seconds=seconds, when=captured_at or created_at,
-                captured_at=captured_at, kind=kind, key=str(original), start=start,
+                captured_at=captured_at, kind=kind, path=original, start=start,
             ))
 
-        if not pieces:
+        # The floor again, now against what survived. The count above was of rows; files drop out
+        # here for being unreadable or having no usable frame in them, and three rows that come to
+        # one still would otherwise be assembled into a three-second «ролик» against a sixty-second
+        # order — the very thing the floor is there to refuse.
+        if len(pieces) < MIN_ITEMS:
             return _give_up_for_good(
-                conn, ref, "материал не годится для ролика: кадры размыты или засвечены"
+                conn, ref, "материал не годится для ролика: файлы не читаются или кадры испорчены"
             )
 
         clips = []
         for index, piece in enumerate(choose(pieces, target_seconds)):
             clip = workdir / f"clip-{index}.mp4"
-            _normalise(piece.key, piece, clip)
-            clips.append(dataclasses.replace(piece, key=clip))
+            _normalise(piece, clip)
+            # Measured, not the length that was asked for. `-t` cuts against the *video* stream
+            # while `_duration` reads the container, which is the longest stream in it — a clip
+            # whose audio outruns its picture normalises shorter than declared. `_assemble` steps
+            # the crossfade offsets along by these numbers, so a stale one walks the whole chain
+            # off the end and ffmpeg truncates the montage without a word of complaint.
+            clips.append(dataclasses.replace(
+                piece, path=clip, seconds=media._duration(clip) or piece.seconds
+            ))
         assembled = workdir / "montage.mp4"
         _assemble(clips, track_id, assembled)
         duration = media._duration(assembled)
@@ -347,7 +387,11 @@ def montage(conn, ref):
 
 def give_up(conn, ref, error_text):
     """Out of retries. The montage is failed too, so the organizer stops waiting on it and gets
-    «повторить» under it (architecture.md, «Обработка ошибок»)."""
+    «повторить» under it (architecture.md, «Обработка ошибок»).
+
+    `error_text` is shown to people — the api hands the whole row to every member of the memory —
+    so it is a sentence about the video, never an exception's text.
+    """
     conn.execute(
         "UPDATE montages SET status = 'failed', error_text = %s, updated_at = now() WHERE id = %s",
         (error_text, ref),
