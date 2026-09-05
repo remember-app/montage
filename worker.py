@@ -16,6 +16,7 @@ import time
 import psycopg
 
 import media
+import montage as montages  # the module and its handler share the job's name; the import cannot
 
 MAX_ATTEMPTS = 3
 BACKOFF_SECONDS = 30  # attempt n is retried after BACKOFF_SECONDS * 2 ** (n - 1)
@@ -44,7 +45,7 @@ def enqueue(conn, type_, ref=None):
 
 
 # --- handlers ---------------------------------------------------------------
-# Every handler takes the worker's connection and the job's `ref`. `montage` arrives with m-2.
+# Every handler takes the worker's connection and the job's `ref`.
 
 
 def dummy(conn, ref):
@@ -54,7 +55,11 @@ def dummy(conn, ref):
     log.info("dummy job did nothing, successfully")
 
 
-HANDLERS = {"dummy": dummy, "media_preview": media.media_preview}
+HANDLERS = {
+    "dummy": dummy,
+    "media_preview": media.media_preview,
+    "montage": montages.montage,
+}
 
 
 # --- the loop ---------------------------------------------------------------
@@ -108,6 +113,10 @@ def run_once(conn):
             # The job is done retrying, and the item it was about has to say so too — the gallery
             # would otherwise wait on `processing` forever.
             media.give_up(conn, ref)
+        elif status == "failed" and type_ == "montage":
+            # Same for the video that was ordered: the organizer's «повторить» has to appear, and
+            # it only appears under a montage that says it failed and why.
+            montages.give_up(conn, ref, str(exc))
     else:
         conn.execute(
             "UPDATE jobs SET status = 'done', updated_at = now() WHERE id = %s", (job_id,)
