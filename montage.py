@@ -3,8 +3,8 @@
 The organizer orders a video, the api writes a `montages` row and queues `('montage', <id>)`; from
 `processing` onward the row is this worker's (see the api's migration `020.do.montages.sql`). Here
 the memory's ready originals are pulled out of R2, looked at frame by frame, the good moments are
-cut and crossfaded into one 1080p file with a track over it, and the row is left `ready` with the
-key on it — then the api is knocked on so the phones get told.
+cut and crossfaded into one 1080p file with a track over it, and the row is left `ready` with its
+keys on it — the video's and the cover's — then the api is knocked on so the phones get told.
 
 The steps are architecture.md, «Montage-пайплайн», with one departure: selection (its step 4) runs
 before normalisation (its step 3), so only the pieces that made the cut are ever encoded to 1080p
@@ -167,6 +167,9 @@ class Piece:
     # this one is what ffmpeg is pointed at: first the downloaded original, then the cut of it.
     path: pathlib.Path = pathlib.Path()
     start: float = 0.0  # where in the original the cut begins
+    # The moment `_best_moment` scored, in the original's own timeline — not where the cut begins.
+    # Kept because the cover is taken from it: `start` is that moment pulled back by half a clip.
+    best_second: float = 0.0
 
 
 def _dedup(pieces):
@@ -345,6 +348,7 @@ def montage(conn, ref):
             pieces.append(Piece(
                 sharpness=sharpness, seconds=seconds, when=captured_at or created_at,
                 captured_at=captured_at, kind=kind, path=original, start=start,
+                best_second=second,
             ))
 
         # The floor again, now against what survived. The count above was of rows; files drop out
@@ -373,12 +377,20 @@ def montage(conn, ref):
         duration = media._duration(assembled)
         media._upload(s3, assembled, video_key, "video/mp4")
 
-        # The still the list of videos stands on, cut off the finished file exactly as a video's
-        # own poster is (`media.media_preview`). Its first frame needs no seeking to be worth
-        # showing: whatever opens the montage was chosen for being sharp and properly exposed.
+        # The still the list of videos stands on, cut off the finished file with the same scale a
+        # preview thumbnail gets (`media.media_preview`) — but not off frame zero. The montage opens
+        # where its first piece was cut, and for a video that is up to half a clip *before* the
+        # moment `_best_moment` actually scored: `start` centres the cut on that moment and then
+        # clamps it back inside the file. A phone clip that opens black would hand the montage its
+        # black, which is the one thing a cover may not be. The scored moment's own place in the
+        # assembled file is its offset inside the opening clip, held clear of the dissolve into the
+        # next one so the cover is one picture rather than two half-faded ones.
+        opening = clips[0]
+        at = min(max(opening.best_second - opening.start, 0.0),
+                 max(opening.seconds - CROSSFADE_SECONDS, 0.0))
         poster_key, poster = f"montages/{ref}.jpg", workdir / "poster.jpg"
         try:
-            media._ffmpeg("-i", str(assembled), "-frames:v", "1",
+            media._ffmpeg("-ss", f"{at:.3f}", "-i", str(assembled), "-frames:v", "1",
                           "-vf", media.THUMBNAIL_SCALE, str(poster))
             media._upload(s3, poster, poster_key, "image/jpeg")
         except Exception as exc:

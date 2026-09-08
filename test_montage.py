@@ -224,8 +224,13 @@ def test_a_memory_of_photos_and_a_clip_becomes_one_playable_video(conn, s3, memo
     # rectangle, before anyone presses play.
     poster_key = poster_of(conn, montage_id)
     assert poster_key == f"montages/{montage_id}.jpg"
-    poster = probe(fetch(s3, poster_key, tmp_path / "poster.jpg"))["streams"][0]
+    poster_file = fetch(s3, poster_key, tmp_path / "poster.jpg")
+    poster = probe(poster_file)["streams"][0]
     assert (poster["codec_name"], poster["width"]) == ("mjpeg", media.THUMBNAIL_WIDTH)
+    # Not just a jpeg of the right size — a frame worth showing. The same judgement the worker
+    # applies to source material, turned on its own cover: an all-black or blown-out still fails
+    # it, which is exactly what a poster cut from frame zero of a clip that opens dark would be.
+    assert montage._exposed(montage._grey_frames(poster_file)[0])
 
 
 def unopenable(path):
