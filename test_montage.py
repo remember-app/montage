@@ -179,6 +179,14 @@ def read_montage(conn, montage_id):
     ).fetchone()
 
 
+def poster_of(conn, montage_id):
+    """The montage's cover key, `None` until a video has actually been assembled. Read on its own
+    rather than added to `read_montage`: only the two tests below have anything to say about it."""
+    return conn.execute(
+        "SELECT poster_key FROM montages WHERE id = %s", (montage_id,)
+    ).fetchone()[0]
+
+
 def material(conn, s3, memory, tmp_path):
     """Three photographs and a clip in the bucket, `ready`, as the previews leave them."""
     for index in range(3):
@@ -211,6 +219,13 @@ def test_a_memory_of_photos_and_a_clip_becomes_one_playable_video(conn, s3, memo
     assert (tracks["video"]["width"], tracks["video"]["height"]) == (
         montage.CANVAS_WIDTH, montage.CANVAS_HEIGHT
     ), "everything is padded onto the one canvas, whichever way it was shot"
+
+    # And the cover beside it, on the same row — the list of videos shows a still, not a black
+    # rectangle, before anyone presses play.
+    poster_key = poster_of(conn, montage_id)
+    assert poster_key == f"montages/{montage_id}.jpg"
+    poster = probe(fetch(s3, poster_key, tmp_path / "poster.jpg"))["streams"][0]
+    assert (poster["codec_name"], poster["width"]) == ("mjpeg", media.THUMBNAIL_WIDTH)
 
 
 def unopenable(path):
@@ -337,6 +352,9 @@ def test_too_little_material_fails_the_montage_instead_of_retrying(conn, memory)
     status, _, _, error_text = read_montage(conn, montage_id)
     assert status == "failed"
     assert "материал" in error_text
+    # No video was assembled, so there is no frame to stand for one: the api serves `poster_url`
+    # null and the organizer sees «повторить» rather than a cover for a video that does not exist.
+    assert poster_of(conn, montage_id) is None
 
 
 def test_a_track_nobody_has_fails_the_montage_instead_of_retrying(conn, memory):

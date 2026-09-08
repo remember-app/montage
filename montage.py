@@ -373,19 +373,37 @@ def montage(conn, ref):
         duration = media._duration(assembled)
         media._upload(s3, assembled, video_key, "video/mp4")
 
+        # The still the list of videos stands on, cut off the finished file exactly as a video's
+        # own poster is (`media.media_preview`). Its first frame needs no seeking to be worth
+        # showing: whatever opens the montage was chosen for being sharp and properly exposed.
+        poster_key, poster = f"montages/{ref}.jpg", workdir / "poster.jpg"
+        try:
+            media._ffmpeg("-i", str(assembled), "-frames:v", "1",
+                          "-vf", media.THUMBNAIL_SCALE, str(poster))
+            media._upload(s3, poster, poster_key, "image/jpeg")
+        except Exception as exc:
+            # A video that took minutes to assemble is not thrown away over its cover, and retrying
+            # would rebuild the whole thing for one frame. The row stays `ready` with no poster key,
+            # which the api already serves as `poster_url: null` — the same as every montage made
+            # before posters existed.
+            log.warning("montage %s has no poster, leaving it without one: %s", ref, exc)
+            poster_key = None
+
     landed = conn.execute(
         """UPDATE montages
-           SET status = 'ready', video_key = %s, duration_seconds = %s, error_text = null,
-               updated_at = now()
+           SET status = 'ready', video_key = %s, poster_key = %s, duration_seconds = %s,
+               error_text = null, updated_at = now()
            WHERE id = %s
            RETURNING id""",
-        (video_key, duration, ref),
+        (video_key, poster_key, duration, ref),
     ).fetchone()
     if landed is None:
         # The memory went away mid-assembly and took the row with it. Nothing else will ever name
-        # this key, so it is taken back out — same as a preview that outlives its item.
+        # these keys, so they are taken back out — same as a preview that outlives its item.
         log.info("montage %s went away mid-assembly, taking its video back", ref)
-        s3.delete_object(Bucket=media.bucket(), Key=video_key)
+        for key in (video_key, poster_key):
+            if key:
+                s3.delete_object(Bucket=media.bucket(), Key=key)
         return
     log.info("montage %s is ready: %s clips, %.1fs", ref, len(clips), duration or 0)
     _tell_the_api(ref)
