@@ -238,7 +238,9 @@ def test_a_montage_ordered_portrait_is_assembled_the_other_way_up(conn, s3, memo
     same everything else — padded into 1080×1920 instead of 1920×1080. The numbers are written out
     here rather than read off `montage.CANVASES`, which is the thing under test."""
     montage_id = order(conn, memory, {"target_seconds": 30, "orientation": "portrait"})
-    material(conn, s3, memory, tmp_path)  # all of it shot landscape: every piece gets padded
+    # Stills 1200×800 and a clip 1280×1440 — material shot both ways round, and the portrait canvas
+    # pads every piece of it rather than cropping any.
+    material(conn, s3, memory, tmp_path)
     worker.enqueue(conn, "montage", montage_id)
 
     assert worker.run_once(conn) is True
@@ -248,8 +250,16 @@ def test_a_montage_ordered_portrait_is_assembled_the_other_way_up(conn, s3, memo
     assert 10 <= duration <= 11, "turning the canvas does not change what goes in it"
 
     assembled = probe(fetch(s3, video_key, tmp_path / "portrait.mp4"))
-    picture = next(s for s in assembled["streams"] if s["codec_type"] == "video")
-    assert (picture["width"], picture["height"]) == (1080, 1920)
+    tracks = {stream["codec_type"]: stream for stream in assembled["streams"]}
+    assert (tracks["video"]["width"], tracks["video"]["height"]) == (1080, 1920)
+
+    # The cover too: it is cut from the assembled file at the thumbnail width and keeps that file's
+    # own shape, so a vertical montage gets a vertical cover with nobody deciding it should. The one
+    # output whose orientation is a consequence rather than a choice, so it is the one that could
+    # quietly go back to 16:9 while everything above stayed green.
+    poster = probe(fetch(s3, poster_of(conn, montage_id), tmp_path / "poster.jpg"))["streams"][0]
+    assert poster["width"] == media.THUMBNAIL_WIDTH
+    assert poster["height"] > poster["width"], "the cover stands the same way up as the video"
 
 
 def test_an_orientation_nobody_has_fails_the_montage_instead_of_retrying(conn, memory):
