@@ -22,6 +22,7 @@ MAX_ATTEMPTS = 3
 BACKOFF_SECONDS = 30  # attempt n is retried after BACKOFF_SECONDS * 2 ** (n - 1)
 IDLE_POLL_SECONDS = 30  # fallback only: a queued job normally wakes the worker by NOTIFY
 SWEEP_INTERVAL_SECONDS = 3600  # «раз в час» (architecture.md, «Обработка ошибок»)
+CATCH_UP_AFTER_HOURS = 24  # how long a catch-up that failed is left alone before it is tried again
 SCHEMA = pathlib.Path(__file__).with_name("schema.sql")
 
 log = logging.getLogger("montage")
@@ -74,7 +75,12 @@ def sweep_photos_without_previews(conn):
     original is still in the bucket, so this costs the member nothing — no re-upload, no prompt.
 
     A photo already `queued` or `running` is left alone, so an hourly sweep does not pile jobs on
-    one that is simply still working. Returns how many were queued.
+    one that is simply still working. Nor is one whose catch-up has just been given up on: three
+    attempts is the whole retry policy, and a sweep that queued a fresh job the next hour would make
+    it endless — a photo whose original is not in the bucket at all would be downloaded and encoded
+    three times an hour for as long as the worker runs. A day later it is tried once more, because
+    the thing that failed may as easily have been an hour of R2 being unreachable, and one such hour
+    must not cost every old photo its large copy for good. Returns how many were queued.
     """
     queued = conn.execute(
         """INSERT INTO jobs (type, ref)
@@ -83,7 +89,10 @@ def sweep_photos_without_previews(conn):
              AND NOT EXISTS (
                SELECT 1 FROM jobs job
                WHERE job.type = 'media_preview' AND job.ref = item.id::text
-                 AND job.status IN ('queued', 'running'))"""
+                 AND (job.status IN ('queued', 'running')
+                      OR (job.status = 'failed'
+                          AND job.updated_at > now() - make_interval(hours => %s))))""",
+        (CATCH_UP_AFTER_HOURS,),
     ).rowcount
     if queued:
         log.info("queued a large copy for %s photo(s) that had none", queued)

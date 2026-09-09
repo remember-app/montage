@@ -249,6 +249,35 @@ def test_the_sweep_does_not_double_a_photo_that_is_already_on_its_way(conn, memo
     assert only_jobs_for(conn, item_id) == 1, "the job on its way is left to finish"
 
 
+def test_the_sweep_does_not_go_on_asking_for_a_photo_it_has_given_up_on(conn, memory):
+    """The catch-up is given up on like anything else, and the next hour's sweep leaves it that way.
+
+    Three attempts is the whole retry policy of this queue. A sweep that queued a fresh job an hour
+    later would make it endless: a `ready` photo stays `ready` (`media.give_up`), so nothing about it
+    ever changes, and one whose original is missing from the bucket would be downloaded and encoded
+    three times an hour for as long as the worker runs.
+    """
+    # An original that never made it into the bucket: every attempt fails, and the third gives up.
+    item_id, _ = add_item(conn, memory, "photo", status="ready")
+    worker.sweep_photos_without_previews(conn)
+    assert only_jobs_for(conn, item_id) == 1
+    for _ in range(worker.MAX_ATTEMPTS):
+        conn.execute("UPDATE jobs SET run_after = now() WHERE ref = %s", (item_id,))
+        assert worker.run_once(conn) is True
+
+    worker.sweep_photos_without_previews(conn)
+    assert only_jobs_for(conn, item_id) == 1, "an hour later it is not asked for all over again"
+
+    # A day later it is, once: what failed may as easily have been an hour of R2 being unreachable,
+    # and one such hour must not cost every old photo its large copy for good.
+    conn.execute(
+        "UPDATE jobs SET updated_at = now() - make_interval(hours => %s) WHERE ref = %s",
+        (worker.CATCH_UP_AFTER_HOURS + 1, item_id),
+    )
+    worker.sweep_photos_without_previews(conn)
+    assert only_jobs_for(conn, item_id) == 2, "the day after, it is given one more go"
+
+
 def test_a_playlist_dressed_up_as_a_photo_is_refused(conn, s3, memory, tmp_path):
     """ffmpeg picks its demuxer by probing, and nothing before this worker looks inside an upload.
     A playlist naming local files would have ffmpeg read them into a preview the uploader can then
