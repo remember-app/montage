@@ -30,8 +30,8 @@ def probe(path):
     return json.loads(out)
 
 
-def photo(path):
-    ffmpeg("-f", "lavfi", "-i", "testsrc=size=1200x800:duration=1", "-frames:v", "1", str(path))
+def photo(path, size="1200x800"):
+    ffmpeg("-f", "lavfi", "-i", f"testsrc=size={size}:duration=1", "-frames:v", "1", str(path))
     return path
 
 
@@ -106,19 +106,28 @@ def fetch(s3, key, path):
     return path
 
 
-def test_a_photo_gets_a_thumbnail_and_goes_ready(conn, s3, memory, tmp_path):
+def test_a_photo_gets_a_thumbnail_and_a_2048px_copy(conn, s3, memory, tmp_path):
+    # Bigger than the cap on both sides, so the copy has to be scaled down to it.
     item_id, key = add_item(conn, memory, "photo")
-    s3.upload_file(str(photo(tmp_path / "original.jpg")), media.bucket(), key)
+    s3.upload_file(str(photo(tmp_path / "original.jpg", "3000x2000")), media.bucket(), key)
     worker.enqueue(conn, "media_preview", item_id)
 
     assert worker.run_once(conn) is True
 
     status, thumbnail_key, preview_key, _ = read_item(conn, item_id)
-    # A photo has nothing to preview beyond its thumbnail — the gallery opens the original.
-    assert (status, thumbnail_key, preview_key) == ("ready", f"thumbnails/{item_id}.jpg", None)
+    assert (status, thumbnail_key, preview_key) == (
+        "ready", f"thumbnails/{item_id}.jpg", f"previews/{item_id}.jpg"
+    )
     thumbnail = probe(fetch(s3, thumbnail_key, tmp_path / "thumbnail.jpg"))["streams"][0]
     assert thumbnail["width"] == media.THUMBNAIL_WIDTH
-    assert thumbnail["height"] == 426  # 1200×800 kept in proportion
+    assert thumbnail["height"] == 426  # 3000×2000 kept in proportion
+
+    # What full screen actually opens: real pixels, not a stretched grid thumbnail.
+    copy = probe(fetch(s3, preview_key, tmp_path / "preview.jpg"))["streams"][0]
+    assert copy["codec_name"] == "mjpeg"
+    # The long side is the cap exactly; the short one is 3000×2000 in proportion, give or take the
+    # pixel ffmpeg rounds it by to keep the size even (which way it rounds varies by version).
+    assert (copy["width"], copy["height"]) == (media.PREVIEW_LONG_SIDE, pytest.approx(1365, abs=2))
 
 
 def test_a_video_gets_a_poster_and_a_720p_preview(conn, s3, memory, tmp_path):
@@ -144,9 +153,13 @@ def test_a_video_gets_a_poster_and_a_720p_preview(conn, s3, memory, tmp_path):
     assert tracks["video"]["width"] == 640  # 1280×1440 kept in proportion
 
 
-def test_a_preview_that_keeps_failing_fails_the_item(conn, memory):
+@pytest.mark.parametrize("started_as, ends_as", [("processing", "failed"), ("ready", "ready")])
+def test_a_preview_that_keeps_failing_fails_the_item(conn, memory, started_as, ends_as):
+    """Except when the item is already in the gallery: the catch-up sweep re-runs this job on photos
+    that have been `ready` for weeks, and one derivative it could not make must not take a picture
+    that works away from everybody."""
     # A row whose original never made it into the bucket: the download fails every time.
-    item_id, _ = add_item(conn, memory, "photo")
+    item_id, _ = add_item(conn, memory, "photo", status=started_as)
     job_id = worker.enqueue(conn, "media_preview", item_id)
 
     for _ in range(worker.MAX_ATTEMPTS):
@@ -155,7 +168,7 @@ def test_a_preview_that_keeps_failing_fails_the_item(conn, memory):
 
     assert conn.execute("SELECT status FROM jobs WHERE id = %s", (job_id,)).fetchone()[0] == "failed"
     # And the item with it, so the gallery shows a placeholder instead of a spinner.
-    assert read_item(conn, item_id)[0] == "failed"
+    assert read_item(conn, item_id)[0] == ends_as
 
 
 def test_the_sweep_takes_an_abandoned_upload_with_its_multipart(conn, s3, memory):
@@ -193,6 +206,47 @@ def test_the_sweep_leaves_an_upload_that_finished_while_it_ran(conn, memory, mon
 
     assert media.sweep_stale_uploads(conn) == 0
     assert read_item(conn, item_id)[0] == "processing", "the finished upload survives the sweep"
+
+
+def only_jobs_for(conn, item_id):
+    """Whatever else this database holds is not this test's business — the sweep is over the whole
+    table, and a dev stand's own photos would otherwise be queued into the run."""
+    conn.execute("DELETE FROM jobs WHERE ref IS DISTINCT FROM %s", (item_id,))
+    return conn.execute(
+        "SELECT count(*) FROM jobs WHERE type = 'media_preview' AND ref = %s", (item_id,)
+    ).fetchone()[0]
+
+
+def test_the_sweep_catches_up_a_photo_that_has_no_large_copy(conn, s3, memory, tmp_path):
+    """A photo from before the worker made large copies: `ready`, thumbnail and all, `preview_key`
+    empty. Nobody uploads anything again — the original is in the bucket and the sweep finds it."""
+    item_id, key = add_item(conn, memory, "photo", status="ready")
+    conn.execute(
+        "UPDATE media_items SET thumbnail_key = %s WHERE id = %s",
+        (f"thumbnails/{item_id}.jpg", item_id),
+    )
+    s3.upload_file(str(photo(tmp_path / "original.jpg")), media.bucket(), key)
+
+    worker.sweep_photos_without_previews(conn)
+    assert only_jobs_for(conn, item_id) == 1
+    assert worker.run_once(conn) is True
+
+    preview_key = read_item(conn, item_id)[2]
+    assert preview_key == f"previews/{item_id}.jpg"
+    copy = probe(fetch(s3, preview_key, tmp_path / "preview.jpg"))["streams"][0]
+    # 1200×800 is under the cap: the copy is the original's own size, not blown up past it.
+    assert (copy["width"], copy["height"]) == (1200, 800)
+
+
+@pytest.mark.parametrize("already", ["queued", "running"])
+def test_the_sweep_does_not_double_a_photo_that_is_already_on_its_way(conn, memory, already):
+    item_id, _ = add_item(conn, memory, "photo", status="ready")
+    job_id = worker.enqueue(conn, "media_preview", item_id)
+    conn.execute("UPDATE jobs SET status = %s WHERE id = %s", (already, job_id))
+
+    worker.sweep_photos_without_previews(conn)
+
+    assert only_jobs_for(conn, item_id) == 1, "the job on its way is left to finish"
 
 
 def test_a_playlist_dressed_up_as_a_photo_is_refused(conn, s3, memory, tmp_path):

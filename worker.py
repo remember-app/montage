@@ -62,6 +62,37 @@ HANDLERS = {
 }
 
 
+# --- the sweeps -------------------------------------------------------------
+# Housekeeping the loop runs at start-up and then once an interval, beside `media`'s own sweep.
+
+
+def sweep_photos_without_previews(conn):
+    """Photos that are `ready` but carry no large copy, given the job that makes one.
+
+    Every photo taken in before the worker learned to make one is like this, and nothing else will
+    ever come for them: the api queues `media_preview` at upload and the upload is long over. The
+    original is still in the bucket, so this costs the member nothing — no re-upload, no prompt.
+
+    A photo already `queued` or `running` is left alone, so an hourly sweep does not pile jobs on
+    one that is simply still working. Returns how many were queued.
+    """
+    queued = conn.execute(
+        """INSERT INTO jobs (type, ref)
+           SELECT 'media_preview', item.id::text FROM media_items item
+           WHERE item.kind = 'photo' AND item.status = 'ready' AND item.preview_key IS NULL
+             AND NOT EXISTS (
+               SELECT 1 FROM jobs job
+               WHERE job.type = 'media_preview' AND job.ref = item.id::text
+                 AND job.status IN ('queued', 'running'))"""
+    ).rowcount
+    if queued:
+        log.info("queued a large copy for %s photo(s) that had none", queued)
+    return queued
+
+
+SWEEPS = (media.sweep_stale_uploads, sweep_photos_without_previews)
+
+
 # --- the loop ---------------------------------------------------------------
 
 
@@ -145,12 +176,14 @@ def run(conn):
     while True:
         if time.monotonic() >= next_sweep:
             next_sweep = time.monotonic() + SWEEP_INTERVAL_SECONDS
-            try:
-                media.sweep_stale_uploads(conn)
-            except Exception:
-                # Housekeeping rides along with the queue rather than in a process of its own, so a
-                # bucket that is unreachable must not take the queue down with it.
-                log.exception("the sweep of abandoned uploads failed, trying again in an hour")
+            for sweep in SWEEPS:
+                try:
+                    sweep(conn)
+                except Exception:
+                    # Housekeeping rides along with the queue rather than in a process of its own,
+                    # so a bucket that is unreachable must not take the queue down with it — nor
+                    # one sweep take the other with it.
+                    log.exception("%s failed, trying again in an hour", sweep.__name__)
         if not run_once(conn):
             wait_for_job(conn)
 
