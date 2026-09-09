@@ -2,8 +2,9 @@
 
 The api writes a `media_items` row, takes the bytes into R2 and queues the job; from `processing`
 onward the row is this worker's (see the api's migration `004.do.media.sql`). Here the original is
-pulled back out, `ffmpeg` makes what the gallery actually shows — a thumbnail for a photo, a poster
-and a light 720p copy for a video — and the row is left `ready` with the derivative keys on it.
+pulled back out, `ffmpeg` makes what the gallery actually shows — a thumbnail for the grid and, for
+both kinds, a lighter full-screen copy (2048px JPEG for a photo, 720p mp4 for a video) — and the row
+is left `ready` with the derivative keys on it.
 
 `media_items` belongs to the api's migrations. This module only reads and writes rows by id.
 """
@@ -30,12 +31,20 @@ STALE_UPLOAD_HOURS = 24  # a day in `pending_upload` means the phone is not comi
 PLAYLIST_FORMATS = {"hls", "applehttp", "concat", "ffconcat", "dash", "sdp", "rtsp", "rtp"}
 THUMBNAIL_WIDTH = 640  # the gallery grid
 PREVIEW_HEIGHT = 720  # «версия 720p H.264» (architecture.md)
+PREVIEW_LONG_SIDE = 2048  # a photo opened full screen on a phone, retina included
 
 # `min(…, iw)` rather than a flat width: a small original is left at its own size instead of being
 # blown up into a blurrier, heavier file than the thing it previews. `-2` keeps the aspect ratio and
 # rounds to an even number, which H.264 and yuv420p JPEG both insist on.
 THUMBNAIL_SCALE = f"scale='min({THUMBNAIL_WIDTH},iw)':-2"
 PREVIEW_SCALE = f"scale=-2:'min({PREVIEW_HEIGHT},ih)'"
+
+# A photo is landscape or portrait, so the cap is on the long side rather than on the width: a box
+# of the original's own size clipped to 2048, and `decrease` fits inside it without ever growing it.
+PHOTO_PREVIEW_SCALE = (
+    f"scale=w='min({PREVIEW_LONG_SIDE},iw)':h='min({PREVIEW_LONG_SIDE},ih)'"
+    ":force_original_aspect_ratio=decrease:force_divisible_by=2"
+)
 
 log = logging.getLogger("montage.media")
 
@@ -131,14 +140,13 @@ def media_preview(conn, ref):
     thumbnail_key, preview_key, duration = f"thumbnails/{ref}.jpg", None, None
     with tempfile.TemporaryDirectory() as workdir:
         workdir = pathlib.Path(workdir)
-        original, thumbnail, preview = (
-            workdir / "original", workdir / "thumbnail.jpg", workdir / "preview.mp4"
-        )
+        original, thumbnail = workdir / "original", workdir / "thumbnail.jpg"
         s3.download_file(bucket(), original_key, str(original))
         # Before ffmpeg is pointed at it for anything else: these bytes came off somebody's phone
         # and nothing between there and here has looked inside them.
         _refuse_playlists(original)
 
+        preview = workdir / ("preview.mp4" if kind == "video" else "preview.jpg")
         if kind == "video":
             duration = _duration(original)
             # A frame a little way in: the first one of a phone video is regularly black, and half
@@ -158,6 +166,13 @@ def media_preview(conn, ref):
             _upload(s3, preview, preview_key, "video/mp4")
         else:
             _ffmpeg("-i", str(original), "-frames:v", "1", "-vf", THUMBNAIL_SCALE, str(thumbnail))
+            # The full-screen copy. The original stays where it is — it is what the montage is cut
+            # from — but a phone must not have to pull forty megapixels down to look at one frame.
+            # `-q:v 3` because the whole point of this file is that it is sharp.
+            _ffmpeg("-i", str(original), "-frames:v", "1", "-vf", PHOTO_PREVIEW_SCALE,
+                    "-q:v", "3", str(preview))
+            preview_key = f"previews/{ref}.jpg"
+            _upload(s3, preview, preview_key, "image/jpeg")
 
         _upload(s3, thumbnail, thumbnail_key, "image/jpeg")
 
@@ -191,8 +206,17 @@ def _upload(s3, path, key, content_type):
 
 def give_up(conn, ref):
     """Out of retries. The item is failed too, so the gallery stops waiting on it and shows a
-    placeholder with «повторить» (architecture.md, «Обработка ошибок»)."""
-    conn.execute("UPDATE media_items SET status = 'failed', updated_at = now() WHERE id = %s", (ref,))
+    placeholder with «повторить» (architecture.md, «Обработка ошибок»).
+
+    Unless it is already `ready`: the catch-up sweep runs this job again on photos that have been in
+    the gallery for weeks, and failing to make one more derivative must not take a picture that
+    works out of it. Those keep the thumbnail they have and stay openable.
+    """
+    conn.execute(
+        "UPDATE media_items SET status = 'failed', updated_at = now() "
+        "WHERE id = %s AND status <> 'ready'",
+        (ref,),
+    )
 
 
 # --- the sweep --------------------------------------------------------------
