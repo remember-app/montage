@@ -216,9 +216,9 @@ def test_a_memory_of_photos_and_a_clip_becomes_one_playable_video(conn, s3, memo
     assert set(tracks) == {"video", "audio"}, "picture and music both landed"
     assert tracks["video"]["codec_name"] == "h264"
     assert tracks["audio"]["codec_name"] == "aac"
-    assert (tracks["video"]["width"], tracks["video"]["height"]) == (
-        montage.CANVAS_WIDTH, montage.CANVAS_HEIGHT
-    ), "everything is padded onto the one canvas, whichever way it was shot"
+    assert (tracks["video"]["width"], tracks["video"]["height"]) == (1920, 1080), (
+        "an order that says nothing about orientation is the horizontal canvas, as it always was"
+    )
 
     # And the cover beside it, on the same row — the list of videos shows a still, not a black
     # rectangle, before anyone presses play.
@@ -231,6 +231,39 @@ def test_a_memory_of_photos_and_a_clip_becomes_one_playable_video(conn, s3, memo
     # applies to source material, turned on its own cover: an all-black or blown-out still fails
     # it, which is exactly what a poster cut from frame zero of a clip that opens dark would be.
     assert montage._exposed(montage._grey_frames(poster_file)[0])
+
+
+def test_a_montage_ordered_portrait_is_assembled_the_other_way_up(conn, s3, memory, tmp_path):
+    """The organizer asked for a video to watch on a phone. The same material, the same length, the
+    same everything else — padded into 1080×1920 instead of 1920×1080. The numbers are written out
+    here rather than read off `montage.CANVASES`, which is the thing under test."""
+    montage_id = order(conn, memory, {"target_seconds": 30, "orientation": "portrait"})
+    material(conn, s3, memory, tmp_path)  # all of it shot landscape: every piece gets padded
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    status, video_key, duration, error_text = read_montage(conn, montage_id)
+    assert (status, error_text) == ("ready", None)
+    assert 10 <= duration <= 11, "turning the canvas does not change what goes in it"
+
+    assembled = probe(fetch(s3, video_key, tmp_path / "portrait.mp4"))
+    picture = next(s for s in assembled["streams"] if s["codec_type"] == "video")
+    assert (picture["width"], picture["height"]) == (1080, 1920)
+
+
+def test_an_orientation_nobody_has_fails_the_montage_instead_of_retrying(conn, memory):
+    """The api writes one of two words here and refuses the rest, so a third one is the contract
+    having moved on one side only — and it would be the same word on all three attempts."""
+    montage_id = order(conn, memory, {"orientation": "diagonal"})
+    job_id = worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    assert conn.execute("SELECT status FROM jobs WHERE id = %s", (job_id,)).fetchone()[0] == "done"
+    status, _, _, error_text = read_montage(conn, montage_id)
+    assert status == "failed"
+    assert "ориентация" in error_text
 
 
 def dark_opening_clip(path):
