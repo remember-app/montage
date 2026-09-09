@@ -217,7 +217,7 @@ def choose(pieces, target_seconds):
 # --- cutting and assembling --------------------------------------------------
 
 
-def _normalise(piece, out, orientation):
+def _normalise(piece, orientation, out):
     """One piece onto this montage's canvas: 1080p the way it was ordered, 30 fps, padded, silent.
 
     The canvas is built here rather than held as a constant because it belongs to the order and not
@@ -377,7 +377,7 @@ def montage(conn, ref):
         clips = []
         for index, piece in enumerate(choose(pieces, target_seconds)):
             clip = workdir / f"clip-{index}.mp4"
-            _normalise(piece, clip, orientation)
+            _normalise(piece, orientation, clip)
             # Measured, not the length that was asked for. `-t` cuts against the *video* stream
             # while `_duration` reads the container, which is the longest stream in it — a clip
             # whose audio outruns its picture normalises shorter than declared. `_assemble` steps
