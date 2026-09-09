@@ -233,6 +233,52 @@ def test_a_memory_of_photos_and_a_clip_becomes_one_playable_video(conn, s3, memo
     assert montage._exposed(montage._grey_frames(poster_file)[0])
 
 
+def dark_opening_clip(path):
+    """A clip that opens black for its first 1.5s, then three and a half seconds of a sharp,
+    properly exposed pattern — the shape of a real phone clip that takes a moment to find its
+    exposure. `_best_moment` finds its best frame only after the black stretch, but the piece is cut
+    *centred* on that moment and pulled back to fit the file, so the cut can still start inside the
+    black part. The happy-path fixture (`material`) always puts a photo first, so its montage never
+    opens on a video and this shape of bug never gets a chance to show up."""
+    ffmpeg(
+        "-f", "lavfi", "-i", "color=c=black:size=1280x720:rate=24:duration=1.5",
+        "-f", "lavfi", "-i", "testsrc=size=1280x720:rate=24:duration=3.5",
+        "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
+        "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]",
+        "-map", "[v]", "-map", "2:a",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(path),
+    )
+    return path
+
+
+def test_a_montage_that_opens_on_a_video_with_a_dark_start_gets_a_bright_cover(
+    conn, s3, memory, tmp_path
+):
+    """The regression the poster fix (ревью m-16) exists for: a phone clip that opens black. The
+    piece cut from it starts inside that black stretch (centred on the best moment, then pulled back
+    to the file), so a poster taken off frame zero of the assembled file — the pre-fix behaviour —
+    would be black. Made to open the montage (oldest item, sorted first) so this is actually the
+    first piece the cover is cut from, unlike the happy-path fixture where a photo always leads."""
+    montage_id = order(conn, memory, {"target_seconds": 30})
+    _, key = add_item(conn, memory, "video", status="ready", age_hours=5)  # oldest → opens the montage
+    s3.upload_file(str(dark_opening_clip(tmp_path / "dark.mp4")), media.bucket(), key)
+    for index in range(3):
+        _, key = add_item(conn, memory, "photo", status="ready")
+        s3.upload_file(str(photo(tmp_path / f"photo-{index}.jpg")), media.bucket(), key)
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    status, _, _, error_text = read_montage(conn, montage_id)
+    assert (status, error_text) == ("ready", None)
+
+    poster_key = poster_of(conn, montage_id)
+    poster_file = fetch(s3, poster_key, tmp_path / "poster.jpg")
+    assert montage._exposed(montage._grey_frames(poster_file)[0]), (
+        "the cover must be the opening clip's best moment, not the dark frame it was cut from"
+    )
+
+
 def unopenable(path):
     """Bytes in the bucket that ffmpeg will not open — a truncated upload, a file the phone
     mislabelled. Not a playlist: that is the security case and `test_media.py` has it."""
