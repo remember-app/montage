@@ -32,14 +32,14 @@ import media
 MIN_ITEMS = 3  # «Меньше 3 → сразу failed» — the api refuses the order at this number too
 DEFAULT_TARGET_SECONDS = 60.0  # what the api fills `params.target_seconds` with when nobody says
 
-# The common canvas everything is normalised onto. 1920×1080 rather than the phone's own 1080×1920:
-# the finished video leaves the app through «поделиться» and 16:9 is what plays everywhere. Vertical
-# material is padded into it, horizontal fits as it is.
-CANVAS_WIDTH, CANVAS_HEIGHT, FPS = 1920, 1080, 30
-CANVAS = (
-    f"scale={CANVAS_WIDTH}:{CANVAS_HEIGHT}:force_original_aspect_ratio=decrease,"
-    f"pad={CANVAS_WIDTH}:{CANVAS_HEIGHT}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={FPS},format=yuv420p"
-)
+# The common canvas everything in one montage is normalised onto — the organizer picks which at the
+# order (`params.orientation`). Landscape by default: the finished video leaves the app through
+# «поделиться» and 16:9 is what plays everywhere; portrait is the same 1080p turned on its side, for
+# a montage meant to be watched on the phone it was shot on. Either way material shot the other way
+# round is padded into the chosen canvas rather than cropped to it.
+CANVASES = {"landscape": (1920, 1080), "portrait": (1080, 1920)}
+DEFAULT_ORIENTATION = "landscape"  # what an order that says nothing about orientation means
+FPS = 30
 
 PHOTO_SECONDS = 3.0  # a still held on screen; a plain frame, no Ken Burns
 CLIP_SECONDS = 4.0  # «3–5 сек вокруг лучшего момента»
@@ -217,18 +217,27 @@ def choose(pieces, target_seconds):
 # --- cutting and assembling --------------------------------------------------
 
 
-def _normalise(piece, out):
-    """One piece onto the common canvas: 1080p, 30 fps, padded, and silent.
+def _normalise(piece, out, orientation):
+    """One piece onto this montage's canvas: 1080p the way it was ordered, 30 fps, padded, silent.
+
+    The canvas is built here rather than held as a constant because it belongs to the order and not
+    to the module — but every clip of one montage is normalised with the same `orientation`, which
+    `_assemble`'s crossfades require: xfade joins two streams of one size or nothing.
 
     Silent because the finished video's only sound is the track (architecture.md: «звук исходных
     клипов по умолчанию убираем»), which also makes every clip's audio identical by having none.
     """
+    width, height = CANVASES[orientation]
+    canvas = (
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={FPS},format=yuv420p"
+    )
     if piece.kind == "photo":
         opened = ("-loop", "1", "-t", f"{piece.seconds}", "-i", str(piece.path))
     else:
         opened = ("-ss", f"{piece.start}", "-t", f"{piece.seconds}", "-i", str(piece.path))
     media._ffmpeg(
-        *opened, "-vf", CANVAS, "-an",
+        *opened, "-vf", canvas, "-an",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", str(out),
     )
 
@@ -297,6 +306,11 @@ def montage(conn, ref):
         # The api refuses an unknown id at the order, so this is the two lists having drifted apart.
         # Retrying would ask for the same missing track three times.
         return _give_up_for_good(conn, ref, f"неизвестный музыкальный трек «{track_id}»")
+    orientation = params.get("orientation") or DEFAULT_ORIENTATION
+    if orientation not in CANVASES:
+        # Same drift, same answer: the api validates the two values it may write here, so anything
+        # else is a contract that moved on one side only — and it would be no better on a retry.
+        return _give_up_for_good(conn, ref, f"неизвестная ориентация ролика «{orientation}»")
 
     items = conn.execute(
         # Ordered the way the gallery orders the same rows (api, `src/media/gallery.ts`): the
@@ -363,7 +377,7 @@ def montage(conn, ref):
         clips = []
         for index, piece in enumerate(choose(pieces, target_seconds)):
             clip = workdir / f"clip-{index}.mp4"
-            _normalise(piece, clip)
+            _normalise(piece, clip, orientation)
             # Measured, not the length that was asked for. `-t` cuts against the *video* stream
             # while `_duration` reads the container, which is the longest stream in it — a clip
             # whose audio outruns its picture normalises shorter than declared. `_assemble` steps
