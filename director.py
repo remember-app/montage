@@ -54,7 +54,13 @@ def direct(conn, pieces, target_seconds, include=(), exclude=(), story="", ref=N
         return None
 
     include, exclude = {str(one) for one in include}, {str(one) for one in exclude}
-    candidates = {piece.media_id: piece for piece in _material(pieces, include, exclude)}
+    material = list(_material(pieces, include, exclude))
+    # One shot per moment, by the отбор's own дедуп: a director shown a whole burst can put two
+    # frames of the same second next to each other in the plan, and every duplicate in the question
+    # is paid for as well. «Включить» wins its burst here exactly as it does in `selection.choose`.
+    _, duplicates = selection._dedup(material, always=include)
+    swallowed = {piece.media_id for piece in duplicates}
+    candidates = {piece.media_id: piece for piece in material if piece.media_id not in swallowed}
     known = _known(conn, candidates)
     if not any(what.get("description") for what in known.values()):
         # Nothing has been described yet — the memory became ready before there was a key, and the
@@ -118,7 +124,9 @@ def _material(pieces, include, exclude):
     with no frame in it at all is out for the reason `selection.choose` keeps it out: there is no
     picture to put on screen and «включить» cannot conjure one. What отбор merely disliked — blur,
     exposure — is out unless the organizer asked for it by name, so the director is offered what a
-    person would be offered.
+    person would be offered. A burst of shots of one moment is thinned to one by `direct`
+    afterwards, for the same reason: the offer is what a person would look through, not the whole
+    camera roll.
     """
     for piece in pieces:
         if piece.media_id in exclude or piece.rejected == selection.UNREADABLE:
