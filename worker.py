@@ -1,10 +1,11 @@
 """Montage worker: takes jobs from the shared `jobs` table in Postgres, one handler per job.
 
     python worker.py init                  # create the worker's own tables (idempotent)
+    python worker.py tracks                # the music library into the bucket (idempotent)
     python worker.py enqueue <type> [ref]  # put one job in the queue
     python worker.py run                   # the loop, Ctrl-C to stop
 
-Needs DATABASE_URL. See README.md.
+Needs DATABASE_URL — except `tracks`, which needs the four storage variables. See README.md.
 """
 
 import logging
@@ -16,6 +17,7 @@ import time
 import psycopg
 
 import ai
+import assembly
 import media
 import montage as montages  # the module and its handler share the job's name; the import cannot
 import screening
@@ -279,6 +281,15 @@ def run(conn):
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     command, *args = sys.argv[1:] or ["run"]
+    # Outside the connection below on purpose: the library is files and a bucket, and there is no
+    # reason for the one command with no database in it to refuse to run without DATABASE_URL.
+    if command == "tracks":
+        if args:
+            sys.exit(__doc__)  # here too, or a typo would ask for a database to say «usage»
+        published = assembly.publish_tracks()
+        print(f"the music library is in the bucket: {len(published)} of {len(assembly.TRACKS)} "
+              f"uploaded, the rest were already there")
+        sys.exit()
     with connect() as conn:
         if command == "init" and not args:
             init_schema(conn)

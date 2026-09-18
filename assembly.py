@@ -48,6 +48,36 @@ def track_file(track_id):
     return TRACKS_DIR / f"{track_id}.mp3"
 
 
+def track_key(track_id):
+    """Where the same track lives in the bucket, for «Послушать» on the «Под что монтировать»
+    screen to play before any video is ordered. The montage itself never reads these objects — it
+    cuts from the file on disk beside it — but that disk is this worker's alone, and the api and the
+    phone have to be able to reach the music too. Same id in the key as in `TRACKS`, so the api
+    builds it without knowing anything more about the library."""
+    return f"tracks/{track_id}.mp3"
+
+
+def publish_tracks(s3=None):
+    """The library into the bucket. Returns the ids that were actually uploaded.
+
+    What is already there is left alone rather than written over: this runs on deploy, a track's
+    file never changes under an id, and re-uploading five mp3s on every run would only spend the
+    bucket's write quota. The flip side is that a track *replaced* under an id that is already
+    published needs its object deleted first — README.md, «Треки».
+    """
+    s3 = s3 or media.storage()
+    published = []
+    for track_id in TRACKS:
+        try:
+            s3.head_object(Bucket=media.bucket(), Key=track_key(track_id))
+            continue
+        except s3.exceptions.ClientError:
+            pass  # not there — and if it is the bucket that is unreachable, the upload says so
+        media._upload(s3, track_file(track_id), track_key(track_id), "audio/mpeg")
+        published.append(track_id)
+    return published
+
+
 def length_of(pieces):
     """How long these pieces run once crossfaded — each join eats half a second of the total."""
     return sum(piece.seconds for piece in pieces) - CROSSFADE_SECONDS * (len(pieces) - 1)

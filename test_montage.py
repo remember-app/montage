@@ -588,6 +588,40 @@ def test_every_track_of_the_library_is_music_that_plays(track_id):
     assert float(played["format"]["duration"]) > 30, "music, not a second and a half of signal"
 
 
+def library_in_the_bucket(s3):
+    """What the bucket holds under each track's key: its size and type, or None for one that is not
+    there at all."""
+    heads = {}
+    for track_id in assembly.TRACKS:
+        try:
+            head = s3.head_object(Bucket=media.bucket(), Key=assembly.track_key(track_id))
+        except s3.exceptions.ClientError:
+            heads[track_id] = None
+        else:
+            heads[track_id] = (head["ContentLength"], head["ContentType"], head["LastModified"])
+    return heads
+
+
+def test_the_library_is_published_to_the_bucket_for_the_app_to_play(s3):
+    """The five files are this worker's own disk, and «Послушать» is the api's and the phone's — so
+    the library has to be in the bucket too, under the keys the api builds from the same ids."""
+    for track_id in assembly.TRACKS:
+        s3.delete_object(Bucket=media.bucket(), Key=assembly.track_key(track_id))
+
+    assert sorted(assembly.publish_tracks(s3)) == sorted(assembly.TRACKS)
+
+    landed = library_in_the_bucket(s3)
+    assert [track_id for track_id, head in landed.items() if head is None] == []
+    assert {track_id: head[:2] for track_id, head in landed.items()} == {
+        track_id: (assembly.track_file(track_id).stat().st_size, "audio/mpeg")
+        for track_id in assembly.TRACKS
+    }, "all five, whole, and served as music rather than as bytes of nothing in particular"
+
+    # Run on every deploy: five mp3s must not be written over every time.
+    assert assembly.publish_tracks(s3) == [], "what is already there is not uploaded again"
+    assert library_in_the_bucket(s3) == landed, "and the objects themselves were not touched"
+
+
 def test_an_api_that_does_not_answer_does_not_fail_a_finished_montage(monkeypatch):
     """The video exists and the row already says so — a failure here would rebuild the whole thing
     on the next attempt to deliver one push."""
