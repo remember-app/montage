@@ -15,7 +15,6 @@ a second of CPU per track, and no signal processing of our own in the worker bec
 """
 
 import bisect
-import dataclasses
 import logging
 import pathlib
 import tempfile
@@ -24,6 +23,7 @@ import librosa
 
 import assembly
 import media
+import selection
 
 ANALYSIS_RATE = 22050  # the pulse is there at half rate too, and half the samples is half the work
 
@@ -105,7 +105,11 @@ def fit(pieces, moments):
     fitted, at = [], 0.0  # `at` is where the piece begins in the assembled montage
     for piece in pieces[:-1]:
         seconds = _snap(moments, piece, at)
-        fitted.append(dataclasses.replace(piece, seconds=seconds))
+        # Through `cut_to` and not a bare length swap: a beat moves how long a piece is held, and
+        # `cut_to` is what keeps it cut *around* its best moment at that new length. Without it a
+        # piece shrunk here would keep the `start` centred for its old length and could show
+        # nothing of what `selection` cut it around in the first place.
+        fitted.append(selection.cut_to(piece, seconds))
         at += seconds - assembly.CROSSFADE_SECONDS
     fitted.append(pieces[-1])
     log.info("cut to the beat: %s became %s",

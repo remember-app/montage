@@ -175,6 +175,16 @@ def test_a_struck_out_piece_is_never_even_shown_to_the_director(described):
     assert "m-3" not in asked(net) and "собака" not in asked(net)
 
 
+def test_told_both_at_once_the_piece_stays_out_of_the_film_too(described):
+    """The same contradiction `selection.choose` settles the same way: named on both of the
+    organizer's own lists, a piece is struck out before the director ever sees it — «исключить» is
+    what cannot be undone once a video is made, so it is the one that wins here as well."""
+    film, net = directed(described, include=["m-3"], exclude=["m-3"])
+
+    assert [piece.media_id for piece in film] == ["m-1", "m-2"]
+    assert "m-3" not in asked(net) and "собака" not in asked(net)
+
+
 def test_a_piece_the_organizer_asked_for_is_in_the_film_even_if_the_plan_forgot_it(described):
     """«Включить» is not the model's to refuse. The recorded plan names three pieces and this is a
     fourth, so the only way it can be in the film is the rule putting it back."""

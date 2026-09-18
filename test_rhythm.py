@@ -151,6 +151,25 @@ def test_a_piece_keeps_its_own_length_when_no_beat_fits():
     assert [piece.seconds for piece in fitted] == [3.0, 3.0, 3.0]
 
 
+def test_a_clip_shrunk_to_the_beat_stays_cut_around_its_best_moment():
+    """`selection.judge` cuts a clip centred on its best moment; a beat that shrinks the piece must
+    not slide that moment out of what is left on screen — the two modules agree on where a clip
+    starts (`cut_to`) for exactly this reason, and `fit` has to go through it too, not just swap
+    the length in and leave the old, now off-centre, `start` behind."""
+    moments = (1.5, 50.0, 51.0, 52.0, 53.0, 54.0, 55.0, 56.0)
+    clip = dataclasses.replace(
+        photos(4.0)[0], kind="video", seconds=4.0, start=0.0, best_second=2.0, duration=10.0
+    )
+
+    fitted = rhythm.fit([clip, *photos(3.0)], moments)
+
+    shrunk = fitted[0]
+    assert shrunk.seconds < clip.seconds, "the beat picked here does shrink the piece"
+    assert shrunk.start <= clip.best_second <= shrunk.start + shrunk.seconds, (
+        "the best moment fell outside the clip once it was shrunk"
+    )
+
+
 def test_a_piece_is_never_cut_shorter_than_a_glance():
     """A dense grid of beats must not turn the montage into a flicker: the nearest beat can be half
     a second from the start of the piece, and that one may not be taken."""
