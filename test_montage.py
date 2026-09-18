@@ -326,11 +326,12 @@ def test_a_montage_ordered_with_a_story_is_cut_to_the_directors_plan(
 
     status, video_key, duration, error_text = read_montage(conn, montage_id)
     assert (status, error_text) == ("ready", None)
-    # The plan's own three, four and three seconds, less half a second for each of two joins — and
-    # not the отбор's ten to eleven, which is what these same four files come to on their own. The
-    # clip, which the plan leaves out and the отбор takes, is the visible half of the difference.
-    assert 8.7 <= duration <= 9.3, "the video is as long as the plan made it"
-    assert 8.7 <= float(probe(fetch(s3, video_key, tmp_path / "m.mp4"))["format"]["duration"]) <= 9.3
+    # The plan's own three, four and three seconds, less half a second for each of two joins, and
+    # room for rhythm's pull towards the beat (`about`, `RHYTHM_SLACK`) — not the отбор's ten to
+    # eleven, which is what these same four files come to on their own. The clip, which the plan
+    # leaves out and the отбор takes, is the visible half of the difference.
+    assert about(duration, 9.0), "the video is as long as the plan made it"
+    assert about(float(probe(fetch(s3, video_key, tmp_path / "m.mp4"))["format"]["duration"]), 9.0)
 
     question = json.loads(net.sent.data)["input"][0]["text"]
     assert "всё вокруг торта" in question, "the story the organizer typed reached the director"
