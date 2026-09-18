@@ -466,6 +466,23 @@ def test_a_photo_the_organizer_marked_exclude_stays_out_of_the_video(conn, s3, m
     assert about(duration, 8.0), "one of the four pieces was left out on the order's own word"
 
 
+def test_the_floor_does_not_count_the_pieces_the_organizer_struck_out(conn, s3, memory, tmp_path):
+    """Four files the отсев is happy with, two of them named in «исключить». The floor is what can
+    actually end up on screen, and `selection.choose` throws the struck-out two away whatever the
+    floor thought — so a minute-long order backed by two pieces is refused here rather than
+    assembled into a seven-second «ролик»."""
+    struck = material(conn, s3, memory, tmp_path)[:2]
+    montage_id = order(conn, memory, {"target_seconds": 60, "exclude_media_ids": struck})
+    job_id = worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    assert conn.execute("SELECT status FROM jobs WHERE id = %s", (job_id,)).fetchone()[0] == "done"
+    status, video_key, _, error_text = read_montage(conn, montage_id)
+    assert (status, video_key) == ("failed", None), "nothing was assembled out of the two left"
+    assert "не годится" in error_text
+
+
 def test_too_little_material_that_actually_opens_fails_without_retrying(conn, s3, memory, tmp_path):
     """The floor is about material that can go in the video, not rows in the table: three rows of
     which two are unreadable would otherwise have been assembled into one three-second still."""

@@ -78,9 +78,9 @@ def montage(conn, ref):
     # ролика»): two optional lists of `media_items` ids. Nothing is decided about them here — each
     # way of directing a video honours them in its own file, and both of them do (`selection.choose`
     # and `director.direct`), by the same rule: never the excluded, always the included. «Включить»
-    # is read as text ids here too, because the floor below has to be able to ask it.
+    # and «исключить» are both read as text ids here, because the floor below has to ask them too.
     include = {str(one) for one in params.get("include_media_ids") or ()}
-    exclude = params.get("exclude_media_ids") or ()
+    exclude = {str(one) for one in params.get("exclude_media_ids") or ()}
     # What the organizer said the video is about, in their own words. Nobody but the director has
     # anything to do with it: the algorithm cannot read.
     story = (params.get("story_text") or "").strip()
@@ -124,14 +124,21 @@ def montage(conn, ref):
         # person before either of them was reached (doc-03, «Кадры, отмеченные включить, есть в
         # ролике»). The one thing it cannot overrule is the same one they cannot: a file with no
         # frame in it at all, which is an absence and not a judgement.
+        #
+        # A piece struck out of the video counts for nothing here, for the same reason: the floor is
+        # what can actually end up on screen, and «исключить» is honoured by everything below this
+        # line. Four good files with two of them struck out are two pieces, and a two-piece montage
+        # against a minute-long order is exactly what the floor refuses.
         survived = sum(
-            piece.rejected is None
-            or (piece.rejected != selection.UNREADABLE and piece.media_id in include)
+            piece.media_id not in exclude
+            and (piece.rejected is None
+                 or (piece.rejected != selection.UNREADABLE and piece.media_id in include))
             for piece in judged
         )
         if survived < MIN_ITEMS:
             return _give_up_for_good(
-                conn, ref, "материал не годится для ролика: файлы не читаются или кадры испорчены"
+                conn, ref,
+                "материал не годится для ролика: файлы не читаются, кадры испорчены или исключены",
             )
 
         # The director first, and the отбор whenever there is no director: no cloud model, nothing
