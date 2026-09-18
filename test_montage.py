@@ -13,11 +13,16 @@ import json
 
 import pytest
 
+import ai
 import assembly
 import media
 import montage
 import selection
 import worker
+
+# The recorded answer and the transport that serves it are `test_ai.py`'s, like everywhere else the
+# cloud model is involved: there is one way to answer without a network in this suite.
+from test_ai import Recorded
 
 # The fixtures and the ffmpeg-drawn material are `test_media.py`'s — a second copy of a Postgres
 # fixture is a second thing to keep true. pytest resolves fixtures by name in this module, so they
@@ -194,6 +199,60 @@ def test_a_montage_that_opens_on_a_video_with_a_dark_start_gets_a_bright_cover(
     assert selection._exposed(selection._grey_frames(poster_file)[0]), (
         "the cover must be the opening clip's best moment, not the dark frame it was cut from"
     )
+
+
+def planning_over(monkeypatch, media_ids):
+    """The recorded plan (`fixtures/gemini_plan.json`) as the only cloud model this worker can find.
+
+    The ids in it are this run's own: a montage is planned over material whose ids Postgres makes up
+    at insert time, so the three the answer was written about are rewritten into the three actually
+    ordered. Everything else — what a plan is, what a step of it carries — is the recorded file's,
+    and nothing here goes anywhere near the network.
+    """
+    recorded = Recorded("gemini_plan.json")
+    for index, media_id in enumerate(media_ids, start=1):
+        recorded.answer = recorded.answer.replace(f"m-{index}".encode(), media_id.encode())
+    monkeypatch.setattr(ai, "from_env", lambda *_, **__: ai.Gemini("test-key", transport=recorded))
+    return recorded
+
+
+def test_a_montage_ordered_with_a_story_is_cut_to_the_directors_plan(
+    conn, s3, memory, tmp_path, monkeypatch
+):
+    """The director end to end: a real order with a story in it, real material out of the bucket,
+    and a video that is the plan's rather than the отбор's — a different length, out of a different
+    three files. What the plan does with pieces on its own is `test_director.py`; this is here for
+    what only a real video can answer, that the order actually reaches it and comes back assembled.
+
+    Every other montage in this file is cut with no cloud model at all, which is the other half of
+    the same proof: none of them changed.
+    """
+    ids = material(conn, s3, memory, tmp_path)
+    for media_id, description in zip(ids, ("накрывают на стол", "вносят торт", "все за столом")):
+        conn.execute(
+            """INSERT INTO media_understandings (media_id, memory_id, description, cast_labels)
+               VALUES (%s, %s, %s, %s)""",
+            (media_id, str(memory[0]), description, ["человек-1"]),
+        )
+    net = planning_over(monkeypatch, ids[:3])
+    montage_id = order(conn, memory, {
+        "target_seconds": 30, "story_text": "день рождения, всё вокруг торта",
+    })
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    status, video_key, duration, error_text = read_montage(conn, montage_id)
+    assert (status, error_text) == ("ready", None)
+    # The plan's own three, four and three seconds, less half a second for each of two joins — and
+    # not the отбор's ten to eleven, which is what these same four files come to on their own. The
+    # clip, which the plan leaves out and the отбор takes, is the visible half of the difference.
+    assert 8.7 <= duration <= 9.3, "the video is as long as the plan made it"
+    assert 8.7 <= float(probe(fetch(s3, video_key, tmp_path / "m.mp4"))["format"]["duration"]) <= 9.3
+
+    question = json.loads(net.sent.data)["input"][0]["text"]
+    assert "всё вокруг торта" in question, "the story the organizer typed reached the director"
+    assert "вносят торт" in question, "and so did what the pipeline already knew about the material"
 
 
 def unopenable(path):

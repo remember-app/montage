@@ -71,6 +71,10 @@ class Piece:
     # The moment `_best_moment` scored, in the original's own timeline — not where the cut begins.
     # Kept because the cover is taken from it: `start` is that moment pulled back by half a clip.
     best_second: float = 0.0
+    # How long the file itself runs, for a video that ffmpeg would tell — None for a photo, which
+    # runs for as long as it is held. What `cut_to` may not ask past, so that a piece can be cut
+    # longer than the four seconds below when somebody asks for a longer one.
+    duration: float | None = None
     rejected: str | None = None  # one of the reasons above, None while the piece is still in
 
 
@@ -191,14 +195,30 @@ def judge(piece):
     if moment is None:
         return dataclasses.replace(piece, rejected=UNREADABLE)
     second, sharpness = moment
-    seconds, start = PHOTO_SECONDS, 0.0
-    if piece.kind == "video":
-        duration = duration or CLIP_SECONDS
-        seconds = min(CLIP_SECONDS, duration)
-        # Centred on the best moment, then pulled back inside the file at both ends.
-        start = min(max(second - seconds / 2, 0.0), max(duration - seconds, 0.0))
+    looked_at = dataclasses.replace(
+        piece, sharpness=sharpness, best_second=second, duration=duration, rejected=why
+    )
+    return cut_to(looked_at, CLIP_SECONDS if piece.kind == "video" else PHOTO_SECONDS)
+
+
+def cut_to(piece, seconds):
+    """The same piece cut to `seconds` — centred on its best moment, never past what the file holds.
+
+    Where the length of a piece is settled, wherever the number comes from: `judge` asks for the
+    three or four seconds this module cuts by default, the director asks for what its plan says.
+    A photograph is held for exactly as long as it is asked to be; a clip can only give what it has,
+    so the cut is pulled back inside the file at both ends — which is also why it may start earlier
+    than the moment it is built around.
+    """
+    if piece.kind != "video":
+        return dataclasses.replace(piece, seconds=seconds, start=0.0)
+    # A clip whose length ffmpeg would not report is taken at its word: the cut is what was asked
+    # for, from its start, which is what this module did before it measured anything.
+    duration = piece.duration or seconds
+    seconds = min(seconds, duration)
     return dataclasses.replace(
-        piece, sharpness=sharpness, seconds=seconds, start=start, best_second=second, rejected=why
+        piece, seconds=seconds,
+        start=min(max(piece.best_second - seconds / 2, 0.0), max(duration - seconds, 0.0)),
     )
 
 
