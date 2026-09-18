@@ -199,6 +199,12 @@ def media_preview(conn, ref):
         return
     log.info("media item %s (%s) is ready", ref, kind)
 
+    # And straight on to what is in it: the frame is describable the moment the copies exist, and
+    # the director wants it described long before anybody orders a video (`understanding.py`). The
+    # row is inserted here rather than through `worker.enqueue` because the worker imports this
+    # module and not the other way round — the same one line the api writes to queue this very job.
+    conn.execute("INSERT INTO jobs (type, ref) VALUES ('media_understanding', %s)", (ref,))
+
 
 def _upload(s3, path, key, content_type):
     s3.upload_file(str(path), bucket(), key, ExtraArgs={"ContentType": content_type})

@@ -1,0 +1,28 @@
+{
+  "id": "interactions/2c1743a391305fbf",
+  "model": "gemini-3.8-flash",
+  "steps": [
+    {
+      "type": "model_output",
+      "content": [
+        {
+          "type": "text",
+          "text": "{\"description\": \"Та же женщина у стола режет торт, рядом смеётся мужчина в очках.\", \"cast\": [\"человек-1\", \"человек-2\"]}"
+        }
+      ]
+    }
+  ],
+  "output_text": "{\"description\": \"Та же женщина у стола режет торт, рядом смеётся мужчина в очках.\", \"cast\": [\"человек-1\", \"человек-2\"]}",
+  "usage": {
+    "input_tokens_by_modality": [
+      {"modality": "text", "tokens": 151},
+      {"modality": "image", "tokens": 1032}
+    ],
+    "total_cached_tokens": 0,
+    "total_input_tokens": 1183,
+    "total_output_tokens": 54,
+    "total_thought_tokens": 0,
+    "total_tokens": 1237,
+    "total_tool_use_tokens": 0
+  }
+}
