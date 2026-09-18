@@ -1,22 +1,22 @@
-"""The choosing on its own, and one live montage end to end — see README.md.
+"""Whole montages, ordered and assembled end to end — see README.md.
 
-The first half needs nothing at all: `choose` is a function over scored pieces, so what it does with
-a burst of shots or a length it cannot fit is checked without a frame being decoded. The second half
-is real everything, like `test_media.py`: a real Postgres, a real bucket, real ffmpeg, and fixtures
-ffmpeg draws on the spot.
+Real everything, like `test_media.py`: a real Postgres, a real bucket, real ffmpeg, and fixtures
+ffmpeg draws on the spot. What the choosing does on its own, with no file behind it, is
+`test_selection.py`; these are here for what only a real video can answer — that the material
+actually comes out of the bucket, through both modules and into one playable file.
 
 Warning: these wipe the `jobs` table of whatever DATABASE_URL points at, and write into the bucket
 R2_ENDPOINT points at.
 """
 
-import datetime
 import json
-import random
 
 import pytest
 
+import assembly
 import media
 import montage
+import selection
 import worker
 
 # The fixtures and the ffmpeg-drawn material are `test_media.py`'s — a second copy of a Postgres
@@ -25,136 +25,6 @@ import worker
 from test_media import (  # noqa: F401
     add_item, conn, ffmpeg, fetch, memory, photo, probe, s3, video,
 )
-
-
-# --- choosing ---------------------------------------------------------------
-# No database, no bucket, no ffmpeg: scored pieces in, the chosen ones out.
-
-
-def at(second, sharpness, *, dated=True):
-    """A piece shot `second` seconds past midnight, as sharp as it is told to be."""
-    when = datetime.datetime(2026, 9, 5) + datetime.timedelta(seconds=second)
-    return montage.Piece(sharpness=sharpness, when=when, captured_at=when if dated else None)
-
-
-def test_a_burst_of_shots_leaves_only_its_sharpest():
-    burst = [at(0, 10), at(1, 90), at(2, 30)]  # three shots inside two seconds — one moment
-    apart = at(30, 20)
-
-    chosen = montage.choose([*burst, apart], target_seconds=60)
-
-    assert chosen == [burst[1], apart], "the sharpest of the burst stands for all three"
-
-
-def test_a_long_sequence_stays_several_moments():
-    """Measured from the first of a burst and not from the shot before it: a whole evening of
-    photographs a second apart is not one moment."""
-    every_second = [at(second, 10 + second) for second in range(6)]
-
-    chosen = montage.choose(every_second, target_seconds=60)
-
-    # 0-1-2 is one moment and 3-4-5 the next, so the sharpest of each survives.
-    assert chosen == [every_second[2], every_second[5]]
-
-
-def test_a_file_with_no_capture_date_is_never_deduped():
-    """Nothing says those two were taken together, and dropping one would drop material over a
-    missing EXIF field."""
-    undated = [at(0, 10, dated=False), at(1, 90, dated=False)]
-
-    assert montage.choose(undated, target_seconds=60) == undated
-
-
-def test_only_what_fits_the_asked_for_length_gets_in_and_it_gets_in_in_order():
-    pieces = [at(second * 10, sharpness) for second, sharpness in enumerate([10, 90, 20, 80, 30])]
-
-    chosen = montage.choose(pieces, target_seconds=8)
-
-    # Three seconds each, half a second eaten by every crossfade: 3, 5.5, 8 — a fourth would be 10.5.
-    assert montage.length_of(chosen) == 8
-    assert chosen == [pieces[1], pieces[3], pieces[4]], "the sharpest three, back in date order"
-
-
-def test_the_first_piece_is_taken_however_long_it_is():
-    """A montage shorter than what was asked for is still a montage; an empty one is not a file."""
-    assert montage.choose([at(0, 10, dated=False)], target_seconds=1) == [at(0, 10, dated=False)]
-
-
-# --- judging a frame ---------------------------------------------------------
-# `choose`'s own tests hand it a sharpness directly and never touch the arithmetic that produces
-# one. These do: tiny grey frames built by hand, the same size ffmpeg hands `_sharpness`/`_exposed`
-# for real, no ffmpeg needed to check the maths itself is right.
-
-FRAME_SIZE = montage.SAMPLE_WIDTH * montage.SAMPLE_HEIGHT
-
-
-def grey(*values):
-    """`FRAME_SIZE` grey bytes, `values` repeated to fill it — one value is a flat frame, two
-    alternated is a checkerboard."""
-    return bytes(values[i % len(values)] for i in range(FRAME_SIZE))
-
-
-def test_a_flat_frame_has_no_sharpness():
-    """No edges anywhere: the Laplacian is zero at every pixel, so its variance is too — this is
-    what a smeared, out-of-focus frame looks like to `_sharpness`."""
-    assert montage._sharpness(grey(128)) == 0.0
-
-
-def test_a_checkerboard_is_sharp():
-    """Every neighbouring pixel is as different as it gets — the opposite end of the scale from a
-    flat frame, and well past `MIN_SHARPNESS`."""
-    assert montage._sharpness(grey(0, 255)) > montage.MIN_SHARPNESS
-
-
-def laplacian_variance(frame):
-    """The same number `_sharpness` promises, written out the long obvious way and owing nothing to
-    how `_sharpness` happens to compute it: the Laplacian at every pixel that has four neighbours,
-    then the variance of those values over the whole population."""
-    width, height = montage.SAMPLE_WIDTH, montage.SAMPLE_HEIGHT
-
-    def at(x, y):
-        return frame[y * width + x]
-
-    values = [
-        4 * at(x, y) - at(x - 1, y) - at(x + 1, y) - at(x, y - 1) - at(x, y + 1)
-        for y in range(1, height - 1)
-        for x in range(1, width - 1)
-    ]
-    mean = sum(values) / len(values)
-    return sum((value - mean) ** 2 for value in values) / len(values)
-
-
-@pytest.mark.parametrize("frame", [
-    grey(128),  # flat
-    grey(0, 255),  # checkerboard
-    grey(3, 200, 17, 250, 99),  # a period that does not divide the row: no two rows alike
-    random.Random(59).randbytes(FRAME_SIZE),  # noise, the same noise every run
-], ids=["flat", "checkerboard", "irregular", "noise"])
-def test_sharpness_is_the_variance_of_the_laplacian(frame):
-    """«A flat frame scores nothing, a checkerboard scores a lot» is true of half a dozen different
-    formulas, so those two alone would let the number drift while the tests stayed green — and the
-    number is what decides which frames end up in the video. This one pins it: the value itself,
-    against the definition spelled out here rather than against `_sharpness`'s own arithmetic."""
-    assert montage._sharpness(frame) == pytest.approx(laplacian_variance(frame), rel=1e-12)
-
-
-def test_a_mid_grey_varied_frame_is_exposed():
-    assert montage._exposed(grey(100, 150)) is True
-
-
-def test_a_flat_dark_frame_is_not_exposed():
-    assert montage._exposed(grey(5)) is False
-
-
-def test_a_flat_bright_frame_is_not_exposed():
-    assert montage._exposed(grey(250)) is False
-
-
-def test_a_frame_split_between_black_and_blown_is_not_exposed():
-    """Mean brightness alone would wave this one through — half black, half blown averages to a mid
-    grey. The clipped-pixel count is what catches a frame that is really crushed shadow next to
-    blown highlight and nothing usable in between."""
-    assert montage._exposed(grey(0, 255)) is False
 
 
 # --- the whole thing --------------------------------------------------------
@@ -188,12 +58,16 @@ def poster_of(conn, montage_id):
 
 
 def material(conn, s3, memory, tmp_path):
-    """Three photographs and a clip in the bucket, `ready`, as the previews leave them."""
+    """Three photographs and a clip in the bucket, `ready`, as the previews leave them. Their ids
+    come back in the order the montage reads them, for the tests that name one in the order."""
+    ids = []
     for index in range(3):
-        _, key = add_item(conn, memory, "photo", status="ready")
+        item_id, key = add_item(conn, memory, "photo", status="ready")
         s3.upload_file(str(photo(tmp_path / f"photo-{index}.jpg")), media.bucket(), key)
-    _, key = add_item(conn, memory, "video", status="ready")
+        ids.append(item_id)
+    item_id, key = add_item(conn, memory, "video", status="ready")
     s3.upload_file(str(video(tmp_path / "clip.mp4")), media.bucket(), key)
+    return [*ids, item_id]
 
 
 def test_a_memory_of_photos_and_a_clip_becomes_one_playable_video(conn, s3, memory, tmp_path):
@@ -230,13 +104,13 @@ def test_a_memory_of_photos_and_a_clip_becomes_one_playable_video(conn, s3, memo
     # Not just a jpeg of the right size — a frame worth showing. The same judgement the worker
     # applies to source material, turned on its own cover: an all-black or blown-out still fails
     # it, which is exactly what a poster cut from frame zero of a clip that opens dark would be.
-    assert montage._exposed(montage._grey_frames(poster_file)[0])
+    assert selection._exposed(selection._grey_frames(poster_file)[0])
 
 
 def test_a_montage_ordered_portrait_is_assembled_the_other_way_up(conn, s3, memory, tmp_path):
     """The organizer asked for a video to watch on a phone. The same material, the same length, the
     same everything else — padded into 1080×1920 instead of 1920×1080. The numbers are written out
-    here rather than read off `montage.CANVASES`, which is the thing under test."""
+    here rather than read off `assembly.CANVASES`, which is the thing under test."""
     montage_id = order(conn, memory, {"target_seconds": 30, "orientation": "portrait"})
     # Stills 1200×800 and a clip 1280×1440 — material shot both ways round, and the portrait canvas
     # pads every piece of it rather than cropping any.
@@ -317,7 +191,7 @@ def test_a_montage_that_opens_on_a_video_with_a_dark_start_gets_a_bright_cover(
 
     poster_key = poster_of(conn, montage_id)
     poster_file = fetch(s3, poster_key, tmp_path / "poster.jpg")
-    assert montage._exposed(montage._grey_frames(poster_file)[0]), (
+    assert selection._exposed(selection._grey_frames(poster_file)[0]), (
         "the cover must be the opening clip's best moment, not the dark frame it was cut from"
     )
 
@@ -374,9 +248,9 @@ def test_a_file_that_will_not_open_is_left_out_rather_than_failing_the_video(
 def test_a_badly_exposed_photo_is_left_out_rather_than_failing_the_video(
     conn, s3, memory, tmp_path
 ):
-    """A different code path from a file ffmpeg refuses to open: this one decodes fine and
-    `_best_moment` itself returns none because the one frame in it fails exposure. The unit tests
-    on `choose` never exercise this — they score every piece by hand."""
+    """A different code path from a file ffmpeg refuses to open: this one decodes fine and the
+    отсев turns it down on exposure, the one frame in it being crushed almost to black. The unit
+    tests on `choose` never exercise this — they score every piece by hand."""
     montage_id = order(conn, memory, {"target_seconds": 30})
     material(conn, s3, memory, tmp_path)
     _, key = add_item(conn, memory, "photo", status="ready")
@@ -388,6 +262,44 @@ def test_a_badly_exposed_photo_is_left_out_rather_than_failing_the_video(
     status, _, duration, error_text = read_montage(conn, montage_id)
     assert (status, error_text) == ("ready", None)
     assert 10 <= duration <= 11, "the crushed photo had no usable frame and was left out uncounted"
+
+
+def test_a_photo_the_organizer_marked_include_is_in_the_video_the_algorithm_notwithstanding(
+    conn, s3, memory, tmp_path
+):
+    """The same crushed photo as above, and the same verdict from the algorithm — except this time
+    the order names it. «Включить» is the organizer overruling the automatic отсев, so the piece
+    the test above proves is dropped is here proved to be in the video."""
+    material(conn, s3, memory, tmp_path)
+    crushed_id, key = add_item(conn, memory, "photo", status="ready")
+    s3.upload_file(str(crushed(tmp_path / "crushed.jpg")), media.bucket(), key)
+    montage_id = order(
+        conn, memory, {"target_seconds": 30, "include_media_ids": [crushed_id]}
+    )
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    status, _, duration, error_text = read_montage(conn, montage_id)
+    assert (status, error_text) == ("ready", None)
+    # Five pieces of three seconds instead of four, less half a second for each of four joins.
+    assert 12.5 <= duration <= 13.5, "the crushed photo went in because the order asked for it"
+
+
+def test_a_photo_the_organizer_marked_exclude_stays_out_of_the_video(conn, s3, memory, tmp_path):
+    """The other half of the same word from the organizer, on material the algorithm is perfectly
+    happy with: a photo named in «исключить» is not in the video, and the rest of the material
+    fills the time it would have taken."""
+    photo_id = material(conn, s3, memory, tmp_path)[0]
+    montage_id = order(conn, memory, {"target_seconds": 30, "exclude_media_ids": [photo_id]})
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    status, _, duration, error_text = read_montage(conn, montage_id)
+    assert (status, error_text) == ("ready", None)
+    # Two stills and the clip — nine seconds of material, less half a second for each of two joins.
+    assert 7.5 <= duration <= 8.5, "one of the four pieces was left out on the order's own word"
 
 
 def test_too_little_material_that_actually_opens_fails_without_retrying(conn, s3, memory, tmp_path):
@@ -483,13 +395,13 @@ def test_a_montage_that_keeps_failing_fails_the_row(conn, memory):
     assert error_text == "не удалось собрать ролик"
 
 
-@pytest.mark.parametrize("track_id", sorted(montage.TRACKS))
+@pytest.mark.parametrize("track_id", sorted(assembly.TRACKS))
 def test_every_track_is_something_ffmpeg_can_play(track_id, tmp_path):
     """The tracks are expressions rather than files, so a typo in one is a montage that fails only
     when somebody happens to order that track. Here all three are drawn, not just the default."""
     played = tmp_path / f"{track_id}.m4a"
     media._ffmpeg(
-        "-f", "lavfi", "-i", f"aevalsrc={montage.TRACKS[track_id]}:d=1", "-c:a", "aac", str(played)
+        "-f", "lavfi", "-i", f"aevalsrc={assembly.TRACKS[track_id]}:d=1", "-c:a", "aac", str(played)
     )
 
     assert probe(played)["streams"][0]["codec_name"] == "aac"
