@@ -162,6 +162,46 @@ def test_a_plan_longer_than_the_video_that_was_ordered_is_cut_back_to_it(describ
     assert [piece.media_id for piece in film] == ["m-1", "m-2"]
 
 
+# --- one shot per moment ----------------------------------------------------
+
+
+def twin_of(piece, media_id, sharpness, seconds_later=1.0):
+    """Another shot of the same moment: the shutter held down, a second apart at most."""
+    return dataclasses.replace(
+        piece, media_id=media_id, sharpness=sharpness,
+        captured_at=piece.captured_at + datetime.timedelta(seconds=seconds_later),
+    )
+
+
+def test_a_burst_of_one_moment_reaches_the_director_as_one_shot(described):
+    """Two shots of the same second are one moment, and the model is shown the sharper of them —
+    the отбор's own дедуп, run before the material becomes a question. A director handed both can
+    put them side by side in the plan, and the second of them is paid for on the way out as well."""
+    describe(described, "m-9", "собака под столом, кадр секундой позже")
+    blurrier = twin_of(MATERIAL[2], "m-9", sharpness=1.0)
+
+    film, net = directed(described, pieces=[*MATERIAL, blurrier], story=STORY)
+
+    assert "m-9" not in asked(net) and "секундой позже" not in asked(net)
+    assert "собака под столом" in asked(net), "the sharpest of the burst stands for it"
+    assert [piece.media_id for piece in film] == ["m-1", "m-2", "m-3"]
+
+
+def test_the_shot_the_organizer_asked_for_is_the_one_its_burst_is_shown_by(described):
+    """«Включить» beats sharpness inside a burst here exactly as it does in `selection.choose`: the
+    organizer named the blurrier shot, so that is the one moment's shot the director is offered —
+    and the sharper one next to it is not also offered."""
+    describe(described, "m-9", "собака под столом, кадр секундой позже")
+    blurrier = twin_of(MATERIAL[2], "m-9", sharpness=1.0)
+
+    film, net = directed(described, pieces=[*MATERIAL, blurrier], include=["m-9"])
+
+    assert "секундой позже" in asked(net), "the shot that was asked for"
+    assert "m-3" not in asked(net), "and not the sharper one beside it"
+    # The recorded plan names m-3, which is not material any more; «включить» puts m-9 in itself.
+    assert [piece.media_id for piece in film] == ["m-1", "m-2", "m-9"]
+
+
 # --- what the organizer said ------------------------------------------------
 
 
