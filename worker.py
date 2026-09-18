@@ -286,7 +286,19 @@ if __name__ == "__main__":
     if command == "tracks":
         if args:
             sys.exit(__doc__)  # here too, or a typo would ask for a database to say «usage»
-        published = assembly.publish_tracks()
+        try:
+            published = assembly.publish_tracks()
+        except KeyError as unset:
+            # A storage variable missed on the deploy — `media.storage()` reads the four of them
+            # straight out of the environment. One line saying which, the same answer `connect`
+            # gives for DATABASE_URL, rather than a `KeyError` out of the middle of boto3.
+            sys.exit(f"{unset.args[0]} is not set — see README.md")
+        except Exception as exc:
+            # Storage that cannot be reached, the wrong bucket, a key that may not write: what it
+            # said, in one line rather than in a traceback. Whatever landed before the failure
+            # stays there and the command is idempotent, so the answer to any of these is to fix
+            # the cause and run it again.
+            sys.exit(f"the music library was not published: {exc}")
         print(f"the music library is in the bucket: {len(published)} of {len(assembly.TRACKS)} "
               f"uploaded, the rest were already there")
         sys.exit()

@@ -72,7 +72,11 @@ def publish_tracks(s3=None):
             s3.head_object(Bucket=media.bucket(), Key=track_key(track_id))
             continue
         except s3.exceptions.ClientError:
-            pass  # not there — and if it is the bucket that is unreachable, the upload says so
+            # Nothing under this key — or a bucket that refused to answer, and then the upload
+            # below is refused the same way and says so. Storage that cannot be reached at all is
+            # not a `ClientError` and never gets here: it comes out of `head_object`, and the one
+            # caller (`worker.py tracks`) turns it into a line rather than a traceback.
+            pass
         media._upload(s3, track_file(track_id), track_key(track_id), "audio/mpeg")
         published.append(track_id)
     return published

@@ -3,6 +3,10 @@
 Warning: these wipe the `jobs` table of whatever DATABASE_URL points at.
 """
 
+import os
+import pathlib
+import subprocess
+import sys
 import time
 
 import pytest
@@ -57,6 +61,44 @@ def test_a_queued_job_wakes_an_idle_worker(conn):
         started = time.monotonic()
         worker.wait_for_job(idle_worker)
         assert time.monotonic() - started < 1
+
+
+# --- the one command with no database in it ---------------------------------
+# `python worker.py tracks`, run by hand on a deploy. No fixture here: the point is what the command
+# says when the storage it needs is not there, and neither Postgres nor the bucket is involved.
+
+
+def tracks_command(**environment):
+    """`python worker.py tracks` with the storage variables replaced by these, if any."""
+    return subprocess.run(
+        [sys.executable, "worker.py", "tracks"],
+        cwd=pathlib.Path(worker.__file__).parent, capture_output=True, text=True,
+        env={name: value for name, value in os.environ.items() if not name.startswith("R2_")}
+             | environment,
+    )
+
+
+def test_publishing_the_library_without_storage_names_the_variable_that_is_missing():
+    """The command is run on a deploy, by a person at a terminal: a variable they forgot has to
+    read as one line naming it, the way a missing DATABASE_URL does, and not as a `KeyError` out
+    of the middle of boto3."""
+    done = tracks_command()
+
+    assert done.returncode == 1
+    assert done.stderr.strip() == "R2_ENDPOINT is not set — see README.md"
+
+
+def test_publishing_the_library_into_storage_that_does_not_answer_says_so_in_one_line():
+    """Nor may an unreachable bucket come out as a traceback — the first thing `publish_tracks`
+    does to every key is a `head_object`, and that one does not fail as a `ClientError`."""
+    done = tracks_command(
+        R2_ENDPOINT="http://127.0.0.1:9",  # discard: nothing is listening
+        R2_BUCKET="remember", R2_ACCESS_KEY_ID="whoever", R2_SECRET_ACCESS_KEY="whatever",
+    )
+
+    assert done.returncode == 1
+    assert "Traceback" not in done.stderr
+    assert done.stderr.startswith("the music library was not published:")
 
 
 def test_the_wait_gives_up_without_a_notification(conn, monkeypatch):
