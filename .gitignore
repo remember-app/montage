@@ -4,3 +4,4 @@ __pycache__/
 .pytest_cache/
 .claude/worktrees/
 .codegraph/
+.DS_Store
