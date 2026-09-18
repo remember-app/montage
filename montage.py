@@ -7,11 +7,12 @@ cut and crossfaded into one 1080p file with a track over it, and the row is left
 keys on it — the video's and the cover's — then the api is knocked on so the phones get told.
 
 This module is the order and the plumbing around it: it reads the row, downloads the material,
-calls the pipeline's modules in turn and writes the result back. The two modules it calls are
+calls the pipeline's modules in turn and writes the result back. The modules it calls are
 replaceable on their own, which is what the spec asks of the montage service (doc-03, «Сервис
 монтажа собран из отдельных модулей»):
 
     `selection` — which pieces go into the video and in what order, and why the rest do not.
+    `rhythm`    — how long each of them is held, so the joins land on the track's beats.
     `assembly`  — those pieces onto one canvas and into one file.
 
 The steps are architecture.md, «Montage-пайплайн», with one departure: selection (its step 4) runs
@@ -30,6 +31,7 @@ import urllib.request
 
 import assembly
 import media
+import rhythm
 import selection
 
 MIN_ITEMS = 3  # «Меньше 3 → сразу failed» — the api refuses the order at this number too
@@ -53,8 +55,12 @@ def montage(conn, ref):
     conn.execute("UPDATE montages SET status = 'processing', updated_at = now() WHERE id = %s", (ref,))
 
     target_seconds = float(params.get("target_seconds") or selection.DEFAULT_TARGET_SECONDS)
+    # The organizer's own track is the key of the file they uploaded (the api's `music_uploads`),
+    # not an id out of the library. One or the other: the api refuses an order naming both, so a key
+    # being here means the key is the choice, and the library id is not read at all.
+    track_key = params.get("music_track_key")
     track_id = params.get("music_track_id") or assembly.DEFAULT_TRACK
-    if track_id not in assembly.TRACKS:
+    if not track_key and track_id not in assembly.TRACKS:
         # The api refuses an unknown id at the order, so this is the two lists having drifted apart.
         # Retrying would ask for the same missing track three times.
         return _give_up_for_good(conn, ref, f"неизвестный музыкальный трек «{track_id}»")
@@ -116,8 +122,28 @@ def montage(conn, ref):
             # would be there on a retry.
             return _give_up_for_good(conn, ref, "в ролик нечего ставить: весь материал исключён")
 
+        track = workdir / "track"
+        if track_key:
+            s3.download_file(media.bucket(), track_key, str(track))
+            try:
+                # The organizer's bytes, about to be handed to ffmpeg — the same door every upload
+                # comes through: a «track» with a playlist inside it would have ffmpeg go and read
+                # this worker's own disk.
+                media._refuse_playlists(track)
+            except RuntimeError as exc:
+                # Unreadable, or a playlist where the music should be: identical on a second try.
+                log.info("montage %s: the uploaded track is no good: %s", ref, exc)
+                return _give_up_for_good(conn, ref, "загруженный трек не читается")
+        else:
+            track = assembly.track_file(track_id)
+
+        # The pieces are chosen and in their places by now — all that is settled here is how long
+        # each is held, so that the join lands on a beat. A track with no tempo leaves them as they
+        # are.
+        chosen = rhythm.fit(chosen, rhythm.beats(track))
+
         assembled = workdir / "montage.mp4"
-        clips = assembly.assemble(chosen, orientation, track_id, workdir, assembled)
+        clips = assembly.assemble(chosen, orientation, track, workdir, assembled)
         duration = media._duration(assembled)
         media._upload(s3, assembled, video_key, "video/mp4")
 

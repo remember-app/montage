@@ -68,6 +68,10 @@ class Piece:
     # this one is what ffmpeg is pointed at: first the downloaded original, then the cut of it.
     path: pathlib.Path = pathlib.Path()
     start: float = 0.0  # where in the original the cut begins
+    # A clip's own file, in seconds: that is how far `rhythm` may stretch the piece to put the join
+    # on a beat, and past it there is nothing left to show. Zero on a photograph — a still is held
+    # for as long as it needs to be.
+    source_seconds: float = 0.0
     # The moment `_best_moment` scored, in the original's own timeline — not where the cut begins.
     # Kept because the cover is taken from it: `start` is that moment pulled back by half a clip.
     best_second: float = 0.0
@@ -198,7 +202,8 @@ def judge(piece):
         # Centred on the best moment, then pulled back inside the file at both ends.
         start = min(max(second - seconds / 2, 0.0), max(duration - seconds, 0.0))
     return dataclasses.replace(
-        piece, sharpness=sharpness, seconds=seconds, start=start, best_second=second, rejected=why
+        piece, sharpness=sharpness, seconds=seconds, start=start, source_seconds=duration or 0.0,
+        best_second=second, rejected=why,
     )
 
 

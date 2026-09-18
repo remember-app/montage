@@ -4,8 +4,9 @@ Everything in here is ffmpeg, and nothing in here asks why these pieces and not 
 handed a list of pieces that already know their length, where in their own file each is cut from
 and where in the video it goes; it normalises every one of them onto the montage's canvas and
 crossfades them end to end with the track over the top. Sharpness, exposure, bursts, the
-organizer's two lists, a plan from a neural network — all of that is `selection`'s, so the way a
-video is directed can change without a line of this module moving.
+organizer's two lists, a plan from a neural network — all of that is `selection`'s, and how long a
+piece is held so the join lands on a beat is `rhythm`'s, so the way a video is directed can change
+without a line of this module moving.
 
 A piece, as far as this module is concerned, is anything that carries `path`, `kind`, `seconds` and
 `start`. That is the whole contract — it is deliberately not an import.
@@ -14,6 +15,7 @@ Every call here goes through `media.py`'s helpers: one worker, one way of runnin
 """
 
 import dataclasses
+import pathlib
 
 import media
 
@@ -29,18 +31,21 @@ FPS = 30
 CROSSFADE_SECONDS = 0.5
 MUSIC_FADE_SECONDS = 1.5
 
-# The tracks, drawn by ffmpeg itself out of nothing (`aevalsrc`): three sine tones a chord apart
-# under a slow swell. Not a licence, not a file in the repository, not an account to buy them from —
-# a placeholder that plays.
-# ponytail: synthesized tones stand in for music. Three real royalty-free tracks replace this dict
-# and nothing else, once the human has settled where they come from and under what licence.
-_SWELL = "(0.75+0.25*sin(2*PI*0.15*t))"
-TRACKS = {
-    "warm": f"{_SWELL}*(0.25*sin(2*PI*220*t)+0.18*sin(2*PI*277.18*t)+0.12*sin(2*PI*329.63*t))",
-    "bright": f"{_SWELL}*(0.22*sin(2*PI*329.63*t)+0.16*sin(2*PI*415.3*t)+0.12*sin(2*PI*493.88*t))",
-    "calm": f"{_SWELL}*(0.2*sin(2*PI*174.61*t)+0.14*sin(2*PI*261.63*t)+0.1*sin(2*PI*349.23*t))",
-}
-DEFAULT_TRACK = "warm"
+# The library: the five tracks of the «Под что монтировать» screen
+# (`design/screens/MontageMusic.html`), in its order and under its names — «Яркая», «Тёплая»,
+# «Спокойная», «Ночь», «Дорога». Ids only, because the worker shows no names: which name is which
+# track, who wrote it, where the file came from and under what licence is `tracks/README.md`, kept
+# beside the files themselves.
+TRACKS = ("bright", "warm", "calm", "night", "road")
+DEFAULT_TRACK = "warm"  # what an order that says nothing about music means
+
+TRACKS_DIR = pathlib.Path(__file__).parent / "tracks"
+
+
+def track_file(track_id):
+    """The library's file for a track. The organizer's own track never comes through here — that
+    one arrives out of R2 and reaches `assemble` the same way, just from somewhere else."""
+    return TRACKS_DIR / f"{track_id}.mp3"
 
 
 def length_of(pieces):
@@ -48,8 +53,11 @@ def length_of(pieces):
     return sum(piece.seconds for piece in pieces) - CROSSFADE_SECONDS * (len(pieces) - 1)
 
 
-def assemble(pieces, orientation, track_id, workdir, out):
+def assemble(pieces, orientation, track, workdir, out):
     """The chosen pieces as one video at `out`, and the normalised clips it was made of.
+
+    `track` is a file — one of the library's own or the one the organizer uploaded. Which of the two
+    it is was settled before this module was called, and nothing here can tell them apart.
 
     The clips come back because they are the only place the lengths are true: `_normalise` is asked
     for a length and the file that comes out of it is measured rather than believed, and whoever
@@ -67,7 +75,7 @@ def assemble(pieces, orientation, track_id, workdir, out):
         clips.append(dataclasses.replace(
             piece, path=clip, seconds=media._duration(clip) or piece.seconds
         ))
-    _assemble(clips, track_id, out)
+    _assemble(clips, track, out)
     return clips
 
 
@@ -96,7 +104,7 @@ def _normalise(piece, orientation, out):
     )
 
 
-def _assemble(clips, track_id, out):
+def _assemble(clips, track, out):
     """The normalised clips into one file: crossfaded end to end, the track faded over the top."""
     total = length_of(clips)
     fade = min(MUSIC_FADE_SECONDS, total / 3)
@@ -111,7 +119,7 @@ def _assemble(clips, track_id, out):
             f"duration={CROSSFADE_SECONDS}:offset={offset:.3f}[v{index}]"
         )
         label, ends_at = f"v{index}", offset + clip.seconds
-    music = len(clips)  # the generated track is the input after the last clip
+    music = len(clips)  # the track is the input after the last clip
     chain.append(
         f"[{music}:a]afade=t=in:st=0:d={fade:.3f},"
         f"afade=t=out:st={total - fade:.3f}:d={fade:.3f}[a]"
@@ -120,7 +128,7 @@ def _assemble(clips, track_id, out):
     # `-protocol_whitelist` is an *input* option: ffmpeg scopes it to the group it precedes, so the
     # one `media._ffmpeg` puts at the front guards input 0 and nothing else. This is the worker's
     # only multi-input call, so it is the only place that has to repeat it — every clip and the
-    # generated track get their own, and the whitelist means the same thing on all of them.
+    # track get their own, and the whitelist means the same thing on all of them.
     inputs = [
         argument
         for clip in clips
@@ -128,7 +136,11 @@ def _assemble(clips, track_id, out):
     ]
     media._ffmpeg(
         *inputs, "-protocol_whitelist", "file",
-        "-f", "lavfi", "-i", f"aevalsrc={TRACKS[track_id]}:d={total:.3f}",
+        # A track shorter than the montage is played again from the top (`-stream_loop -1`), a
+        # longer one is cut off with the picture, because `-shortest` is down below. Either way the
+        # music never has to be told how long to play: the montage is cut to the material, not to
+        # the track.
+        "-stream_loop", "-1", "-i", str(track),
         "-filter_complex", ";".join(chain),
         # A single clip is never crossfaded, so there is no filter output to map — the input itself
         # is the video, and it is named the way ffmpeg names inputs rather than filter outputs.

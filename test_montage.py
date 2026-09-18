@@ -10,12 +10,14 @@ R2_ENDPOINT points at.
 """
 
 import json
+import uuid
 
 import pytest
 
 import assembly
 import media
 import montage
+import rhythm
 import selection
 import worker
 
@@ -57,6 +59,20 @@ def poster_of(conn, montage_id):
     ).fetchone()[0]
 
 
+# A montage is cut to the beat of its track: every piece is pulled to the nearest one, so the
+# finished video comes out around the sum of its pieces rather than exactly on it — by up to half a
+# beat either way, and the beats of real music are not evenly spaced (`rhythm.py`). A second of
+# slack covers that and still tells a montage of four pieces from one of three or five: there are
+# three seconds between those. What the windows below are for is how many pieces went in, not the
+# music — the rhythm itself is `test_rhythm.py`'s, and a cut to an uploaded track is below.
+RHYTHM_SLACK = 1.0
+
+
+def about(duration, expected):
+    """The montage came out about as long as it should, with room for the pull towards the beat."""
+    return abs(duration - expected) <= RHYTHM_SLACK
+
+
 def material(conn, s3, memory, tmp_path):
     """Three photographs and a clip in the bucket, `ready`, as the previews leave them. Their ids
     come back in the order the montage reads them, for the tests that name one in the order."""
@@ -80,12 +96,12 @@ def test_a_memory_of_photos_and_a_clip_becomes_one_playable_video(conn, s3, memo
     status, video_key, duration, error_text = read_montage(conn, montage_id)
     assert (status, video_key, error_text) == ("ready", f"montages/{montage_id}.mp4", None)
     # Three stills of three seconds and a four-second clip cut to the three it has — twelve seconds
-    # of material, less half a second for each of the three crossfades. The window is tight on
-    # purpose: pieces butted together instead of overlapped would come to twelve.
-    assert 10 <= duration <= 11
+    # of material, less half a second for each of the three crossfades. Pieces butted together
+    # instead of overlapped would come to twelve, which is outside the window even with the slack.
+    assert about(duration, 10.5)
 
     assembled = probe(fetch(s3, video_key, tmp_path / "montage.mp4"))
-    assert 10 <= float(assembled["format"]["duration"]) <= 11
+    assert about(float(assembled["format"]["duration"]), 10.5)
     tracks = {stream["codec_type"]: stream for stream in assembled["streams"]}
     assert set(tracks) == {"video", "audio"}, "picture and music both landed"
     assert tracks["video"]["codec_name"] == "h264"
@@ -107,6 +123,72 @@ def test_a_memory_of_photos_and_a_clip_becomes_one_playable_video(conn, s3, memo
     assert selection._exposed(selection._grey_frames(poster_file)[0])
 
 
+def click_track(path, gap=1.6):
+    """Thirty seconds of metronome: one click every 1.6 seconds. The tempo is known because it was
+    put there, and it is deliberately slow — under a track like this the pieces stretch visibly, and
+    the same material can no longer come to its even 10.5 seconds."""
+    ffmpeg("-f", "lavfi",
+           "-i", f"aevalsrc='0.8*sin(2*PI*1200*t)*exp(-40*mod(t,{gap}))':d=30", str(path))
+    return path
+
+
+def test_a_montage_is_cut_to_the_beat_of_the_track_the_organizer_uploaded(
+    conn, s3, memory, tmp_path
+):
+    """The organizer's own track instead of the library's: the order names a key rather than an id
+    (the api's `music_uploads`), and the joins fall into its rhythm just the same.
+
+    The rhythm is checked at the last join and only there: behind it stands the last piece, which
+    the fitting never touches, and its length is known — three seconds. So the last join sits at
+    the end of the montage less those three seconds plus the half-crossfade that piece began with,
+    and that moment has to be one of the track's beats. The montage itself, under a metronome this
+    slow, has to come out well past the even 10.5 seconds — otherwise nothing was pulled anywhere.
+    """
+    track_key = f"music/{uuid.uuid4()}.wav"
+    s3.upload_file(str(click_track(tmp_path / "click.wav")), media.bucket(), track_key)
+    montage_id = order(conn, memory, {"target_seconds": 30, "music_track_key": track_key})
+    material(conn, s3, memory, tmp_path)
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    status, _, duration, error_text = read_montage(conn, montage_id)
+    assert (status, error_text) == ("ready", None)
+    assert duration > 11.5, "the pieces reached for the beats — even three-second cuts do not"
+
+    # Three seconds: that is how long both a photograph and this material's clip are held (its file
+    # is three seconds long, and «3–5 секунд вокруг лучшего момента» is cut from what there is), so
+    # whichever of the four ends up last, the tail of the montage is the same.
+    last_join = duration - 3.0 + assembly.CROSSFADE_SECONDS / 2
+    beats = rhythm.beats(tmp_path / "click.wav")
+    assert beats, "a metronome is a tempo, or there is nothing here to check"
+    # A frame and a half: for the encoding, which rounds the montage's length to one, and for
+    # nothing else — a join that missed its beat would miss it by hundreds of milliseconds.
+    assert min(abs(last_join - beat) for beat in beats) < 0.1, (
+        f"the last join, at {last_join:.2f}, is not on a beat"
+    )
+
+
+def test_a_music_file_that_will_not_open_fails_the_montage_instead_of_retrying(
+    conn, s3, memory, tmp_path
+):
+    """An uploaded track is somebody else's bytes, and ffmpeg reads them. Not music at all (or a
+    playlist, which would send ffmpeg walking this worker's disks) — refused on the spot: the second
+    attempt would meet the same file."""
+    track_key = f"music/{uuid.uuid4()}.wav"
+    s3.upload_file(str(unopenable(tmp_path / "notmusic")), media.bucket(), track_key)
+    montage_id = order(conn, memory, {"music_track_key": track_key})
+    material(conn, s3, memory, tmp_path)
+    job_id = worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    assert conn.execute("SELECT status FROM jobs WHERE id = %s", (job_id,)).fetchone()[0] == "done"
+    status, _, _, error_text = read_montage(conn, montage_id)
+    assert status == "failed"
+    assert "трек" in error_text
+
+
 def test_a_montage_ordered_portrait_is_assembled_the_other_way_up(conn, s3, memory, tmp_path):
     """The organizer asked for a video to watch on a phone. The same material, the same length, the
     same everything else — padded into 1080×1920 instead of 1920×1080. The numbers are written out
@@ -121,7 +203,7 @@ def test_a_montage_ordered_portrait_is_assembled_the_other_way_up(conn, s3, memo
 
     status, video_key, duration, error_text = read_montage(conn, montage_id)
     assert (status, error_text) == ("ready", None)
-    assert 10 <= duration <= 11, "turning the canvas does not change what goes in it"
+    assert about(duration, 10.5), "turning the canvas does not change what goes in it"
 
     assembled = probe(fetch(s3, video_key, tmp_path / "portrait.mp4"))
     tracks = {stream["codec_type"]: stream for stream in assembled["streams"]}
@@ -242,7 +324,7 @@ def test_a_file_that_will_not_open_is_left_out_rather_than_failing_the_video(
 
     status, _, duration, error_text = read_montage(conn, montage_id)
     assert (status, error_text) == ("ready", None)
-    assert 10 <= duration <= 11, "the four that opened went in, the broken one was left out"
+    assert about(duration, 10.5), "the four that opened went in, the broken one was left out"
 
 
 def test_a_badly_exposed_photo_is_left_out_rather_than_failing_the_video(
@@ -261,7 +343,7 @@ def test_a_badly_exposed_photo_is_left_out_rather_than_failing_the_video(
 
     status, _, duration, error_text = read_montage(conn, montage_id)
     assert (status, error_text) == ("ready", None)
-    assert 10 <= duration <= 11, "the crushed photo had no usable frame and was left out uncounted"
+    assert about(duration, 10.5), "the crushed photo had no usable frame and was left out uncounted"
 
 
 def test_a_photo_the_organizer_marked_include_is_in_the_video_the_algorithm_notwithstanding(
@@ -283,7 +365,7 @@ def test_a_photo_the_organizer_marked_include_is_in_the_video_the_algorithm_notw
     status, _, duration, error_text = read_montage(conn, montage_id)
     assert (status, error_text) == ("ready", None)
     # Five pieces of three seconds instead of four, less half a second for each of four joins.
-    assert 12.5 <= duration <= 13.5, "the crushed photo went in because the order asked for it"
+    assert about(duration, 13.0), "the crushed photo went in because the order asked for it"
 
 
 def test_a_photo_the_organizer_marked_exclude_stays_out_of_the_video(conn, s3, memory, tmp_path):
@@ -299,7 +381,7 @@ def test_a_photo_the_organizer_marked_exclude_stays_out_of_the_video(conn, s3, m
     status, _, duration, error_text = read_montage(conn, montage_id)
     assert (status, error_text) == ("ready", None)
     # Two stills and the clip — nine seconds of material, less half a second for each of two joins.
-    assert 7.5 <= duration <= 8.5, "one of the four pieces was left out on the order's own word"
+    assert about(duration, 8.0), "one of the four pieces was left out on the order's own word"
 
 
 def test_too_little_material_that_actually_opens_fails_without_retrying(conn, s3, memory, tmp_path):
@@ -339,9 +421,10 @@ def test_a_clip_is_laid_into_the_chain_at_the_length_it_really_is(conn, s3, memo
     status, video_key, duration, _ = read_montage(conn, montage_id)
     assert status == "ready"
     # Two seconds of picture and three stills of three, less half a second for each of three
-    # joins: 9.5. Booked at the container's 3.5 instead, the file comes out visibly shorter.
-    assert 9.3 <= duration <= 9.7, "the clip went in at its real two seconds"
-    assert 9.3 <= float(probe(fetch(s3, video_key, tmp_path / "m.mp4"))["format"]["duration"]) <= 9.7
+    # joins: 9.5. Booked at the container's 3.5 instead, ffmpeg truncates the chain and the whole
+    # montage comes out at three seconds — nowhere near this window, slack for the rhythm or not.
+    assert about(duration, 9.5), "the clip went in at its real two seconds"
+    assert about(float(probe(fetch(s3, video_key, tmp_path / "m.mp4"))["format"]["duration"]), 9.5)
 
 
 def test_too_little_material_fails_the_montage_instead_of_retrying(conn, memory):
@@ -395,16 +478,15 @@ def test_a_montage_that_keeps_failing_fails_the_row(conn, memory):
     assert error_text == "не удалось собрать ролик"
 
 
-@pytest.mark.parametrize("track_id", sorted(assembly.TRACKS))
-def test_every_track_is_something_ffmpeg_can_play(track_id, tmp_path):
-    """The tracks are expressions rather than files, so a typo in one is a montage that fails only
-    when somebody happens to order that track. Here all three are drawn, not just the default."""
-    played = tmp_path / f"{track_id}.m4a"
-    media._ffmpeg(
-        "-f", "lavfi", "-i", f"aevalsrc={assembly.TRACKS[track_id]}:d=1", "-c:a", "aac", str(played)
-    )
+@pytest.mark.parametrize("track_id", assembly.TRACKS)
+def test_every_track_of_the_library_is_music_that_plays(track_id):
+    """Five files on disk, and a montage ordered with one of them falls over only when somebody
+    happens to order *that* one — so all five are opened here, not just the default. A track
+    renamed, moved or never committed fails this test instead of somebody's video."""
+    played = probe(assembly.track_file(track_id))
 
-    assert probe(played)["streams"][0]["codec_name"] == "aac"
+    assert "audio" in [stream["codec_type"] for stream in played["streams"]]
+    assert float(played["format"]["duration"]) > 30, "music, not a second and a half of signal"
 
 
 def test_an_api_that_does_not_answer_does_not_fail_a_finished_montage(monkeypatch):
