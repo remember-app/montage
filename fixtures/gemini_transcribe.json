@@ -1,0 +1,24 @@
+{
+  "id": "interactions/c9f0f895fb98ab91",
+  "model": "gemini-3.8-flash",
+  "steps": [
+    {
+      "type": "model_output",
+      "content": [
+        {"type": "text", "text": "Ну что, с днём рождения! Загадывай желание и задувай.\n"}
+      ]
+    }
+  ],
+  "usage": {
+    "input_tokens_by_modality": [
+      {"modality": "text", "tokens": 54},
+      {"modality": "audio", "tokens": 832}
+    ],
+    "total_cached_tokens": 0,
+    "total_input_tokens": 886,
+    "total_output_tokens": 17,
+    "total_thought_tokens": 0,
+    "total_tokens": 903,
+    "total_tool_use_tokens": 0
+  }
+}

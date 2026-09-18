@@ -1,6 +1,6 @@
 """Montage worker: takes jobs from the shared `jobs` table in Postgres, one handler per job.
 
-    python worker.py init                  # create the jobs table (idempotent)
+    python worker.py init                  # create the worker's own tables (idempotent)
     python worker.py enqueue <type> [ref]  # put one job in the queue
     python worker.py run                   # the loop, Ctrl-C to stop
 
@@ -15,6 +15,7 @@ import time
 
 import psycopg
 
+import ai
 import media
 import montage as montages  # the module and its handler share the job's name; the import cannot
 
@@ -180,6 +181,9 @@ def wait_for_job(conn):
 
 def run(conn):
     log.info("waiting for jobs, handlers: %s", ", ".join(HANDLERS))
+    # Says which cloud model this worker has, or says out loud that it has none — the job that
+    # then quietly cuts a montage without one is otherwise indistinguishable from one that had it.
+    log.info("cloud model: %s", ai.from_env() or "none, every call to it will be skipped")
     conn.execute("LISTEN jobs")  # every insert into `jobs` notifies this channel — see schema.sql
     next_sweep = 0.0  # once at start-up, then hourly
     while True:
@@ -203,7 +207,7 @@ if __name__ == "__main__":
     with connect() as conn:
         if command == "init" and not args:
             init_schema(conn)
-            print("jobs table ready")
+            print("jobs and ai_requests tables ready")
         elif command == "enqueue" and 1 <= len(args) <= 2:
             print("queued job", enqueue(conn, *args))
         elif command == "run" and not args:

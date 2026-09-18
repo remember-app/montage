@@ -1,4 +1,5 @@
--- The shared job queue. The montage worker owns this table; the API only inserts rows.
+-- The montage worker's own tables: the shared job queue, and the journal of what was asked of the
+-- cloud model. The API only inserts rows into `jobs` and never touches the journal.
 -- Idempotent on purpose: `python worker.py init` applies it on every start-up of a new database.
 
 CREATE TABLE IF NOT EXISTS jobs (
@@ -31,3 +32,29 @@ $$;
 DROP TRIGGER IF EXISTS jobs_notify ON jobs;
 CREATE TRIGGER jobs_notify AFTER INSERT ON jobs
     FOR EACH STATEMENT EXECUTE FUNCTION jobs_notify();
+
+-- Every question the worker put to a cloud model, and what came back (doc-03: «все запросы,
+-- которые делаем в нейросети, обязательно сохраняются — чтобы их можно было анализировать»).
+-- Written by `ai.py` and by nothing else; read by hand in psql, there is no endpoint on it.
+--
+-- `request` holds the prompt and a line about each attached file — never the file's bytes, which
+-- are in the bucket already, and never the API key. A row that says 'skipped' is a call that was
+-- never made because no model was configured: it has no `response` for exactly that reason.
+CREATE TABLE IF NOT EXISTS ai_requests (
+    id          bigserial   PRIMARY KEY,
+    provider    text        NOT NULL,                   -- gemini, openai — or which one was asked for
+    model       text,                                   -- and its model, as the setting named it
+    operation   text        NOT NULL,                   -- describe_media / transcribe_speech / plan_montage
+    ref         text,                                   -- id of the media item or montage it is about
+    status      text        NOT NULL DEFAULT 'sent'
+                            CHECK (status IN ('sent', 'answered', 'failed', 'skipped')),
+    request     jsonb       NOT NULL,
+    response    jsonb,
+    error       text,
+    took_ms     integer,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    updated_at  timestamptz NOT NULL DEFAULT now()
+);
+
+-- «Что уже спрашивали про этот кадр» — the one lookup that is not just the tail of the table.
+CREATE INDEX IF NOT EXISTS ai_requests_ref_idx ON ai_requests (ref) WHERE ref IS NOT NULL;

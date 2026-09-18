@@ -1,0 +1,34 @@
+{
+  "id": "resp_0b4c2f9a7d1e4c8fa1",
+  "object": "response",
+  "created_at": 1789041600,
+  "status": "completed",
+  "model": "gpt-5.5",
+  "output": [
+    {
+      "id": "rs_0b4c2f9a7d1e4c8fa2",
+      "type": "reasoning",
+      "summary": []
+    },
+    {
+      "id": "msg_0b4c2f9a7d1e4c8fa3",
+      "type": "message",
+      "status": "completed",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "{\"description\": \"Женщина вносит торт со свечами в тёмную комнату, рядом на стуле сидит рыжий кот.\", \"cast\": [\"человек-1\", \"животное-1\"]}",
+          "annotations": []
+        }
+      ]
+    }
+  ],
+  "usage": {
+    "input_tokens": 1146,
+    "input_tokens_details": {"cached_tokens": 0},
+    "output_tokens": 48,
+    "output_tokens_details": {"reasoning_tokens": 0},
+    "total_tokens": 1194
+  }
+}

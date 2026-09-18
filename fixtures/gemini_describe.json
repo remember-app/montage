@@ -1,0 +1,28 @@
+{
+  "id": "interactions/8f14e45fceea167a",
+  "model": "gemini-3.8-flash",
+  "steps": [
+    {
+      "type": "model_output",
+      "content": [
+        {
+          "type": "text",
+          "text": "{\"description\": \"Женщина вносит торт со свечами в тёмную комнату, рядом на стуле сидит рыжий кот.\", \"cast\": [\"человек-1\", \"животное-1\"]}"
+        }
+      ]
+    }
+  ],
+  "output_text": "{\"description\": \"Женщина вносит торт со свечами в тёмную комнату, рядом на стуле сидит рыжий кот.\", \"cast\": [\"человек-1\", \"животное-1\"]}",
+  "usage": {
+    "input_tokens_by_modality": [
+      {"modality": "text", "tokens": 138},
+      {"modality": "image", "tokens": 1032}
+    ],
+    "total_cached_tokens": 0,
+    "total_input_tokens": 1170,
+    "total_output_tokens": 61,
+    "total_thought_tokens": 0,
+    "total_tokens": 1231,
+    "total_tool_use_tokens": 0
+  }
+}
