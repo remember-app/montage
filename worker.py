@@ -18,6 +18,7 @@ import psycopg
 import ai
 import media
 import montage as montages  # the module and its handler share the job's name; the import cannot
+import screening
 import speech
 
 MAX_ATTEMPTS = 3
@@ -61,6 +62,7 @@ def dummy(conn, ref):
 HANDLERS = {
     "dummy": dummy,
     "media_preview": media.media_preview,
+    "media_screening": screening.media_screening,
     "media_speech": speech.transcribe,
     "montage": montages.montage,
 }
@@ -102,7 +104,37 @@ def sweep_photos_without_previews(conn):
     return queued
 
 
-SWEEPS = (media.sweep_stale_uploads, sweep_photos_without_previews)
+def sweep_media_without_screening(conn):
+    """Ready material the отсев has not looked at yet, given the job that looks.
+
+    Everything taken in before the worker learned to screen is like this: the proposal is queued the
+    moment an item goes `ready` (`media.media_preview`), and for old material that moment is long
+    past. Until the job has run both columns are `null` — «не посчитано», which the gallery shows as
+    no opinion at all rather than as a frame the analysis kept.
+
+    The guards are `sweep_photos_without_previews`'s above, for the same reasons: an item already
+    `queued` or `running` is left to finish, and one whose screening has just been given up on is
+    left alone for `CATCH_UP_AFTER_HOURS` rather than downloaded and judged three times an hour for
+    as long as the worker runs. Returns how many were queued.
+    """
+    queued = conn.execute(
+        """INSERT INTO jobs (type, ref)
+           SELECT 'media_screening', item.id::text FROM media_items item
+           WHERE item.status = 'ready' AND item.screening_rejected IS NULL
+             AND NOT EXISTS (
+               SELECT 1 FROM jobs job
+               WHERE job.type = 'media_screening' AND job.ref = item.id::text
+                 AND (job.status IN ('queued', 'running')
+                      OR (job.status = 'failed'
+                          AND job.updated_at > now() - make_interval(hours => %s))))""",
+        (CATCH_UP_AFTER_HOURS,),
+    ).rowcount
+    if queued:
+        log.info("queued a screening proposal for %s ready item(s) that had none", queued)
+    return queued
+
+
+SWEEPS = (media.sweep_stale_uploads, sweep_photos_without_previews, sweep_media_without_screening)
 
 
 # --- the loop ---------------------------------------------------------------

@@ -198,11 +198,13 @@ def media_preview(conn, ref):
                 s3.delete_object(Bucket=bucket(), Key=key)
         return
     log.info("media item %s (%s) is ready", ref, kind)
+    # Two jobs of the отсев's and speech's own, queued by hand rather than through
+    # `worker.enqueue` — `worker` imports this module, and the import cannot go both ways.
+    # The screening proposal is every kind's (`screening.py`): the organizer meets it in the
+    # gallery long before any video is ordered. Speech is a clip's alone (`speech.py`) — a cloud
+    # model listening to one takes minutes, which the gallery does not wait on.
+    conn.execute("INSERT INTO jobs (type, ref) VALUES ('media_screening', %s)", (ref,))
     if kind == "video":
-        # What is said in the clip, on a job of its own (`speech.py`): the gallery is waiting on
-        # this one, and a cloud model listening to a clip takes minutes. Queued by hand rather than
-        # through `worker.enqueue` — `worker` imports this module, and the import cannot go both
-        # ways; the queue is one INSERT either way.
         conn.execute("INSERT INTO jobs (type, ref) VALUES ('media_speech', %s)", (ref,))
 
 
