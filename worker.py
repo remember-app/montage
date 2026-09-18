@@ -18,6 +18,7 @@ import psycopg
 import ai
 import media
 import montage as montages  # the module and its handler share the job's name; the import cannot
+import speech
 
 MAX_ATTEMPTS = 3
 BACKOFF_SECONDS = 30  # attempt n is retried after BACKOFF_SECONDS * 2 ** (n - 1)
@@ -60,6 +61,7 @@ def dummy(conn, ref):
 HANDLERS = {
     "dummy": dummy,
     "media_preview": media.media_preview,
+    "media_speech": speech.transcribe,
     "montage": montages.montage,
 }
 
@@ -207,7 +209,7 @@ if __name__ == "__main__":
     with connect() as conn:
         if command == "init" and not args:
             init_schema(conn)
-            print("jobs and ai_requests tables ready")
+            print("the worker's tables are ready")
         elif command == "enqueue" and 1 <= len(args) <= 2:
             print("queued job", enqueue(conn, *args))
         elif command == "run" and not args:

@@ -58,3 +58,20 @@ CREATE TABLE IF NOT EXISTS ai_requests (
 
 -- «Что уже спрашивали про этот кадр» — the one lookup that is not just the tail of the table.
 CREATE INDEX IF NOT EXISTS ai_requests_ref_idx ON ai_requests (ref) WHERE ref IS NOT NULL;
+
+-- What is said in one clip, word for word: one row per media item, written by the `media_speech`
+-- job (`speech.py`) once a video is ready, and read from then on by everything that needs the words
+-- instead of asking for them again (doc-03, «выходы шагов пайплайна переиспользуются»).
+--
+-- There is no column for who said it, and that is the design: speech is transcribed, speakers are
+-- not identified (decision-11). An empty `transcript` is an answer and not a gap — the clip has no
+-- sound, or nobody speaks in it, and nobody will be asked about it a second time.
+--
+-- `media_id` is the `media_items` row as text, the way `jobs.ref` names it. No foreign key: that
+-- table belongs to the api's migrations, and this file has to apply to a database they have never
+-- touched.
+CREATE TABLE IF NOT EXISTS media_speech (
+    media_id    text        PRIMARY KEY,
+    transcript  text        NOT NULL,
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
