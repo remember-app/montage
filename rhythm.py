@@ -145,6 +145,6 @@ def _room(piece):
     a clip only while there is anything left in its file past the point it is cut from. Stretched
     further, it comes back from ffmpeg shorter than asked for, and the join misses the beat by
     exactly that difference."""
-    if piece.kind == "video" and piece.source_seconds:
-        return min(MAX_PIECE_SECONDS, piece.source_seconds - piece.start)
+    if piece.kind == "video" and piece.duration:
+        return min(MAX_PIECE_SECONDS, piece.duration - piece.start)
     return MAX_PIECE_SECONDS

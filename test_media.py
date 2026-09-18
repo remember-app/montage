@@ -73,6 +73,10 @@ def memory(conn):
         (user_id,),
     ).fetchone()[0]
     yield memory_id, user_id
+    # Everything hung on the memory goes with it, the worker's own tables included: nothing has a
+    # foreign key to `media_items` (`schema.sql` applies to databases the api has never touched),
+    # so a description left behind here would outlive every row that explains it.
+    conn.execute("DELETE FROM media_understandings WHERE memory_id = %s", (str(memory_id),))
     conn.execute("DELETE FROM media_items WHERE memory_id = %s", (memory_id,))
     conn.execute("DELETE FROM memories WHERE id = %s", (memory_id,))
     conn.execute("DELETE FROM users WHERE id = %s", (user_id,))

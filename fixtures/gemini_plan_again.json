@@ -1,0 +1,25 @@
+{
+  "id": "interactions/9b8f2a1c4d5e6f70",
+  "model": "gemini-3.8-flash",
+  "steps": [
+    {
+      "type": "model_output",
+      "content": [
+        {
+          "type": "text",
+          "text": "{\"plan\": [{\"media_id\": \"m-3\", \"seconds\": 5.0, \"accent\": \"собака под столом — с неё и начинаем\"}, {\"media_id\": \"m-1\", \"seconds\": 2.0, \"accent\": \"короткий проход по столу, чтобы было понятно, где всё происходит\"}]}"
+        }
+      ]
+    }
+  ],
+  "output_text": "{\"plan\": [{\"media_id\": \"m-3\", \"seconds\": 5.0, \"accent\": \"собака под столом — с неё и начинаем\"}, {\"media_id\": \"m-1\", \"seconds\": 2.0, \"accent\": \"короткий проход по столу, чтобы было понятно, где всё происходит\"}]}",
+  "usage": {
+    "input_tokens_by_modality": [{"modality": "text", "tokens": 418}],
+    "total_cached_tokens": 0,
+    "total_input_tokens": 418,
+    "total_output_tokens": 96,
+    "total_thought_tokens": 80,
+    "total_tokens": 594,
+    "total_tool_use_tokens": 0
+  }
+}

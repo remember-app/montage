@@ -11,9 +11,13 @@ calls the pipeline's modules in turn and writes the result back. The modules it 
 replaceable on their own, which is what the spec asks of the montage service (doc-03, «Сервис
 монтажа собран из отдельных модулей»):
 
+    `director`  — the film the cloud model plans out of the material, when there is a model to ask.
     `selection` — which pieces go into the video and in what order, and why the rest do not.
     `rhythm`    — how long each of them is held, so the joins land on the track's beats.
     `assembly`  — those pieces onto one canvas and into one file.
+
+The first two answer the same question and hand back the same thing; the director is asked first
+and the отбор cuts the video whenever it answers None, which is every montage made today.
 
 The steps are architecture.md, «Montage-пайплайн», with one departure: selection (its step 4) runs
 before normalisation (its step 3), so only the pieces that made the cut are ever encoded to 1080p
@@ -30,6 +34,7 @@ import tempfile
 import urllib.request
 
 import assembly
+import director
 import media
 import rhythm
 import selection
@@ -70,11 +75,14 @@ def montage(conn, ref):
         # else is a contract that moved on one side only — and it would be no better on a retry.
         return _give_up_for_good(conn, ref, f"неизвестная ориентация ролика «{orientation}»")
     # The organizer's own word on the material, marked before the order (doc-03, «Выбор медиа для
-    # ролика»): two optional lists of `media_items` ids. Nothing is decided about them here —
-    # `selection.choose` is where they are honoured, and every later way of directing a video will
-    # go through the same place.
+    # ролика»): two optional lists of `media_items` ids. Nothing is decided about them here — each
+    # way of directing a video honours them in its own file, and both of them do (`selection.choose`
+    # and `director.direct`), by the same rule: never the excluded, always the included.
     include = params.get("include_media_ids") or ()
     exclude = params.get("exclude_media_ids") or ()
+    # What the organizer said the video is about, in their own words. Nobody but the director has
+    # anything to do with it: the algorithm cannot read.
+    story = (params.get("story_text") or "").strip()
 
     items = conn.execute(
         # Ordered the way the gallery orders the same rows (api, `src/media/gallery.ts`): the
@@ -113,9 +121,15 @@ def montage(conn, ref):
                 conn, ref, "материал не годится для ролика: файлы не читаются или кадры испорчены"
             )
 
-        chosen, rejected = selection.choose(judged, target_seconds, include, exclude)
-        log.info("montage %s takes %s piece(s) and leaves out %s", ref, len(chosen),
-                 dict(collections.Counter(piece.rejected for piece in rejected)))
+        # The director first, and the отбор whenever there is no director: no cloud model, nothing
+        # described for it to read, or an answer with nothing of ours in it (`director.direct`).
+        chosen = director.direct(
+            conn, judged, target_seconds, include, exclude, story=story, ref=ref
+        )
+        if chosen is None:
+            chosen, rejected = selection.choose(judged, target_seconds, include, exclude)
+            log.info("montage %s takes %s piece(s) and leaves out %s", ref, len(chosen),
+                     dict(collections.Counter(piece.rejected for piece in rejected)))
         if not chosen:
             # Only reachable through the order itself: everything the memory holds is on the
             # organizer's «исключить» list. There is no video to make of nothing, and the same list

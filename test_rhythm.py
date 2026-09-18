@@ -133,7 +133,7 @@ def test_a_clip_is_never_stretched_past_its_own_file():
     # seconds out of a file with three left in it. The one that fits is taken: 2.0, a 2.25s piece.
     moments = (0.0, 2.0, 3.3, 6.0, 9.0, 12.0, 15.0, 18.0, 21.0)
     clip = dataclasses.replace(
-        photos(3.0)[0], kind="video", seconds=3.0, start=1.0, source_seconds=4.0
+        photos(3.0)[0], kind="video", seconds=3.0, start=1.0, duration=4.0
     )
 
     fitted = rhythm.fit([clip, *photos(3.0, 3.0)], moments)
