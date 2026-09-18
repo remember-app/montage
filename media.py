@@ -198,6 +198,12 @@ def media_preview(conn, ref):
                 s3.delete_object(Bucket=bucket(), Key=key)
         return
     log.info("media item %s (%s) is ready", ref, kind)
+    if kind == "video":
+        # What is said in the clip, on a job of its own (`speech.py`): the gallery is waiting on
+        # this one, and a cloud model listening to a clip takes minutes. Queued by hand rather than
+        # through `worker.enqueue` — `worker` imports this module, and the import cannot go both
+        # ways; the queue is one INSERT either way.
+        conn.execute("INSERT INTO jobs (type, ref) VALUES ('media_speech', %s)", (ref,))
 
 
 def _upload(s3, path, key, content_type):
