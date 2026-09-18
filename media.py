@@ -198,6 +198,11 @@ def media_preview(conn, ref):
                 s3.delete_object(Bucket=bucket(), Key=key)
         return
     log.info("media item %s (%s) is ready", ref, kind)
+    # And now that there is a `ready` row to hang it on: what the отсев makes of this one file, which
+    # the organizer meets in the gallery long before any video is ordered (`screening.py`). Written
+    # out rather than taken from `worker.enqueue` — `worker` imports this module, so this module
+    # cannot import it back.
+    conn.execute("INSERT INTO jobs (type, ref) VALUES ('media_screening', %s)", (ref,))
 
 
 def _upload(s3, path, key, content_type):
