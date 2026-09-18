@@ -483,6 +483,29 @@ def test_the_floor_does_not_count_the_pieces_the_organizer_struck_out(conn, s3, 
     assert "не годится" in error_text
 
 
+def test_the_floor_treats_a_piece_named_on_both_lists_as_struck_out(conn, s3, memory, tmp_path):
+    """The order contradicting itself is settled the same way here as in `selection.choose`:
+    «исключить» is the one that cannot be undone once a video is made, so it is the one the floor
+    counts too. Three good photos, one of them on both lists, are really only two — and a floor that
+    let «включить» save it here would pass an order `selection.choose` then cuts down to two anyway."""
+    ids = []
+    for index in range(3):
+        item_id, key = add_item(conn, memory, "photo", status="ready")
+        s3.upload_file(str(photo(tmp_path / f"photo-{index}.jpg")), media.bucket(), key)
+        ids.append(item_id)
+    montage_id = order(conn, memory, {
+        "target_seconds": 60, "include_media_ids": [ids[0]], "exclude_media_ids": [ids[0]],
+    })
+    job_id = worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    assert conn.execute("SELECT status FROM jobs WHERE id = %s", (job_id,)).fetchone()[0] == "done"
+    status, video_key, _, error_text = read_montage(conn, montage_id)
+    assert (status, video_key) == ("failed", None), "the contradiction did not save it from the floor"
+    assert "не годится" in error_text
+
+
 def test_too_little_material_that_actually_opens_fails_without_retrying(conn, s3, memory, tmp_path):
     """The floor is about material that can go in the video, not rows in the table: three rows of
     which two are unreadable would otherwise have been assembled into one three-second still."""
