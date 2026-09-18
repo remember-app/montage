@@ -1,0 +1,76 @@
+# Библиотека музыки
+
+Пять треков экрана «Под что монтировать» (`design/screens/MontageMusic.html`) — в порядке экрана.
+Имя файла — это id трека: он приходит в заказе ролика полем `music_track_id`, и по нему же
+`assembly.track_file` находит файл. Переименовать файл — значит переименовать трек, а его id знает
+ещё и api, который проверяет заказ.
+
+| id | на экране | что за трек | длина | темп | файл |
+|---|---|---|---|---|---|
+| `bright` | Яркая | Happy Alley | 1:20 | 112 | `bright.mp3` |
+| `warm` | Тёплая | Easy Lemon | 2:06 | 82 | `warm.mp3` |
+| `calm` | Спокойная | Thinking of You | 1:50 | 72 | `calm.mp3` |
+| `night` | Ночь | Night Cave | 1:50 | 104 | `night.mp3` |
+| `road` | Дорога | Neo Western | 2:26 | 84 | `road.mp3` |
+
+Трек короче ролика играет с начала ещё раз, длиннее — обрывается на конце картинки; поэтому длина
+трека ни на что не влияет, а темп влияет: под него ложатся склейки (`rhythm.py`).
+
+## Откуда и по какому праву
+
+Все пять написал **Kevin MacLeod**, все пять взяты с его сайта **incompetech.com** — скачиваются
+прямой ссылкой, без регистрации и без оплаты. Лицензия у всех одна:
+**Creative Commons Attribution 4.0** (<https://creativecommons.org/licenses/by/4.0/>).
+
+CC BY 4.0 разрешает любое использование, включая коммерческое, и переделку — **при условии
+указания автора**. Условие относится и к роликам, которые соберёт наш воркер: там, где ролик
+показывают и откуда его отдают, автор музыки должен быть назван. Строки для этого — ниже, их и
+нужно поставить в приложении (экран ролика, «о треке» или титры — как решит продукт). Лицензия без
+указания авторства у incompetech платная; пока она не куплена, строки обязательны.
+
+| файл | строка для указания авторства |
+|---|---|
+| `bright.mp3` | «Happy Alley» by Kevin MacLeod (incompetech.com) — CC BY 4.0 |
+| `warm.mp3` | «Easy Lemon» by Kevin MacLeod (incompetech.com) — CC BY 4.0 |
+| `calm.mp3` | «Thinking of You» by Kevin MacLeod (incompetech.com) — CC BY 4.0 |
+| `night.mp3` | «Night Cave» by Kevin MacLeod (incompetech.com) — CC BY 4.0 |
+| `road.mp3` | «Neo Western» by Kevin MacLeod (incompetech.com) — CC BY 4.0 |
+
+Полностью, как просит сам автор: *"<название>" Kevin MacLeod (incompetech.com), Licensed under
+Creative Commons: By Attribution 4.0 License, http://creativecommons.org/licenses/by/4.0/*.
+
+## Что именно лежит в репозитории
+
+Файлы — байт в байт те, что отдаёт сайт: ничего не перекодировано и не обрезано, чтобы файл здесь и
+файл по ссылке можно было сверить. Скачано 2026-09-18, вместе — 22 МБ; это единственное бинарное,
+что есть в репозитории воркера.
+
+Ссылка на файл — это `https://incompetech.com/music/royalty-free/mp3-royaltyfree/<название>.mp3`,
+страница трека — `https://incompetech.com/music/royalty-free/index.html?isrc=<ISRC>`. Каталог автора
+машиночитаемый (<https://incompetech.com/music/royalty-free/pieces.json>) — оттуда взяты длина,
+темп и ISRC в таблицах выше.
+
+| файл | название на сайте | ISRC |
+|---|---|---|
+| `bright.mp3` | Happy Alley | USUAN1100482 |
+| `warm.mp3` | Easy Lemon | USUAN1200076 |
+| `calm.mp3` | Thinking of You | USUAN1100637 |
+| `night.mp3` | Night Cave | USUAN1100446 |
+| `road.mp3` | Neo Western | USUAN1100615 |
+
+Что файл тот самый — `shasum -a 256 tracks/*.mp3`:
+
+```
+f598c8ee624f1db9a2cd38886524a40baff4ce730dcf999c0763791268fa8265  tracks/bright.mp3
+11229fe56a1cdb9e47696164f4386e5c09fb4a67e961a065e19ac6af830ba52e  tracks/calm.mp3
+b8a80bbf0fc66db1758acdec416a219c10d7546ec4e2ac33c5f78c35f7a77534  tracks/night.mp3
+27046fcf6c91a3f59dc8acaca40c7d3ef200cb1054f699aa27ebc9f4a80d9c28  tracks/road.mp3
+2486b8ecfe4575f9ab31613a2c03c2ee45e6e5280301d05b4dd7237c9e1c2531  tracks/warm.mp3
+```
+
+## Заменить трек
+
+Положить рядом файл с тем же именем, поправить обе таблицы выше (и строку авторства, и откуда
+файл) — больше ничего: код библиотеки знает только id, а темп ищется в самом файле на каждом
+ролике. Добавить шестой трек — строка в `assembly.TRACKS`, файл сюда, и такой же список id у api,
+иначе он не даст его заказать.
