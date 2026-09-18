@@ -178,7 +178,9 @@ def _cut(piece, seconds):
 
     A step that says nothing about its length, or says something that is not a number, gets the
     length отбор cut it at: the plan is about the order of the film first, and a missing number is
-    not a reason to leave a piece out of it.
+    not a reason to leave a piece out of it. `NaN` and `Infinity` need no guard of their own here:
+    they would walk straight through `min`/`max` — every comparison against them is false — but
+    `ai._as_json` refuses an answer carrying either, so no plan holding one ever gets this far.
     """
     try:
         seconds = min(max(float(seconds), MIN_PIECE_SECONDS), MAX_PIECE_SECONDS)

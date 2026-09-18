@@ -5,6 +5,9 @@ that serves a file out of `fixtures/` and keeps the request it was handed, so a 
 *would* have gone out. There is no key to go out with anyway (decision-10 is open) — the recorded
 answers are the shapes the two APIs document, filled with made-up material.
 
+The one exception is the redirect test, which is about the door itself rather than about a provider:
+it opens a server on this machine's loopback and points `ai._urlopen` at that.
+
 The gateway half needs a real Postgres, like the rest of the suite: the journal it writes is the
 point of it, and a fake table would prove nothing.
 
@@ -12,10 +15,13 @@ Warning: these wipe the `ai_requests` table of whatever DATABASE_URL points at.
 """
 
 import base64
+import http.server
 import json
 import logging
 import pathlib
+import threading
 import urllib.error
+import urllib.request
 
 import pytest
 
@@ -133,6 +139,57 @@ def test_openai_uploads_speech_as_a_file():
     assert SPEECH.data in sent.data
 
 
+# --- the one thing that does reach a socket ---------------------------------
+
+
+@pytest.fixture
+def redirecting():
+    """A server on this machine that answers a POST with «go and ask over there», and records what
+    actually turns up over there. The only socket in this file, and it never leaves the loopback."""
+    followed = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{self.server.server_port}/elsewhere")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_GET(self):
+            followed.append(dict(self.headers))
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *_):
+            pass  # the test's own output is the point, not an access log
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_port}/", followed
+    server.shutdown()
+    server.server_close()
+
+
+def test_a_redirect_is_refused_rather_than_followed_with_the_key_on_it(redirecting):
+    """The key leaving for a host nobody chose. urllib's own redirect handler copies every header
+    but `content-*` onto the next request, so one 30x — from either endpoint, from anything that can
+    answer as one — would hand `Authorization` straight to wherever it points. `ai._urlopen` does
+    not follow redirects at all; the 30x comes back as the failure it is."""
+    where, followed = redirecting
+    request = urllib.request.Request(
+        where, data=b"{}", method="POST",
+        headers={"Authorization": "Bearer test-key", "Content-Type": "application/json"},
+    )
+
+    with pytest.raises(urllib.error.HTTPError) as refused:
+        ai._urlopen(request)
+
+    assert refused.value.code == 302
+    assert followed == [], "nothing went to where it pointed, and the key least of all"
+
+
 # --- which provider ---------------------------------------------------------
 
 
@@ -240,6 +297,36 @@ def test_an_answer_that_is_not_json_fails_the_call_and_says_what_came_instead(co
 
     (*_, status, _, _, error, _), = journal(conn)
     assert status == "failed" and "Конечно" in error
+
+
+def test_an_answer_that_parses_but_is_not_an_object_fails_the_call_too(conn):
+    """A bare `null` is valid JSON and nothing a caller can read a field off. Failed here, where the
+    answer itself is kept — rather than three handlers down as an `AttributeError` about `NoneType`,
+    which says nothing about what the model actually said."""
+    def nothing(request):
+        return json.dumps({"output_text": "null"}).encode()
+
+    gateway = ai.AI(conn, ai.Gemini("test-key", transport=nothing))
+    with pytest.raises(RuntimeError, match="null"):
+        gateway.describe_media([PHOTO])
+
+    (*_, status, _, _, error, _), = journal(conn)
+    assert status == "failed" and "null" in error
+
+
+def test_a_number_the_journal_cannot_hold_never_gets_into_it(conn):
+    """`json.loads` takes `NaN` and `Infinity`; `jsonb` takes neither. Read loosely, an answer
+    carrying one would be paid for and would then break the journal's own UPDATE on the way back —
+    and the retry would pay for it again. Refused as the malformed answer it is instead."""
+    def not_a_number(request):
+        return json.dumps({"output_text": '{"description": "кадр", "seconds": NaN}'}).encode()
+
+    gateway = ai.AI(conn, ai.Gemini("test-key", transport=not_a_number))
+    with pytest.raises(RuntimeError, match="NaN"):
+        gateway.describe_media([PHOTO])
+
+    (*_, status, _, response, error, _), = journal(conn)
+    assert (status, response) == ("failed", None) and "NaN" in error
 
 
 def test_the_story_reaches_the_director(conn):

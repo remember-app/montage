@@ -428,6 +428,28 @@ def test_a_photo_the_organizer_marked_include_is_in_the_video_the_algorithm_notw
     assert about(duration, 13.0), "the crushed photo went in because the order asked for it"
 
 
+def test_the_floor_counts_the_pieces_the_organizer_asked_for_too(conn, s3, memory, tmp_path):
+    """A memory the отсев turns down almost entirely, and an organizer who overrules it. The floor
+    is «сколько кусков реально войдёт», so the two crushed photos named in «включить» count towards
+    it — refusing the order here would be the automatic отсев beating the person, which is the one
+    thing «включить» exists to prevent (doc-03, «Кадры, отмеченные включить, есть в ролике»)."""
+    _, key = add_item(conn, memory, "photo", status="ready")
+    s3.upload_file(str(photo(tmp_path / "good.jpg")), media.bucket(), key)
+    wanted = []
+    for index in range(2):
+        crushed_id, key = add_item(conn, memory, "photo", status="ready")
+        s3.upload_file(str(crushed(tmp_path / f"crushed-{index}.jpg")), media.bucket(), key)
+        wanted.append(crushed_id)
+    montage_id = order(conn, memory, {"target_seconds": 30, "include_media_ids": wanted})
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    status, _, duration, error_text = read_montage(conn, montage_id)
+    assert (status, error_text) == ("ready", None)
+    assert about(duration, 8.0), "all three went in: three stills, less half a second for each join"
+
+
 def test_a_photo_the_organizer_marked_exclude_stays_out_of_the_video(conn, s3, memory, tmp_path):
     """The other half of the same word from the organizer, on material the algorithm is perfectly
     happy with: a photo named in «исключить» is not in the video, and the rest of the material

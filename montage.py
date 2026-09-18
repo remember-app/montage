@@ -77,8 +77,9 @@ def montage(conn, ref):
     # The organizer's own word on the material, marked before the order (doc-03, «Выбор медиа для
     # ролика»): two optional lists of `media_items` ids. Nothing is decided about them here — each
     # way of directing a video honours them in its own file, and both of them do (`selection.choose`
-    # and `director.direct`), by the same rule: never the excluded, always the included.
-    include = params.get("include_media_ids") or ()
+    # and `director.direct`), by the same rule: never the excluded, always the included. «Включить»
+    # is read as text ids here too, because the floor below has to be able to ask it.
+    include = {str(one) for one in params.get("include_media_ids") or ()}
     exclude = params.get("exclude_media_ids") or ()
     # What the organizer said the video is about, in their own words. Nobody but the director has
     # anything to do with it: the algorithm cannot read.
@@ -116,7 +117,19 @@ def montage(conn, ref):
         # here for being unreadable or having no usable frame in them, and three rows that come to
         # one still would otherwise be assembled into a three-second «ролик» against a sixty-second
         # order — the very thing the floor is there to refuse.
-        if sum(piece.rejected is None for piece in judged) < MIN_ITEMS:
+        #
+        # A piece the organizer asked for by name counts among the survivors even when the отсев
+        # turned it down: «включить» beats the algorithm in `selection.choose` and in
+        # `director.direct` alike, and a floor that did not know the word would quietly overrule the
+        # person before either of them was reached (doc-03, «Кадры, отмеченные включить, есть в
+        # ролике»). The one thing it cannot overrule is the same one they cannot: a file with no
+        # frame in it at all, which is an absence and not a judgement.
+        survived = sum(
+            piece.rejected is None
+            or (piece.rejected != selection.UNREADABLE and piece.media_id in include)
+            for piece in judged
+        )
+        if survived < MIN_ITEMS:
             return _give_up_for_good(
                 conn, ref, "материал не годится для ролика: файлы не читаются или кадры испорчены"
             )

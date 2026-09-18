@@ -70,8 +70,24 @@ class Blob:
 # --- the providers ----------------------------------------------------------
 
 
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    """A 30x is not an answer either of these APIs gives, and following one would take the key with
+    it: urllib builds the next request out of *every* header but `content-*`, so `Authorization`
+    and `x-goog-api-key` would be sent to whatever host the redirect names — a bucket somewhere, a
+    proxy in the middle, anyone who can answer for those two endpoints once. Nothing here is worth
+    that, so a redirect is refused: returning None leaves urllib to raise the 30x as the error it
+    is, which fails the call and puts it in the journal like any other.
+    """
+
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
+_opener = urllib.request.build_opener(_NoRedirects)
+
+
 def _urlopen(request):
-    with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+    with _opener.open(request, timeout=TIMEOUT_SECONDS) as response:
         return response.read()
 
 
@@ -444,8 +460,25 @@ class AI:
 def _as_json(answer):
     """The model's words as the object they were asked to be. A model that answered in prose has
     failed the call, and the text of it goes into the journal as the error — that is the only
-    place anyone will look for why."""
+    place anyone will look for why.
+
+    An object and not merely valid JSON: every caller here reads fields off what comes back, and a
+    bare `null` or a list parses perfectly well and then fails three handlers down as an
+    `AttributeError` about `NoneType`, with the answer that caused it nowhere to be seen.
+
+    `parse_constant` because `json.loads` accepts `NaN` and `Infinity` and `jsonb` accepts neither:
+    one of those in an answer would be paid for, then break the journal's own UPDATE two lines
+    later — and the retry would pay for it again. They are malformed here, like prose, and the row
+    keeps the text that caused it.
+    """
     try:
-        return json.loads(answer)
-    except (json.JSONDecodeError, TypeError):
-        raise RuntimeError(f"the model did not answer with JSON: {str(answer)[:500]}") from None
+        parsed = json.loads(answer, parse_constant=_no_such_number)
+    except (ValueError, TypeError):  # a JSONDecodeError is a ValueError, and so is the one below
+        parsed = None
+    if not isinstance(parsed, dict):
+        raise RuntimeError(f"the model did not answer with a JSON object: {str(answer)[:500]}")
+    return parsed
+
+
+def _no_such_number(constant):
+    raise ValueError(constant)
