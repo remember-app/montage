@@ -20,6 +20,7 @@ import media
 import montage as montages  # the module and its handler share the job's name; the import cannot
 import screening
 import speech
+import understanding
 
 MAX_ATTEMPTS = 3
 BACKOFF_SECONDS = 30  # attempt n is retried after BACKOFF_SECONDS * 2 ** (n - 1)
@@ -64,6 +65,7 @@ HANDLERS = {
     "media_preview": media.media_preview,
     "media_screening": screening.media_screening,
     "media_speech": speech.transcribe,
+    "media_understanding": understanding.media_understanding,
     "montage": montages.montage,
 }
 
@@ -134,7 +136,46 @@ def sweep_media_without_screening(conn):
     return queued
 
 
-SWEEPS = (media.sweep_stale_uploads, sweep_photos_without_previews, sweep_media_without_screening)
+def sweep_media_without_understanding(conn):
+    """Ready media nobody has described yet, given the job that describes it.
+
+    Everything that became ready before this worker learned to describe frames is like this, and so
+    is everything that was ready while there was no key to describe it with: the job is queued at
+    the end of `media.media_preview`, and a job that found no cloud model stored nothing and left
+    the frame as it was. Hence the first line — with no model configured this sweep would queue the
+    whole library every hour to have every job of it answer «nobody to ask».
+
+    Same restraint as the photos' catch-up above: an item already on its way is left alone, and one
+    whose description failed three times is left for a day before it is asked for again — a frame
+    the model cannot read would otherwise be sent to it three times an hour, and that one costs
+    money rather than CPU. Returns how many were queued.
+
+    ponytail: the whole library at once, in one insert. A cap per sweep is the knob to add when a
+    real key makes a first sweep over a year of memories a bill rather than a queue.
+    """
+    if ai.from_env() is None:
+        return 0
+    queued = conn.execute(
+        """INSERT INTO jobs (type, ref)
+           SELECT 'media_understanding', item.id::text FROM media_items item
+           WHERE item.status = 'ready' AND item.preview_key IS NOT NULL
+             AND NOT EXISTS (
+               SELECT 1 FROM media_understandings seen WHERE seen.media_id = item.id::text)
+             AND NOT EXISTS (
+               SELECT 1 FROM jobs job
+               WHERE job.type = 'media_understanding' AND job.ref = item.id::text
+                 AND (job.status IN ('queued', 'running')
+                      OR (job.status = 'failed'
+                          AND job.updated_at > now() - make_interval(hours => %s))))""",
+        (CATCH_UP_AFTER_HOURS,),
+    ).rowcount
+    if queued:
+        log.info("queued a description for %s media item(s) that had none", queued)
+    return queued
+
+
+SWEEPS = (media.sweep_stale_uploads, sweep_photos_without_previews,
+          sweep_media_without_screening, sweep_media_without_understanding)
 
 
 # --- the loop ---------------------------------------------------------------

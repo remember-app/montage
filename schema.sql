@@ -1,5 +1,6 @@
--- The montage worker's own tables: the shared job queue, and the journal of what was asked of the
--- cloud model. The API only inserts rows into `jobs` and never touches the journal.
+-- The montage worker's own tables: the shared job queue, the journal of what was asked of the cloud
+-- model, and what the model said about each frame. The API only inserts rows into `jobs` and never
+-- touches the other two.
 -- Idempotent on purpose: `python worker.py init` applies it on every start-up of a new database.
 
 CREATE TABLE IF NOT EXISTS jobs (
@@ -75,3 +76,23 @@ CREATE TABLE IF NOT EXISTS media_speech (
     transcript  text        NOT NULL,
     created_at  timestamptz NOT NULL DEFAULT now()
 );
+
+-- What the model saw in one photo or clip, kept so that nobody pays to see it twice (doc-03:
+-- «Описание того, что происходит на фото и видео, обязательно сохраняется и переиспользуется»).
+-- Written by `understanding.py`, read by it and by the director; one row per media item, written
+-- once and never updated — a frame does not change after it was described.
+--
+-- `cast_labels` are this memory's own «человек-1», «животное-2»: stable inside one memory and
+-- meaningless outside it, which is why the memory is on the row. No foreign key to `media_items`
+-- for the same reason `ai_requests.ref` has none — that table belongs to the api's migrations and
+-- this file has to apply to a database where they have not run yet.
+CREATE TABLE IF NOT EXISTS media_understandings (
+    media_id    text        PRIMARY KEY,           -- media_items.id, as text like jobs.ref
+    memory_id   text        NOT NULL,              -- whose cast the labels below belong to
+    description text        NOT NULL,              -- what happens in the frame, in a sentence
+    cast_labels text[]      NOT NULL DEFAULT '{}', -- who is in it, by this memory's labels
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+-- «Кого это воспоминание уже назвало» — asked before every description, to be given to the model.
+CREATE INDEX IF NOT EXISTS media_understandings_memory_idx ON media_understandings (memory_id);
