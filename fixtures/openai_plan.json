@@ -1,0 +1,38 @@
+{
+  "id": "resp_5e1c7a9b3d2f4a80",
+  "object": "response",
+  "created_at": 1789041600,
+  "status": "completed",
+  "model": "gpt-5.5",
+  "output": [
+    {
+      "id": "rs_5e1c7a9b3d2f4a81",
+      "type": "reasoning",
+      "summary": []
+    },
+    {
+      "id": "msg_5e1c7a9b3d2f4a82",
+      "type": "message",
+      "status": "completed",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "{\"overview\": \"Три части по кадру: стол, торт и собака под ним.\", \"plan\": [{\"media_id\": \"m-1\", \"seconds\": 3.0, \"thought\": \"Стол накрыт, вечер только начинается.\", \"part\": 1, \"part_title\": \"Сборы\"}, {\"media_id\": \"m-2\", \"seconds\": 4.0, \"thought\": \"Торт вносят — сюда и смотреть.\", \"part\": 2, \"part_title\": \"Торт\", \"focus\": {\"x\": 0.25, \"y\": 0.1, \"w\": 0.5, \"h\": 0.6}}, {\"media_id\": \"m-3\", \"seconds\": 3.0, \"thought\": \"Собака под столом — тихий конец вечера.\", \"part\": 3, \"part_title\": \"Собака\"}], \"left_out\": []}",
+          "annotations": []
+        }
+      ]
+    }
+  ],
+  "usage": {
+    "input_tokens": 1204,
+    "input_tokens_details": {
+      "cached_tokens": 0
+    },
+    "output_tokens": 214,
+    "output_tokens_details": {
+      "reasoning_tokens": 64
+    },
+    "total_tokens": 1418
+  }
+}

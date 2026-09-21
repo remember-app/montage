@@ -17,6 +17,7 @@ import uuid
 import pytest
 
 import assembly
+import director
 import journal
 import media
 import montage
@@ -27,11 +28,11 @@ import worker
 from test_media import (  # noqa: F401
     add_item, conn, ffmpeg, fetch, memory, photo, probe, s3, video,
 )
-from test_montage import crushed, material, order, read_montage
+from test_montage import crushed, material, order, planning_over, read_montage
 
 Entry = collections.namedtuple(
     "Entry", "stage media_id thought decision reason series_size labels "
-             "source_from_seconds source_to_seconds"
+             "source_from_seconds source_to_seconds story_part story_part_title focus"
 )
 
 
@@ -56,12 +57,17 @@ def stages_of(conn, montage_id):
 
 
 def entries_of(conn, montage_id, stage=None):
-    """Реплики журнала в том порядке, в каком они легли, — `id` и есть курсор приложения."""
+    """Реплики журнала в том порядке, в каком они легли, — `id` и есть курсор приложения.
+
+    Рамка «куда смотрит» читается так же, как её отдаёт api, — одним значением из четырёх долей
+    или пустотой: три доли из четырёх база не приняла бы вовсе.
+    """
     return [
-        Entry(*row)
+        Entry(*row[:-4], row[-4:] if row[-4] is not None else None)
         for row in conn.execute(
             """SELECT stage, media_id::text, thought, decision, reason, series_size, labels,
-                      source_from_seconds, source_to_seconds
+                      source_from_seconds, source_to_seconds, story_part, story_part_title,
+                      focus_x, focus_y, focus_w, focus_h
                  FROM montage_journal_entries
                 WHERE montage_id = %s AND (%s::text IS NULL OR stage = %s) ORDER BY id""",
             (montage_id, stage, stage),
@@ -335,6 +341,74 @@ def test_a_series_is_one_entry_and_the_organizer_is_visible_in_the_decisions(con
     assert (written[struck_out.media_id].decision, written[struck_out.media_id].reason) == (
         "skip", selection.EXCLUDED
     )
+
+
+def test_the_director_tells_the_journal_the_plan_it_built(
+    conn, s3, memory, tmp_path, monkeypatch
+):
+    """Ролик, который режиссировала нейросеть, рассказывает о себе её словами: первой записью
+    этапа — мысль о плане в целом, за ней порядком плана по реплике на каждый кадр, который модели
+    показали. Взятый кадр несёт мысль, часть истории и рамку «куда смотрит»; кадр, который она в
+    план не взяла, — «мимо» с её же причиной, если она её сказала, и кодом, если нет.
+
+    Записанный ответ, живьём никто ничего не спрашивает (decision-10): `fixtures/` и тот же
+    транспорт, что во всех тестах модели.
+    """
+    journal_ready(conn)
+    ids = material(conn, s3, memory, tmp_path)
+    seen = ("накрывают на стол", "вносят торт", "собака под столом")
+    for media_id, description in zip(ids, seen):
+        conn.execute(
+            """INSERT INTO media_understandings (media_id, memory_id, description, cast_labels)
+               VALUES (%s, %s, %s, %s)""",
+            (media_id, str(memory[0]), description, ["человек-1"]),
+        )
+    planning_over(monkeypatch, ids[:3], "gemini_plan_thoughts.json")
+    montage_id = order(conn, memory, {"target_seconds": 30, "music_tracks": [],
+                                      "story_text": "день рождения, всё вокруг торта"})
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+    assert read_montage(conn, montage_id)[0] == "ready"
+
+    directing = entries_of(conn, montage_id, "directing")
+    assert (directing[0].media_id, directing[0].decision) == (None, None), (
+        "мысль о плане в целом — первой записью и без кадра"
+    )
+    assert directing[0].thought.startswith("План на две части")
+    assert [(one.media_id, one.decision, one.reason) for one in directing[1:]] == [
+        (ids[0], "take", None), (ids[1], "take", None),
+        (ids[2], "skip", "собака не про этот вечер"), (ids[3], "skip", director.LEFT_OUT),
+    ], "порядком плана, а причина — словами модели там, где она их сказала"
+
+    tort = directing[2]
+    assert tort.thought.startswith("Вносят торт")
+    assert (tort.story_part, tort.story_part_title) == (2, "Торт")
+    assert tort.focus == (0.3, 0.05, 0.25, 0.5), "рамка «куда смотрит» — долями кадра"
+    assert directing[1].focus is None, "о чём модель не сказала, того в журнале нет"
+    assert stages_of(conn, montage_id)["directing"]["outcome"] == {
+        "frames": 2, "of": 4, "parts": 2, "part_titles": ["Сборы", "Торт"]
+    }
+
+
+def test_service_characters_in_the_models_words_do_not_reach_the_journal(conn, memory):
+    """Мысль модели увидят все участники воспоминания, а сказана она недоверенным ртом: перевод
+    строки, управляющий символ, невидимая метка, разворачивающая текст, — всё это в рассказе о
+    ролике не нужно, и до базы оно не доходит."""
+    journal_ready(conn)
+    montage_id = order(conn, memory, {})
+    journal.begin(conn, montage_id, 1, 60)
+
+    journal.entry(
+        conn, montage_id, "directing", media_id=str(uuid.uuid4()), decision="take",
+        thought="Бабушка\u0007 смеётся‮,\n\nсвет тёплый", story_part=2,
+        story_part_title="Клятвы​ и объятия", labels=["смех\u0000", "​"],
+    )
+
+    (written,) = entries_of(conn, montage_id, "directing")
+    assert written.thought == "Бабушка смеётся, свет тёплый"
+    assert written.story_part_title == "Клятвы и объятия"
+    assert written.labels == ["смех"], "метка из одних невидимок — не метка"
 
 
 def test_a_reply_too_long_for_the_journal_is_cut_rather_than_lost(conn, memory):

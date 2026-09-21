@@ -8,10 +8,16 @@ and the length that was ordered. What comes back is an order, a length per piece
 each is there for.
 
 The pieces it hands back are `assembly`'s to lay down, exactly as `selection.choose`'s are — nothing
-downstream knows which of the two cut the video. And `None` is an answer here: no cloud model
-configured, nothing described yet, or a plan with nothing of ours in it. On `None` the montage is
-cut the way every montage in production is cut today (`selection.choose`), which is the whole state
-of the worker while there is no key (decision-10).
+downstream knows which of the two cut the video. And `(None, ())` is an answer here: no cloud model
+configured, nothing described yet, or a plan with nothing of ours in it. On it the montage is cut
+the way every montage in production is cut today (`selection.choose`), which is the whole state of
+the worker while there is no key (decision-10).
+
+Рядом с кусками едут слова, которыми режиссёр объяснил сам себя: мысль о плане в целом и по записи
+на каждый показанный ему кадр — мысль, часть истории, рамка «куда смотрит», решение и причина, если
+кадр остался за бортом. Собираются они здесь, потому что больше никто не знает, что модель видела и
+что она об этом сказала, а в журнал их кладёт оркестратор (`montage.py`) — как и весь остальной
+рассказ о сборке.
 
 The organizer beats the director exactly as it beats the algorithm, and for the same reason it is
 written in one place: a struck-out piece is never *shown* to the model — the surest way for it not
@@ -36,12 +42,17 @@ MAX_PIECE_SECONDS = 8.0
 # of it is paid for.
 SPEECH_CHARACTERS = 400
 
+# Почему кадр остался за бортом, когда своих слов об этом у модели не нашлось: она просто не взяла
+# его в план. Остальные коды словаря причин — отсева (`selection`), этот берётся только здесь.
+LEFT_OUT = "left_out"
+
 log = logging.getLogger("montage.director")
 
 
 def direct(conn, pieces, target_seconds, include=(), exclude=(), story="", ref=None, brain=None,
            music=(), music_note=""):
-    """The film the model plans out of these pieces — or None, and then nobody directed anything.
+    """The film the model plans out of these pieces and what it said while planning it — or
+    `(None, ())`, and then nobody directed anything.
 
     `pieces` are judged (`selection.judge`), `include`/`exclude` are the organizer's two lists from
     the order and `story` is what they said the video is about. `music` is what will play under the
@@ -49,13 +60,16 @@ def direct(conn, pieces, target_seconds, include=(), exclude=(), story="", ref=N
     organizer asked be done with them, in their own words; the soundtrack itself is assembled from
     the order's list either way, so both are here to be read and not to be obeyed. `brain` is for
     the tests; the worker takes the gateway the environment gives it.
+
+    Слова режиссёра — вторым, готовыми полями журнала (`journal.COLUMNS`), порядком плана: первой
+    мысль о плане в целом, за ней по записи на каждый показанный модели кадр.
     """
     brain = brain or ai.AI(conn)
     if brain.provider is None:
         # Today's state, and the one thing that must not change because of this module: with nobody
         # to ask, the montage is the montage it has always been.
         log.info("no cloud model: montage %s is cut by the worker's own choosing", ref)
-        return None
+        return None, ()
 
     include, exclude = {str(one) for one in include}, {str(one) for one in exclude}
     material = list(_material(pieces, include, exclude))
@@ -72,25 +86,30 @@ def direct(conn, pieces, target_seconds, include=(), exclude=(), story="", ref=N
         # frames it has never seen, for money; the algorithm at least looks at the pixels.
         log.info("montage %s: nothing in this memory is described yet, leaving it to the worker's "
                  "own choosing", ref)
-        return None
+        return None, ()
 
     planned = brain.plan_montage(
         [_shot(piece, known, include) for piece in candidates.values()],
         story=story, target_seconds=target_seconds, music=music, music_note=music_note, ref=ref,
-    )
+    ) or {}
     log.info("montage %s: the director's plan is %s", ref, planned)
 
+    # Мысль о плане в целом — первой записью этапа и без кадра: она про фильм, а не про кусок.
+    thoughts = [{"thought": planned["overview"]}] if planned.get("overview") else []
+
     chosen, taken = [], set()
-    for step in (planned or {}).get("plan") or []:
-        piece = candidates.get(str(step.get("media_id", "")))
+    for step in planned.get("plan") or []:
+        piece = candidates.get(step["media_id"])
         if piece is None or piece.media_id in taken:
             # A piece the model invented, one it was never shown, or the same one twice. The plan is
-            # the model's; what material there is stays ours.
+            # the model's; what material there is stays ours — и в журнале ему тоже не место:
+            # рассказ идёт о кадрах воспоминания, а не о том, что модель себе вообразила.
             log.info("montage %s: the plan names %s, which is not material of ours or is already "
-                     "in the film — skipped", ref, step.get("media_id"))
+                     "in the film — skipped", ref, step["media_id"])
             continue
         taken.add(piece.media_id)
-        chosen.append(_cut(piece, step.get("seconds")))
+        chosen.append(_cut(piece, step["seconds"]))
+        thoughts.append(_thought(step))
 
     # «Включить» is not the model's to refuse. A piece the organizer named and the plan left out
     # goes in at the end of it: the order is the director's, and there is no place inside it that is
@@ -99,7 +118,19 @@ def direct(conn, pieces, target_seconds, include=(), exclude=(), story="", ref=N
         if media_id in include and media_id not in taken:
             log.info("montage %s: the plan left out %s, which the order asks for — putting it back",
                      ref, media_id)
+            taken.add(media_id)
             chosen.append(_cut(piece, None))
+            # Своих слов у режиссёра об этом кадре нет — он его не брал; чьё это слово, скажет
+            # журналом оркестратор.
+            thoughts.append({"media_id": media_id})
+
+    # Остальное, что модели показали: «мимо» её же словами, если она их дала, и кодом, если нет.
+    # Кадр, которого она не видела — отсеянный, вычеркнутый, съеденный дедупом, — здесь не
+    # появляется: рассказывать о нём режиссёрскому этапу нечего.
+    for media_id in candidates:
+        if media_id not in taken:
+            thoughts.append({"media_id": media_id,
+                             "reason": planned.get("left_out", {}).get(media_id) or LEFT_OUT})
 
     fitted = []
     for piece in chosen:
@@ -115,10 +146,10 @@ def direct(conn, pieces, target_seconds, include=(), exclude=(), story="", ref=N
     if not fitted:
         log.warning("montage %s: the plan had nothing of ours in it, cutting the video by the "
                     "worker's own choosing instead", ref)
-        return None
+        return None, ()
     log.info("montage %s is cut to a plan of %s piece(s), %.1fs", ref, len(fitted),
              assembly.length_of(fitted))
-    return fitted
+    return fitted, _decided(thoughts, {piece.media_id for piece in fitted})
 
 
 def _material(pieces, include, exclude):
@@ -183,6 +214,37 @@ def _shot(piece, known, include):
 
 def _available(piece):
     return min(MAX_PIECE_SECONDS, piece.duration) if piece.duration else MAX_PIECE_SECONDS
+
+
+def _thought(step):
+    """Что режиссёр сказал об одном кадре — полями журнала (`journal.COLUMNS`).
+
+    Рамка «куда смотрит» раскладывается по четырём колонкам: либо все четыре, либо ни одной, и
+    другой `ai._planned` сюда не пропустит. Незаданного поля в реплике просто не будет.
+    """
+    return {
+        "media_id": step["media_id"],
+        "thought": step["thought"],
+        "story_part": step["part"],
+        "story_part_title": step["part_title"],
+        **{f"focus_{side}": part for side, part in (step["focus"] or {}).items()},
+    }
+
+
+def _decided(thoughts, kept):
+    """Те же слова, с решением по каждому кадру: в ролике — «беру», не в ролике — «мимо».
+
+    Решение ставится здесь, а не там, где сказаны слова: план ужимается по заказанной длине уже
+    после того, как режиссёр всё сказал, и кадр, который в неё не влез, — это «мимо» с его же
+    мыслью при нём. Мысль о плане в целом решения не несёт вовсе — она не про кадр.
+    """
+    for thought in thoughts:
+        if "media_id" not in thought:
+            continue
+        thought["decision"] = "take" if thought["media_id"] in kept else "skip"
+        if thought["decision"] == "skip":
+            thought["reason"] = thought.get("reason") or selection.NO_ROOM
+    return thoughts
 
 
 def _cut(piece, seconds):
