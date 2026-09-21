@@ -229,7 +229,7 @@ def montage(conn, ref):
         # Кто резал ролик, тот о нём и рассказывает: отсев — своими решениями, режиссёр-нейросеть —
         # своими словами. Итог этапа один на обоих, частями истории его наполняет только второй.
         if turned_down is not None:
-            _write_choices(conn, ref, chosen, turned_down, include)
+            _write_choices(conn, ref, chosen, turned_down, include, judged)
         else:
             _write_thoughts(conn, ref, chosen, thoughts, include)
         journal.finish(conn, ref, "directing", frames=len(chosen), of=len(judged),
@@ -414,7 +414,10 @@ def _what_was_seen(conn, ref, judged):
 
     Описание — единственное место в журнале, где стоят чужие слова, а не код: их сказала модель, и
     приложению их только показать. Метки «что увидел» — `cast_labels` воспоминания, по ним же
-    считается, скольких людей и животных этап разобрал.
+    считается и итог этапа: «37 лиц, 5 людей в главных» (контракт api, `faces`, `people`,
+    `animals`). Лица — сколько раз человек попал в кадр, то есть сумма меток людей по всем
+    разобранным кадрам; люди и животные — сколько их всего, по разным меткам: один и тот же
+    «человек-1» на двадцати кадрах — двадцать лиц и один человек.
     """
     journal.start(conn, ref, "understanding", total=len(judged))
     seen = conn.execute(
@@ -422,19 +425,20 @@ def _what_was_seen(conn, ref, judged):
            WHERE media_id = ANY(%s)""",
         ([piece.media_id for piece in judged],),
     ).fetchall()
-    cast = set()
+    cast, faces = set(), 0
     for media_id, description, labels in seen:
         cast.update(labels or ())
+        faces += sum(label.startswith(PEOPLE_LABEL) for label in labels or ())
         journal.entry(conn, ref, "understanding", media_id=media_id, thought=description,
                       labels=labels)
     journal.finish(
-        conn, ref, "understanding", described=len(seen), of=len(judged),
+        conn, ref, "understanding", described=len(seen), of=len(judged), faces=faces,
         people=sum(label.startswith(PEOPLE_LABEL) for label in cast),
         animals=sum(label.startswith(ANIMAL_LABEL) for label in cast),
     )
 
 
-def _write_choices(conn, ref, chosen, turned_down, include):
+def _write_choices(conn, ref, chosen, turned_down, include, judged):
     """Решения отсева в журнал: что взято в ролик, что мимо и почему.
 
     Пишется после набора заказанной длины (`selection.stretch`): «беру 0:04–0:07» должно называть
@@ -444,7 +448,14 @@ def _write_choices(conn, ref, chosen, turned_down, include):
     «мимо, дубль» рядом с ней рассказывают то же самое трижды, а размер серии несёт сам кусок
     (`selection._dedup`). Слово организатора видно с обеих сторон: `excluded` на вычеркнутом,
     `included` на том, что он велел взять.
+
+    О чём уже рассказал отсев, режиссёрский этап молчит: `selection.choose` возвращает **всё**, чего
+    в ролике нет, вместе со смазанным и тёмным, а у тех «мимо» своё место — первый этап, на котором
+    их и отсеяли. Второе «мимо» с той же причиной — один кадр, пропущенный дважды, и завышенный
+    счётчик «Мимо N» на экране. Причины этого этапа — только его собственные: дубль серии, не влез,
+    вычеркнут.
     """
+    told = {piece.media_id for piece in judged if piece.rejected}
     for piece in chosen:
         journal.entry(
             conn, ref, "directing", media_id=piece.media_id, decision="take",
@@ -453,8 +464,8 @@ def _write_choices(conn, ref, chosen, turned_down, include):
             **_source_cut(piece),
         )
     for piece in turned_down:
-        if piece.rejected == selection.DUPLICATE:
-            continue  # его серия уже рассказана одной записью выше
+        if piece.rejected == selection.DUPLICATE or piece.media_id in told:
+            continue  # серия рассказана одной записью выше, отсеянный — на своём этапе
         journal.entry(conn, ref, "directing", media_id=piece.media_id, decision="skip",
                       reason=piece.rejected)
 
@@ -465,8 +476,8 @@ def _write_thoughts(conn, ref, chosen, thoughts, include):
 
     Пишется там же, где решения отсева, и по той же причине — после набора заказанной длины
     (`selection.stretch`): «беру 0:04–0:07» должно называть тот кусок исходника, который в ролик и
-    пойдёт. Слова здесь режиссёра, а куски наши: сколько секунд кадра взято и по чьему слову он в
-    ролике, видно отсюда, а не из плана.
+    пойдёт. Слова здесь режиссёра, а куски наши: сколько секунд кадра взято, из какой серии он
+    остался и по чьему слову он в ролике, видно отсюда, а не из плана.
     """
     laid = {piece.media_id: piece for piece in chosen}
     for thought in thoughts:
@@ -477,6 +488,10 @@ def _write_thoughts(conn, ref, chosen, thoughts, include):
             # поверх любой мысли модели об этом кадре.
             if piece.media_id in include:
                 fields["reason"] = ORGANIZER_ASKED
+            # И серия — та же одна запись «взял 1 из 4», что у отсева: модели показали один кадр из
+            # неё, а размер серии приехал на нём самом (`director.direct`).
+            if piece.series_size > 1:
+                fields["series_size"] = piece.series_size
             fields.update(_source_cut(piece))
         journal.entry(conn, ref, "directing", **fields)
 
