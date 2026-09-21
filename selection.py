@@ -89,6 +89,10 @@ class Piece:
     # the piece to put a join on a beat.
     duration: float | None = None
     rejected: str | None = None  # one of the reasons above, None while the piece is still in
+    # Сколько кадров было в серии, за которую этот кусок остался один («взял 1 из 4»). Ставит
+    # `_dedup`, и дальше это едет с куском до журнала монтажа: серия — одна запись в рассказе о
+    # сборке, а не четыре, из которых три «мимо, дубль». Единица — кусок сам по себе.
+    series_size: int = 1
 
 
 # --- looking at frames -------------------------------------------------------
@@ -256,7 +260,9 @@ def _dedup(pieces, always=()):
         stands = stands or [max(burst, key=lambda piece: piece.sharpness)]
         # By identity: two pieces of one burst can hold equal values and still be two files.
         held = {id(piece) for piece in stands}
-        kept.extend(stands)
+        # Сколько кадров стояло за оставшимся, на нём самом: журналу монтажа серия — одна запись
+        # «взял 1 из 4», а не четыре, из которых три «дубль» (`montage.py`).
+        kept.extend(dataclasses.replace(piece, series_size=len(burst)) for piece in stands)
         dropped.extend(dataclasses.replace(piece, rejected=DUPLICATE)
                        for piece in burst if id(piece) not in held)
 

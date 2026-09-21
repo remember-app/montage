@@ -39,7 +39,9 @@ def test_a_burst_of_shots_leaves_only_its_sharpest():
 
     chosen, rejected = selection.choose([*burst, apart], target_seconds=60)
 
-    assert chosen == [burst[1], apart], "the sharpest of the burst stands for all three"
+    # The sharpest of the burst stands for all three — and carries how many it stands for, which
+    # is what the journal of the montage tells the organizer as «взял 1 из 3».
+    assert chosen == [dataclasses.replace(burst[1], series_size=3), apart]
     # And the two it stands for come back saying so, rather than quietly disappearing: this is what
     # the organizer is shown before an order, and what they can put back.
     assert [piece.rejected for piece in rejected] == [selection.DUPLICATE] * 2
@@ -52,8 +54,10 @@ def test_a_long_sequence_stays_several_moments():
 
     chosen = cut(every_second, target_seconds=60)
 
-    # 0-1-2 is one moment and 3-4-5 the next, so the sharpest of each survives.
-    assert chosen == [every_second[2], every_second[5]]
+    # 0-1-2 is one moment and 3-4-5 the next, so the sharpest of each survives — each standing for
+    # the three of its own moment.
+    assert chosen == [dataclasses.replace(every_second[2], series_size=3),
+                      dataclasses.replace(every_second[5], series_size=3)]
 
 
 def test_a_file_with_no_capture_date_is_never_deduped():
