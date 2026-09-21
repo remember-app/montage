@@ -133,18 +133,31 @@ def _normalise(piece, orientation, out):
 
     Silent because the finished video's only sound is the track (architecture.md: «звук исходных
     клипов по умолчанию убираем»), which also makes every clip's audio identical by having none.
+
+    A photograph is decoded, scaled and cropped **once** and then held: `loop` re-emits the one
+    frame that came out of the crop for as long as the piece runs. Looping the *input* instead
+    (`-loop 1`) hands the decoder the file again for every frame of the clip, and on a snapshot off
+    a real camera — 8368×5584, 23 МБ — that is eighty-five decodes of forty-six megapixels: one
+    such piece took seventeen minutes on the stand and the whole montage stood (TASK-183). The loop
+    is infinite and `-t` is what ends it, so that `-t` is an *output* option here and may not be
+    dropped: without it ffmpeg would encode the same frame forever.
     """
     width, height = CANVASES[orientation]
-    canvas = (
+    fitted = (
         f"scale={width}:{height}:force_original_aspect_ratio=increase:force_divisible_by=2,"
-        f"crop={width}:{height},setsar=1,fps={FPS},format=yuv420p"
+        f"crop={width}:{height},setsar=1"
     )
     if piece.kind == "photo":
-        opened = ("-loop", "1", "-t", f"{piece.seconds}", "-i", str(piece.path))
+        # `loop` sits after the crop, so what it holds is one canvas-sized frame and not the
+        # original, and `fps` after it is what gives that frame the montage's rate.
+        canvas = f"{fitted},loop=loop=-1:size=1,fps={FPS},format=yuv420p"
+        opened, cut = ("-i", str(piece.path)), ("-t", f"{piece.seconds}")
     else:
+        canvas = f"{fitted},fps={FPS},format=yuv420p"
         opened = ("-ss", f"{piece.start}", "-t", f"{piece.seconds}", "-i", str(piece.path))
+        cut = ()
     media._ffmpeg(
-        *opened, "-vf", canvas, "-an",
+        *opened, "-vf", canvas, *cut, "-an",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", str(out),
     )
 

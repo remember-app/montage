@@ -578,6 +578,63 @@ def test_a_clip_is_laid_into_the_chain_at_the_length_it_really_is(conn, s3, memo
     assert about(float(probe(fetch(s3, video_key, tmp_path / "m.mp4"))["format"]["duration"]), 9.5)
 
 
+def test_a_photograph_is_scaled_once_for_the_piece_and_not_once_a_frame(tmp_path, monkeypatch):
+    """The root of TASK-183: looping the *input* (`-loop 1`) hands the file back to the decoder for
+    every frame of the clip, so a 46-megapixel snapshot was decoded and scaled eighty-five times
+    over for three seconds of video — seventeen minutes for one piece on the stand, with the whole
+    montage behind it. The frame is held after the crop instead, by the filter.
+
+    Checked on the command because that is where the decoding is decided, and the cost of the
+    difference is hardware: the same three seconds of video comes out of both, one of them fifty
+    times slower. The clip itself is made for real below — an infinite loop that `-t` fails to stop
+    would hang here rather than in somebody's montage.
+    """
+    commands = []
+    monkeypatch.setattr(media, "_ffmpeg", lambda *args: commands.append(args))
+    held = selection.Piece(kind="photo", seconds=3.0, path=tmp_path / "photo.jpg")
+    assembly._normalise(held, "landscape", tmp_path / "clip.mp4")
+    (command,) = commands
+
+    assert "-loop" not in command, "исходник зациклен — фото декодируется заново на каждом кадре"
+    filters = command[command.index("-vf") + 1]
+    assert filters.count("scale=") == 1, "фото масштабируется больше одного раза"
+    assert filters.index("loop=") > filters.index("crop="), "удерживается не обрезанный кадр"
+
+    monkeypatch.undo()
+    photo(tmp_path / "photo.jpg")
+    assembly._normalise(held, "landscape", tmp_path / "clip.mp4")
+    clip = probe(tmp_path / "clip.mp4")
+    assert float(clip["format"]["duration"]) == pytest.approx(3.0, abs=0.05), "не та длина куска"
+    picture = clip["streams"][0]
+    assert (picture["width"], picture["height"]) == assembly.CANVASES["landscape"]
+
+
+def test_a_photograph_is_cut_from_its_large_copy_when_that_covers_the_canvas(s3, tmp_path):
+    """The montage is cut from the 2048px copy the preview already made, not from the original off
+    somebody's camera: the same picture on the canvas out of a tenth of the bytes. The copy's cap is
+    on its long side, so whether it covers the canvas is measured rather than assumed — the very
+    same file is enough for a landscape montage and short for a portrait one.
+    """
+    key = f"previews/{uuid.uuid4()}.jpg"
+    s3.upload_file(str(photo(tmp_path / "large.jpg", size="2048x1366")), media.bucket(), key)
+    original = tmp_path / "original"
+    piece = selection.Piece(media_id="one", kind="photo", path=original)
+
+    try:
+        (landscape,) = montage._off_large_copies(
+            s3, [piece], {"one": key}, "landscape", tmp_path)
+        (portrait,) = montage._off_large_copies(
+            s3, [piece], {"one": key}, "portrait", tmp_path)
+        # And a photo whose copy never got made — the sweep has not caught up with it yet.
+        (alone,) = montage._off_large_copies(s3, [piece], {}, "landscape", tmp_path)
+    finally:
+        s3.delete_object(Bucket=media.bucket(), Key=key)
+
+    assert probe(landscape.path)["streams"][0]["width"] == 2048, "ролик режется не из копии"
+    assert portrait.path == original, "1366 в высоту мало для холста 1080×1920 — нужен оригинал"
+    assert alone.path == original
+
+
 def test_too_little_material_fails_the_montage_instead_of_retrying(conn, memory):
     """Not a transient failure: the library would be just as small on the third attempt, and the
     organizer needs the reason under the video rather than three useless retries."""
