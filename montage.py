@@ -4,7 +4,8 @@ The organizer orders a video, the api writes a `montages` row and queues `('mont
 `processing` onward the row is this worker's (see the api's migration `020.do.montages.sql`). Here
 the memory's ready material is pulled out of R2 — every original, and beside each photograph the
 large copy the preview already made of it — looked at frame by frame, the good moments are
-cut and crossfaded into one 1080p file with a track over it, and the row is left `ready` with its
+cut and crossfaded into one 1080p file under the music that was ordered — or with the clips' own
+live sound, when no music was ordered at all — and the row is left `ready` with its
 keys on it — the video's and the cover's — then the api is knocked on so the phones get told.
 
 This module is the order and the plumbing around it: it reads the row, downloads the material,
@@ -43,6 +44,10 @@ import selection
 
 MIN_ITEMS = 3  # «Меньше 3 → сразу failed» — the api refuses the order at this number too
 
+# Под каким ключом в бакете лежит трек, который организатор загрузил сам (api, `music_uploads`).
+# Тем и отличается от id трека полки в одном и том же списке `params.music_tracks`.
+UPLOADED_MUSIC_PREFIX = "music/"
+
 API_TIMEOUT_SECONDS = 10
 
 log = logging.getLogger("montage.montage")
@@ -62,15 +67,15 @@ def montage(conn, ref):
     conn.execute("UPDATE montages SET status = 'processing', updated_at = now() WHERE id = %s", (ref,))
 
     target_seconds = float(params.get("target_seconds") or selection.DEFAULT_TARGET_SECONDS)
-    # The organizer's own track is the key of the file they uploaded (the api's `music_uploads`),
-    # not an id out of the library. One or the other: the api refuses an order naming both, so a key
-    # being here means the key is the choice, and the library id is not read at all.
-    track_key = params.get("music_track_key")
-    track_id = params.get("music_track_id") or assembly.DEFAULT_TRACK
-    if not track_key and track_id not in assembly.TRACKS:
-        # The api refuses an unknown id at the order, so this is the two lists having drifted apart.
-        # Retrying would ask for the same missing track three times.
-        return _give_up_for_good(conn, ref, f"неизвестный музыкальный трек «{track_id}»")
+    # Под что собирать: названия треков по порядку, ещё не файлы — качать их незачем, пока не
+    # известно, есть ли из чего собирать ролик. Пустой список — заказ «без музыки», и тогда звучит
+    # сам материал (ниже).
+    ordered_music, refusal = _ordered_music(params)
+    if refusal:
+        return _give_up_for_good(conn, ref, refusal)
+    # Пожелания организатора к трекам, его словами. Как и история, читает их только режиссёр:
+    # дорожку они не перекраивают.
+    music_note = (params.get("music_note") or "").strip()
     orientation = params.get("orientation") or assembly.DEFAULT_ORIENTATION
     if orientation not in assembly.CANVASES:
         # Same drift, same answer: the api validates the two values it may write here, so anything
@@ -152,10 +157,17 @@ def montage(conn, ref):
                 "материал не годится для ролика: файлы не читаются, кадры испорчены или исключены",
             )
 
+        # Музыка раньше режиссёра: под что собирают ролик — часть того, из чего он строит план.
+        tracks, refusal = _music_files(ordered_music, s3, workdir)
+        if refusal:
+            return _give_up_for_good(conn, ref, refusal)
+        track = assembly.one_track(tracks, workdir)
+
         # The director first, and the отбор whenever there is no director: no cloud model, nothing
         # described for it to read, or an answer with nothing of ours in it (`director.direct`).
         chosen = director.direct(
-            conn, judged, target_seconds, include, exclude, story=story, ref=ref
+            conn, judged, target_seconds, include, exclude, story=story, ref=ref,
+            music=_music_heard(ordered_music, tracks), music_note=music_note,
         )
         if chosen is None:
             chosen, rejected = selection.choose(judged, target_seconds, include, exclude)
@@ -167,25 +179,26 @@ def montage(conn, ref):
             # would be there on a retry.
             return _give_up_for_good(conn, ref, "в ролик нечего ставить: весь материал исключён")
 
-        track = workdir / "track"
-        if track_key:
-            s3.download_file(media.bucket(), track_key, str(track))
-            try:
-                # The organizer's bytes, about to be handed to ffmpeg — the same door every upload
-                # comes through: a «track» with a playlist inside it would have ffmpeg go and read
-                # this worker's own disk.
-                media._refuse_playlists(track)
-            except RuntimeError as exc:
-                # Unreadable, or a playlist where the music should be: identical on a second try.
-                log.info("montage %s: the uploaded track is no good: %s", ref, exc)
-                return _give_up_for_good(conn, ref, "загруженный трек не читается")
-        else:
-            track = assembly.track_file(track_id)
+        # Both ways of directing stop at the piece that would not fit the order, so what comes back
+        # from either is usually shorter than the length that was asked for. Here the clips already
+        # in the video are held longer until it runs that long — one step after both of them, so
+        # that no way of directing a video can go round the ordered length. Музыки это не касается:
+        # ролик набирает заказанную длину и под дорожку, и с живым звуком.
+        chosen = selection.stretch(chosen, target_seconds)
 
         # The pieces are chosen and in their places by now — all that is settled here is how long
         # each is held, so that the join lands on a beat. A track with no tempo leaves them as they
-        # are.
-        chosen = rhythm.fit(chosen, rhythm.beats(track))
+        # are, and so does a montage with no music at all: биты ищутся по всей собранной дорожке —
+        # по всему списку треков разом, — а когда дорожки нет, куски держатся ровно так, как их
+        # выбрали отсев или режиссёр.
+        if track:
+            chosen = rhythm.fit(chosen, rhythm.beats(track))
+
+        # Which piece stands where in the video is settled by this line and nothing below moves it:
+        # `_back_to_originals` swaps a file and `assembly` encodes what it is given. So the layout
+        # is written here rather than at the end — assembling a montage takes minutes, and the
+        # place of a frame in it is a thing to show while they are running, not after.
+        _write_layout(conn, ref, chosen)
 
         # And only now, for the photographs that actually made the cut, whether the copy they were
         # judged on is also the file the piece is cut from.
@@ -193,6 +206,11 @@ def montage(conn, ref):
 
         assembled = workdir / "montage.mp4"
         clips = assembly.assemble(chosen, orientation, track, workdir, assembled)
+        # The same layout again, off the clips as they were really encoded. `assemble` measures
+        # every normalised piece instead of believing the length it asked for, and a clip whose
+        # picture is shorter than its container claims comes back shorter — the crossfade chain is
+        # stepped along by those measured numbers, so they are also where the frames actually are.
+        _write_layout(conn, ref, clips)
         duration = media._duration(assembled)
         media._upload(s3, assembled, video_key, "video/mp4")
 
@@ -240,6 +258,79 @@ def montage(conn, ref):
     _tell_the_api(ref)
 
 
+def _ordered_music(params):
+    """Под что заказан ролик: названия треков в том порядке, в каком они играют, и отказ, если
+    заказано то, чего нет. Одно из двух всегда None.
+
+    Название — либо id трека полки (`assembly.TRACKS`), либо ключ файла, который организатор
+    загрузил сам (api, `music_uploads`); что именно, разбирается по ключу — свой трек лежит под
+    `music/<uuid>`. Пустой список — это «без музыки»: ролик пойдёт с живым звуком видео.
+
+    Заказа старой формы (`music_tracks` в `params` нет вовсе) это не касается: там по-прежнему
+    читаются `music_track_key`, `music_track_id` и «тёплая» по умолчанию, и повтор упавшего ролика,
+    заказанного до списков, собирается ровно как собирался. Ключ и id — одно или другое: api не
+    пропускает заказ с обоими, так что ключ здесь значит, что выбран он, и id не читается вовсе.
+    """
+    tracks = params.get("music_tracks")
+    if tracks is None:
+        key = params.get("music_track_key")
+        if key:
+            return [str(key)], None
+        track_id = params.get("music_track_id") or assembly.DEFAULT_TRACK
+        if track_id not in assembly.TRACKS:
+            # The api refuses an unknown id at the order, so this is the two lists having drifted
+            # apart. Retrying would ask for the same missing track three times.
+            return None, f"неизвестный музыкальный трек «{track_id}»"
+        return [track_id], None
+    named = [str(one) for one in tracks]
+    unknown = [
+        one for one in named
+        if one not in assembly.TRACKS and not one.startswith(UPLOADED_MUSIC_PREFIX)
+    ]
+    if unknown:
+        # Ни трек полки, ни загруженный файл — значит, списки разошлись у api и у воркера, и на
+        # второй попытке будет ровно то же самое.
+        return None, f"неизвестный музыкальный трек «{unknown[0]}»"
+    return named, None
+
+
+def _music_files(named, s3, workdir):
+    """Те же треки файлами на диске, в том же порядке, — и отказ, если чей-то файл не читается.
+
+    Трек полки лежит рядом с воркером, свой качается из бакета и проходит ту же дверь, что и любая
+    чужая медиа: «трек», внутри которого плейлист, отправил бы ffmpeg читать диски воркера.
+    """
+    files = []
+    for index, one in enumerate(named):
+        if one in assembly.TRACKS:
+            files.append(assembly.track_file(one))
+            continue
+        downloaded = workdir / f"track-{index}"
+        s3.download_file(media.bucket(), one, str(downloaded))
+        try:
+            media._refuse_playlists(downloaded)
+        except RuntimeError as exc:
+            # Unreadable, or a playlist where the music should be: identical on a second try.
+            log.info("the uploaded track %s is no good: %s", one, exc)
+            return None, "загруженный трек не читается"
+        files.append(downloaded)
+    return files, None
+
+
+def _music_heard(named, files):
+    """Дорожка словами для режиссёра: что играет, в каком порядке и сколько каждый трек идёт.
+
+    Свой трек назван своим, а не ключом: ключ в бакете модели ничего не говорит, а платить за него
+    словом в каждом запросе пришлось бы. Пустой список так и уходит пустым — это «без музыки», и
+    режиссёр видит, что под ролик звучит сам материал.
+    """
+    return [
+        {"track": one if one in assembly.TRACKS else "свой трек",
+         "seconds": round(media._duration(path) or 0, 1)}
+        for one, path in zip(named, files)
+    ]
+
+
 def _back_to_originals(chosen, originals, orientation):
     """The chosen pieces again, each photograph put back on its original where the large copy it
     was judged on is too small for the canvas.
@@ -269,6 +360,48 @@ def _back_to_originals(chosen, originals, orientation):
                 piece = dataclasses.replace(piece, path=original)
         pieces.append(piece)
     return pieces
+
+
+def _write_layout(conn, ref, pieces):
+    """Where each piece stands in this montage, into `montage_frames` — in place of whatever an
+    earlier assembly of the same order left there.
+
+    The table is the api's (its migration `100.do.frame-info.sql`) and this is the only thing that
+    writes it: the api reads it to answer «в каких роликах стоит этот кадр и на какой секунде» on
+    the frame sheet (doc-02), and it asks only about montages that are already `ready` — so rows
+    under a video that then failed to assemble are seen by nobody until it is made again. One row
+    per *appearance* rather than per frame, which is why the key carries the second: a file may
+    legitimately stand in a video twice — a clip cut in two, a photograph that comes back at the
+    end. The whole of m-24 and its neighbours read this one table; a montage's layout written down
+    a second time somewhere else would be two answers to the same question.
+
+    The seconds are counted the way `assembly` lays the chain out: each join eats half a second of
+    the total, so a piece starts where the one before it ends, less the crossfade the two share.
+
+    Nothing here may cost the montage. A video that takes minutes to assemble is not thrown away
+    because an insert did not land, so a failure is a line in the log and the assembly goes on —
+    the frame sheet would then show this montage under none of its frames, which is a montage
+    missing from a list and not a montage missing.
+    """
+    at, rows = 0.0, []
+    for piece in pieces:
+        rows.append((ref, piece.media_id, at, piece.seconds))
+        at += piece.seconds - assembly.CROSSFADE_SECONDS
+    try:
+        # Both statements or neither, on a connection that otherwise commits each on its own: this
+        # layout is read while the video is still being assembled, and between the two an emptied
+        # table reads as «этого кадра нет ни в одном ролике».
+        with conn.transaction():
+            conn.execute("DELETE FROM montage_frames WHERE montage_id = %s", (ref,))
+            with conn.cursor() as cursor:
+                cursor.executemany(
+                    """INSERT INTO montage_frames
+                         (montage_id, media_id, start_seconds, duration_seconds)
+                       VALUES (%s, %s, %s, %s)""",
+                    rows,
+                )
+    except Exception as exc:
+        log.warning("montage %s: its layout was not written, assembling it anyway: %s", ref, exc)
 
 
 def give_up(conn, ref, error_text):

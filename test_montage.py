@@ -10,6 +10,8 @@ R2_ENDPOINT points at.
 """
 
 import json
+import re
+import subprocess
 import uuid
 
 import pytest
@@ -122,14 +124,16 @@ def test_a_memory_of_photos_and_a_clip_becomes_one_playable_video(conn, s3, memo
 
     status, video_key, duration, error_text = read_montage(conn, montage_id)
     assert (status, video_key, error_text) == ("ready", f"montages/{montage_id}.mp4", None)
-    # Three stills of three seconds and a four-second clip cut to the three it has — twelve seconds
-    # of material, less half a second for each of the three crossfades. Pieces butted together
-    # instead of overlapped would come to twelve, which is outside the window even with the slack.
-    assert about(duration, 10.5)
+    # Three stills of two and a half seconds and a four-second clip cut to the three it has — ten
+    # and a half seconds of material, less half a second for each of the three crossfades. Pieces
+    # butted together instead of overlapped would come to 10.5, which is outside the window even
+    # with the slack. Thirty seconds were ordered and there is no more material to reach them with:
+    # the clip is already whole and a photograph is never stretched (`selection.stretch`).
+    assert about(duration, 9.0)
 
     assembled_file = fetch(s3, video_key, tmp_path / "montage.mp4")
     assembled = probe(assembled_file)
-    assert about(float(assembled["format"]["duration"]), 10.5)
+    assert about(float(assembled["format"]["duration"]), 9.0)
     tracks = {stream["codec_type"]: stream for stream in assembled["streams"]}
     assert set(tracks) == {"video", "audio"}, "picture and music both landed"
     assert tracks["video"]["codec_name"] == "h264"
@@ -154,10 +158,124 @@ def test_a_memory_of_photos_and_a_clip_becomes_one_playable_video(conn, s3, memo
     assert selection._exposed(selection._grey_frames(poster_file)[0])
 
 
+def long_clip(path, seconds=12):
+    """A clip with room in it. The happy path's own clip runs three seconds, which the default cut
+    already takes whole — there is nothing left in it to hold longer, and a video ordered longer
+    than its material is exactly what this material cannot show."""
+    ffmpeg(
+        "-f", "lavfi", "-i", f"testsrc=size=1280x720:rate=24:duration={seconds}",
+        "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(path),
+    )
+    return path
+
+
+def test_a_montage_reaches_the_length_that_was_ordered_by_holding_its_clips_longer(
+    conn, s3, memory, tmp_path
+):
+    """The ordered length as a promise, on a real file: two twelve-second clips and two stills come
+    to eleven and a half seconds at the lengths the отбор cuts them at, and twenty seconds were
+    ordered. The clips are held longer — equally, and well inside their own files — until the video
+    is as long as it was asked to be. Before this, the same order came back at those eleven and a
+    half seconds without a word (TASK-193)."""
+    montage_id = order(conn, memory, {"target_seconds": 20, "music_track_id": "warm"})
+    for index in range(2):
+        _, key = add_item(conn, memory, "video", status="ready")
+        s3.upload_file(str(long_clip(tmp_path / f"clip-{index}.mp4")), media.bucket(), key)
+    for index in range(2):
+        _, key = add_item(conn, memory, "photo", status="ready")
+        s3.upload_file(str(photo(tmp_path / f"photo-{index}.jpg")), media.bucket(), key)
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    status, video_key, duration, error_text = read_montage(conn, montage_id)
+    assert (status, error_text) == ("ready", None)
+    # 4 + 4 + 2.5 + 2.5 less three joins is 11.5, so 8.5 seconds are missing and the two clips take
+    # 4.25 each — 8.25 seconds of a twelve-second file apiece.
+    assert about(duration, 20.0), "ролик вышел не той длины, что заказали"
+    assert about(float(probe(fetch(s3, video_key, tmp_path / "m.mp4"))["format"]["duration"]), 20.0)
+
+
+def layout_of(conn, montage_id):
+    """Which frames the montage is made of and where each of them stands in it, in the order they
+    are shown — `montage_frames`, the table the frame sheet's «в каких роликах» is answered from."""
+    if conn.execute("SELECT to_regclass('montage_frames')").fetchone()[0] is None:
+        pytest.skip("montage_frames is missing — run the api's migrations first (see README.md)")
+    return conn.execute(
+        """SELECT media_id::text, start_seconds, duration_seconds
+           FROM montage_frames WHERE montage_id = %s ORDER BY start_seconds""",
+        (montage_id,),
+    ).fetchall()
+
+
+def test_the_finished_montage_says_where_in_it_each_frame_it_took_stands(
+    conn, s3, memory, tmp_path
+):
+    """Every piece of the assembled video has its second and its length written down, and the one
+    the organizer struck out has nothing written down at all — «Сведения о кадре» shows a frame the
+    videos it is in and where, and a frame that is in none of them shows none (doc-02).
+
+    Checked against the video that was actually made rather than against numbers named here: the
+    pieces are pulled to the beat of the track, so what any of them is held for is the rhythm's to
+    decide — but they must add up, join by join, to the file that came out of it.
+    """
+    ids = material(conn, s3, memory, tmp_path)
+    montage_id = order(conn, memory, {"target_seconds": 30, "exclude_media_ids": [ids[0]]})
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    status, _, duration, error_text = read_montage(conn, montage_id)
+    assert (status, error_text) == ("ready", None)
+    layout = layout_of(conn, montage_id)
+    assert [media_id for media_id, _, _ in layout] == ids[1:], (
+        "не те кадры или не в том порядке: у вошедших запись есть, у исключённого — нет"
+    )
+    assert layout[0][1] == 0.0, "the video opens on its first piece"
+    # Each piece begins where the one before it ends, less the half-second the two of them share.
+    for (_, start, seconds), (_, next_start, _) in zip(layout, layout[1:]):
+        assert next_start == pytest.approx(start + seconds - assembly.CROSSFADE_SECONDS)
+    # And the last of them ends with the video itself: the layout is of this file, not of a plan
+    # that was made before it was encoded.
+    assert layout[-1][1] + layout[-1][2] == pytest.approx(duration, abs=0.2)
+
+
+def test_a_montage_assembled_again_replaces_its_layout_instead_of_doubling_it(conn, memory):
+    """Re-ordering the same video writes its layout a second time, and the first one has to go with
+    it: a frame that was dropped from the remake would otherwise still say it stands in it, and one
+    that stayed would be listed twice.
+
+    Straight at the writing, with pieces made up here: what a remake is, as far as this table is
+    concerned, is one more run of it under the same montage id — and assembling two whole videos to
+    see that costs minutes of ffmpeg for one `delete`.
+    """
+    montage_id = order(conn, memory, {"target_seconds": 30})
+    dropped, _ = add_item(conn, memory, "photo", status="ready")
+    kept, _ = add_item(conn, memory, "photo", status="ready")
+
+    montage._write_layout(conn, montage_id, [selection.Piece(media_id=dropped, seconds=3.0)])
+    montage._write_layout(conn, montage_id, [selection.Piece(media_id=kept, seconds=4.0)])
+
+    assert layout_of(conn, montage_id) == [(kept, 0.0, 4.0)]
+
+
+def test_a_layout_that_cannot_be_written_does_not_cost_the_montage(conn, memory):
+    """The video is the thing; its layout is a line in a sheet about one frame. Minutes of encoding
+    are not thrown away because an insert did not land, so a write that fails is a warning in the
+    log — and the connection is still good afterwards, or the montage would die on the next
+    statement instead of on this one."""
+    gone = str(uuid.uuid4())  # no `montages` row, so both foreign keys refuse the rows
+
+    montage._write_layout(conn, gone, [selection.Piece(media_id=str(uuid.uuid4()), seconds=3.0)])
+
+    assert layout_of(conn, gone) == []
+
+
 def click_track(path, gap=1.6):
     """Thirty seconds of metronome: one click every 1.6 seconds. The tempo is known because it was
-    put there, and it is deliberately slow — under a track like this the pieces stretch visibly, and
-    the same material can no longer come to its even 10.5 seconds."""
+    put there, and it is deliberately slow — under a track like this the pieces are pulled visibly
+    off their own lengths, and the same material can no longer come to its even 9 seconds."""
     ffmpeg("-f", "lavfi",
            "-i", f"aevalsrc='0.8*sin(2*PI*1200*t)*exp(-40*mod(t,{gap}))':d=30", str(path))
     return path
@@ -170,27 +288,31 @@ def test_a_montage_is_cut_to_the_beat_of_the_track_the_organizer_uploaded(
     (the api's `music_uploads`), and the joins fall into its rhythm just the same.
 
     The rhythm is checked at the last join and only there: behind it stands the last piece, which
-    the fitting never touches, and its length is known — three seconds. So the last join sits at
-    the end of the montage less those three seconds plus the half-crossfade that piece began with,
-    and that moment has to be one of the track's beats. The montage itself, under a metronome this
-    slow, has to come out well past the even 10.5 seconds — otherwise nothing was pulled anywhere.
+    the fitting never touches, and its length is known — the 2.5 seconds a photograph is held. So
+    the last join sits at the end of the montage less those 2.5 seconds plus the half-crossfade
+    that piece began with, and that moment has to be one of the track's beats. The montage itself,
+    under a metronome this slow, has to come out well off the even 9 seconds its pieces add up to
+    — otherwise nothing was pulled anywhere.
     """
     track_key = f"music/{uuid.uuid4()}.wav"
     s3.upload_file(str(click_track(tmp_path / "click.wav")), media.bucket(), track_key)
     montage_id = order(conn, memory, {"target_seconds": 30, "music_track_key": track_key})
-    material(conn, s3, memory, tmp_path)
+    # The clip first (oldest), so the montage is closed by a photograph and the tail of it is the
+    # 2.5 seconds a still is held rather than the three the clip's own file holds.
+    _, key = add_item(conn, memory, "video", status="ready", age_hours=5)
+    s3.upload_file(str(video(tmp_path / "clip.mp4")), media.bucket(), key)
+    for index in range(3):
+        _, key = add_item(conn, memory, "photo", status="ready")
+        s3.upload_file(str(photo(tmp_path / f"photo-{index}.jpg")), media.bucket(), key)
     worker.enqueue(conn, "montage", montage_id)
 
     assert worker.run_once(conn) is True
 
     status, _, duration, error_text = read_montage(conn, montage_id)
     assert (status, error_text) == ("ready", None)
-    assert duration > 11.5, "the pieces reached for the beats — even three-second cuts do not"
+    assert not about(duration, 9.0), "nothing was pulled anywhere — the pieces stayed as they were"
 
-    # Three seconds: that is how long both a photograph and this material's clip are held (its file
-    # is three seconds long, and «3–5 секунд вокруг лучшего момента» is cut from what there is), so
-    # whichever of the four ends up last, the tail of the montage is the same.
-    last_join = duration - 3.0 + assembly.CROSSFADE_SECONDS / 2
+    last_join = duration - selection.PHOTO_SECONDS + assembly.CROSSFADE_SECONDS / 2
     beats = rhythm.beats(tmp_path / "click.wav")
     assert beats, "a metronome is a tempo, or there is nothing here to check"
     # A frame and a half: for the encoding, which rounds the montage's length to one, and for
@@ -220,6 +342,184 @@ def test_a_music_file_that_will_not_open_fails_the_montage_instead_of_retrying(
     assert "трек" in error_text
 
 
+# --- список треков, и пустой список -----------------------------------------
+
+
+def tone(path, seconds=3.0, frequency=880):
+    """Секунды слышимого звука — трек, который в собранной дорожке ни с чем не спутаешь."""
+    ffmpeg("-f", "lavfi", "-i", f"sine=frequency={frequency}:duration={seconds}", str(path))
+    return path
+
+
+def hush(path, seconds=3.0):
+    """Столько же тишины — второй трек, слышный ровно наоборот: по нему и видно порядок."""
+    ffmpeg("-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", "-t", str(seconds), str(path))
+    return path
+
+
+def loudness(path, at, seconds=1.2):
+    """Насколько громко звучит кусочек файла: `mean_volume` в децибелах, как его считает ffmpeg.
+    Тишина — около −91 дБ (или −inf), живой звук и музыка — на десятки децибел громче."""
+    done = subprocess.run(
+        ("ffmpeg", "-nostdin", "-y", "-ss", str(at), "-t", str(seconds), "-i", str(path),
+         "-af", "volumedetect", "-f", "null", "-"),
+        capture_output=True, text=True, check=True,
+    )
+    (mean,) = re.findall(r"mean_volume: (\S+) dB", done.stderr)
+    return float(mean)
+
+
+def test_the_tracks_of_an_order_become_one_soundtrack_in_the_order_they_were_given(tmp_path):
+    """Список любой длины — одна дорожка: треки идут друг за другом в заданном порядке, стык
+    проходит коротким фейдом, и дорожка выходит короче суммы ровно на него. Порядок проверяется
+    звуком: первым отдан тон, вторым тишина, и в дорожке громкое стоит впереди тихого — собранная
+    задом наперёд, она звучала бы наоборот."""
+    tracks = [tone(tmp_path / "tone.wav"), hush(tmp_path / "hush.wav")]
+
+    soundtrack = assembly.one_track(tracks, tmp_path)
+
+    assert float(probe(soundtrack)["format"]["duration"]) == pytest.approx(
+        6.0 - assembly.TRACK_FADE_SECONDS, abs=0.2
+    )
+    assert loudness(soundtrack, at=0.2) > loudness(soundtrack, at=3.6) + 30, (
+        "треки в дорожке идут не в том порядке, в каком их заказали"
+    )
+    # И два вырожденных случая: собирать нечего, и собирать не из чего.
+    assert assembly.one_track(tracks[:1], tmp_path) is tracks[0], "один трек незачем пересобирать"
+    assert assembly.one_track([], tmp_path) is None, "пустой список — это «без музыки»"
+
+
+def test_a_montage_under_a_list_of_tracks_is_cut_to_the_beat_of_the_whole_soundtrack(
+    conn, s3, memory, tmp_path
+):
+    """Свой трек и трек полки вперемешку: воркер склеивает их в одну дорожку и ищет ритм по ней —
+    склейки идут в такт всему списку, а не первому файлу из него.
+
+    Проверяется на последней склейке, как и под одним загруженным треком: за ней стоит последний
+    кусок, которого подгонка не касается, и его длина известна — 2,5 секунды, которые держится
+    фотография. Биты берутся у дорожки, собранной здесь же и из тех же двух файлов: это ровно та,
+    под которую собрали ролик.
+    """
+    track_key = f"music/{uuid.uuid4()}.wav"
+    s3.upload_file(str(click_track(tmp_path / "click.wav")), media.bucket(), track_key)
+    montage_id = order(conn, memory, {"target_seconds": 30, "music_tracks": [track_key, "warm"]})
+    # Клип первым (он старше всех), чтобы ролик закрывала фотография: её длина известна и подгонка
+    # ритма последний кусок не трогает. Набирать заказанные тридцать секунд тут нечем — клип и так
+    # взят целиком, а фотографии не растягиваются (`selection.stretch`).
+    _, key = add_item(conn, memory, "video", status="ready", age_hours=5)
+    s3.upload_file(str(video(tmp_path / "clip.mp4")), media.bucket(), key)
+    for index in range(3):
+        _, key = add_item(conn, memory, "photo", status="ready")
+        s3.upload_file(str(photo(tmp_path / f"photo-{index}.jpg")), media.bucket(), key)
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    status, video_key, duration, error_text = read_montage(conn, montage_id)
+    assert (status, error_text) == ("ready", None)
+    assembled = {stream["codec_type"] for stream in probe(
+        fetch(s3, video_key, tmp_path / "montage.mp4")
+    )["streams"]}
+    assert assembled == {"video", "audio"}, "картинка и музыка обе на месте"
+
+    soundtrack = assembly.one_track([tmp_path / "click.wav", assembly.track_file("warm")], tmp_path)
+    beats = rhythm.beats(soundtrack)
+    assert beats, "в дорожке из метронома и музыки есть темп, иначе проверять нечего"
+    last_join = duration - selection.PHOTO_SECONDS + assembly.CROSSFADE_SECONDS / 2
+    assert min(abs(last_join - beat) for beat in beats) < 0.1, (
+        f"последняя склейка, на {last_join:.2f}, не попала в бит дорожки"
+    )
+    assert abs(duration - 9.0) > 0.2, "куски тянули к битам, а не оставили как выбрали"
+
+
+def test_an_order_with_no_music_at_all_keeps_the_live_sound_of_the_videos(
+    conn, s3, memory, tmp_path
+):
+    """Пустой список — «без музыки», и тогда ролик звучит сам собой: у клипов остаётся их
+    собственный звук, фотографии молчат (макет MontageMusicNone, «Только живой звук из видео»).
+    Клип тут новее всех, поэтому стоит в конце ролика: конец должен звучать, начало — нет.
+
+    Ритма в таком ролике нет вовсе — подгонять склейки не подо что, и куски держатся ровно столько,
+    сколько им дали отсев и набор заказанной длины: три фотографии по 2,5 секунды и трёхсекундный
+    клип, минус полсекунды на каждую из трёх склеек. Заказанные тридцать секунд набрать нечем —
+    клип и так взят целиком, а фотографии не растягиваются, — так что длина тут ровная и видно,
+    что куски никто не двигал. Под музыку те же четыре файла дают другую длину (тест выше).
+    """
+    montage_id = order(conn, memory, {"target_seconds": 30, "music_tracks": []})
+    for index in range(3):
+        _, key = add_item(conn, memory, "photo", status="ready", age_hours=5 - index)
+        s3.upload_file(str(photo(tmp_path / f"photo-{index}.jpg")), media.bucket(), key)
+    _, key = add_item(conn, memory, "video", status="ready")  # новее всех → последним в ролике
+    s3.upload_file(str(video(tmp_path / "clip.mp4")), media.bucket(), key)
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    status, video_key, duration, error_text = read_montage(conn, montage_id)
+    assert (status, error_text) == ("ready", None)
+    assert duration == pytest.approx(9.0, abs=0.3), "без музыки куски никто не двигал"
+
+    assembled = fetch(s3, video_key, tmp_path / "montage.mp4")
+    sound = [stream for stream in probe(assembled)["streams"] if stream["codec_type"] == "audio"]
+    assert [stream["codec_name"] for stream in sound] == ["aac"], "дорожка одна, и она есть"
+    assert loudness(assembled, at=7.2) > loudness(assembled, at=0.5) + 30, (
+        "в конце ролика должен звучать клип, а в начале — молчать фотография"
+    )
+
+
+def mute_clip(path, seconds=3.0):
+    """Клип, снятый с выключенным микрофоном: картинка есть, звуковой дорожки нет вовсе."""
+    ffmpeg("-f", "lavfi", "-i", f"testsrc=size=640x480:rate=24:duration={seconds}",
+           "-c:v", "libx264", "-pix_fmt", "yuv420p", str(path))
+    return path
+
+
+def test_without_music_every_piece_gets_a_track_even_when_it_has_nothing_to_say(tmp_path):
+    """Звук ролика без музыки склеивается тем же перехлёстом, что и картинка, а склеивать
+    что-то с ничем нельзя: дорожка есть у каждого куска — у клипа своя, у фотографии и у клипа,
+    снятого без звука, тишина той же формы и той же длины."""
+    silent_ones = (
+        ("фотография", selection.Piece(kind="photo", seconds=2.0, path=photo(tmp_path / "p.jpg"))),
+        ("немой клип", selection.Piece(kind="video", seconds=2.0,
+                                       path=mute_clip(tmp_path / "mute.mp4"))),
+        ("клип со звуком", selection.Piece(kind="video", seconds=2.0,
+                                           path=video(tmp_path / "loud.mp4"))),
+    )
+    for name, piece in silent_ones:
+        clip = tmp_path / f"clip-{len(name)}.mp4"
+        assembly._normalise(piece, "landscape", clip, live_sound=True)
+
+        normalised = probe(clip)
+        assert {stream["codec_type"] for stream in normalised["streams"]} == {"video", "audio"}, (
+            f"у куска «{name}» нет звуковой дорожки — сборке нечего будет склеивать"
+        )
+        assert float(normalised["format"]["duration"]) == pytest.approx(2.0, abs=0.15), (
+            f"кусок «{name}» вышел не той длины, и склейки разъедутся на эту разницу"
+        )
+
+
+def test_what_the_order_says_about_music_is_read_the_old_way_too():
+    """Форма заказа: список треков, пустой список — «без музыки», и заказ старой формы, в котором
+    списка нет вовсе. Последнее и есть повтор упавшего ролика: он лежит в базе так, как его
+    записали до списков, и собраться должен как собирался — свой трек, трек полки или «тёплая» по
+    умолчанию."""
+    assert montage._ordered_music({"music_tracks": ["warm", "music/abc"]}) == (
+        ["warm", "music/abc"], None
+    )
+    assert montage._ordered_music({"music_tracks": []}) == ([], None)
+
+    assert montage._ordered_music({}) == ([assembly.DEFAULT_TRACK], None)
+    assert montage._ordered_music({"music_track_id": "calm"}) == (["calm"], None)
+    assert montage._ordered_music({"music_track_key": "music/abc", "music_track_id": "calm"}) == (
+        ["music/abc"], None
+    ), "ключ своего трека сильнее id полки, как и было"
+
+    named, refusal = montage._ordered_music({"music_tracks": ["warm", "polka"]})
+    assert named is None and "polka" in refusal
+    named, refusal = montage._ordered_music({"music_track_id": "polka"})
+    assert named is None and "polka" in refusal
+
+
 def test_a_montage_ordered_portrait_is_assembled_the_other_way_up(conn, s3, memory, tmp_path):
     """The organizer asked for a video to watch on a phone. The same material, the same length, the
     same everything else — cut into 1080×1920 instead of 1920×1080. The numbers are written out
@@ -234,7 +534,7 @@ def test_a_montage_ordered_portrait_is_assembled_the_other_way_up(conn, s3, memo
 
     status, video_key, duration, error_text = read_montage(conn, montage_id)
     assert (status, error_text) == ("ready", None)
-    assert about(duration, 10.5), "turning the canvas does not change what goes in it"
+    assert about(duration, 9.0), "turning the canvas does not change what goes in it"
 
     assembled_file = fetch(s3, video_key, tmp_path / "portrait.mp4")
     tracks = {stream["codec_type"]: stream for stream in probe(assembled_file)["streams"]}
@@ -367,6 +667,39 @@ def test_a_montage_ordered_with_a_story_is_cut_to_the_directors_plan(
     assert "вносят торт" in question, "and so did what the pipeline already knew about the material"
 
 
+def test_the_directors_film_is_held_to_the_ordered_length_the_same_way(
+    conn, s3, memory, tmp_path, monkeypatch
+):
+    """The other half of the promise: the length is filled after the film is planned, not inside
+    the planning, so a plan that comes to nine seconds against a sixteen-second order is held to it
+    exactly as the отбор's own cut is. The plan opens on the long clip, and that is what the
+    missing seconds go into — the model is not asked again and nothing is added to the film."""
+    clip_id, key = add_item(conn, memory, "video", status="ready")
+    s3.upload_file(str(long_clip(tmp_path / "clip.mp4")), media.bucket(), key)
+    ids = [clip_id]
+    for index in range(2):
+        photo_id, key = add_item(conn, memory, "photo", status="ready")
+        s3.upload_file(str(photo(tmp_path / f"photo-{index}.jpg")), media.bucket(), key)
+        ids.append(photo_id)
+    for media_id, description in zip(ids, ("вносят торт", "все за столом", "задувают свечи")):
+        conn.execute(
+            """INSERT INTO media_understandings (media_id, memory_id, description, cast_labels)
+               VALUES (%s, %s, %s, %s)""",
+            (media_id, str(memory[0]), description, ["человек-1"]),
+        )
+    planning_over(monkeypatch, ids)
+    montage_id = order(conn, memory, {"target_seconds": 16, "story_text": "день рождения"})
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    status, _, duration, error_text = read_montage(conn, montage_id)
+    assert (status, error_text) == ("ready", None)
+    # The plan's own three, four and three seconds come to nine; the seven that are missing all go
+    # into the clip, which the plan put first — ten seconds of its twelve.
+    assert about(duration, 16.0), "план не дотянули до заказанной длины"
+
+
 def unopenable(path):
     """Bytes in the bucket that ffmpeg will not open — a truncated upload, a file the phone
     mislabelled. Not a playlist: that is the security case and `test_media.py` has it."""
@@ -413,7 +746,7 @@ def test_a_file_that_will_not_open_is_left_out_rather_than_failing_the_video(
 
     status, _, duration, error_text = read_montage(conn, montage_id)
     assert (status, error_text) == ("ready", None)
-    assert about(duration, 10.5), "the four that opened went in, the broken one was left out"
+    assert about(duration, 9.0), "the four that opened went in, the broken one was left out"
 
 
 def test_a_badly_exposed_photo_is_left_out_rather_than_failing_the_video(
@@ -432,7 +765,7 @@ def test_a_badly_exposed_photo_is_left_out_rather_than_failing_the_video(
 
     status, _, duration, error_text = read_montage(conn, montage_id)
     assert (status, error_text) == ("ready", None)
-    assert about(duration, 10.5), "the crushed photo had no usable frame and was left out uncounted"
+    assert about(duration, 9.0), "the crushed photo had no usable frame and was left out uncounted"
 
 
 def test_a_photo_the_organizer_marked_include_is_in_the_video_the_algorithm_notwithstanding(
@@ -453,8 +786,9 @@ def test_a_photo_the_organizer_marked_include_is_in_the_video_the_algorithm_notw
 
     status, _, duration, error_text = read_montage(conn, montage_id)
     assert (status, error_text) == ("ready", None)
-    # Five pieces of three seconds instead of four, less half a second for each of four joins.
-    assert about(duration, 13.0), "the crushed photo went in because the order asked for it"
+    # Four stills of 2.5 and the three-second clip instead of three stills, less half a second
+    # for each of four joins.
+    assert about(duration, 11.0), "the crushed photo went in because the order asked for it"
 
 
 def test_the_floor_counts_the_pieces_the_organizer_asked_for_too(conn, s3, memory, tmp_path):
@@ -476,7 +810,7 @@ def test_the_floor_counts_the_pieces_the_organizer_asked_for_too(conn, s3, memor
 
     status, _, duration, error_text = read_montage(conn, montage_id)
     assert (status, error_text) == ("ready", None)
-    assert about(duration, 8.0), "all three went in: three stills, less half a second for each join"
+    assert about(duration, 6.5), "all three went in: three stills, less half a second for each join"
 
 
 def test_a_photo_the_organizer_marked_exclude_stays_out_of_the_video(conn, s3, memory, tmp_path):
@@ -491,8 +825,9 @@ def test_a_photo_the_organizer_marked_exclude_stays_out_of_the_video(conn, s3, m
 
     status, _, duration, error_text = read_montage(conn, montage_id)
     assert (status, error_text) == ("ready", None)
-    # Two stills and the clip — nine seconds of material, less half a second for each of two joins.
-    assert about(duration, 8.0), "one of the four pieces was left out on the order's own word"
+    # Two stills and the clip — eight seconds of material, less half a second for each of two
+    # joins.
+    assert about(duration, 7.0), "one of the four pieces was left out on the order's own word"
 
 
 def test_the_order_judges_a_photograph_on_the_same_copy_the_proposal_did(
@@ -519,8 +854,8 @@ def test_the_order_judges_a_photograph_on_the_same_copy_the_proposal_did(
 
     status, _, duration, error_text = read_montage(conn, montage_id)
     assert (status, error_text) == ("ready", None)
-    # Two stills and the clip: the same nine seconds less two joins as a piece struck out by hand.
-    assert about(duration, 8.0), "снимок с чёрной копией остался в ролике — судили оригинал"
+    # Two stills and the clip: the same eight seconds less two joins as a piece struck out by hand.
+    assert about(duration, 7.0), "снимок с чёрной копией остался в ролике — судили оригинал"
 
 
 def test_the_floor_does_not_count_the_pieces_the_organizer_struck_out(conn, s3, memory, tmp_path):
@@ -599,11 +934,11 @@ def test_a_clip_is_laid_into_the_chain_at_the_length_it_really_is(conn, s3, memo
 
     status, video_key, duration, _ = read_montage(conn, montage_id)
     assert status == "ready"
-    # Two seconds of picture and three stills of three, less half a second for each of three
-    # joins: 9.5. Booked at the container's 3.5 instead, ffmpeg truncates the chain and the whole
+    # Two seconds of picture and three stills of 2.5, less half a second for each of three
+    # joins: 8. Booked at the container's 3.5 instead, ffmpeg truncates the chain and the whole
     # montage comes out at three seconds — nowhere near this window, slack for the rhythm or not.
-    assert about(duration, 9.5), "the clip went in at its real two seconds"
-    assert about(float(probe(fetch(s3, video_key, tmp_path / "m.mp4"))["format"]["duration"]), 9.5)
+    assert about(duration, 8.0), "the clip went in at its real two seconds"
+    assert about(float(probe(fetch(s3, video_key, tmp_path / "m.mp4"))["format"]["duration"]), 8.0)
 
 
 def test_a_photograph_is_scaled_once_for_the_piece_and_not_once_a_frame(tmp_path, monkeypatch):
