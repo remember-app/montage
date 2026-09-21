@@ -2,7 +2,8 @@
 
 The organizer orders a video, the api writes a `montages` row and queues `('montage', <id>)`; from
 `processing` onward the row is this worker's (see the api's migration `020.do.montages.sql`). Here
-the memory's ready originals are pulled out of R2, looked at frame by frame, the good moments are
+the memory's ready material is pulled out of R2 — every original, and beside each photograph the
+large copy the preview already made of it — looked at frame by frame, the good moments are
 cut and crossfaded into one 1080p file with a track over it, and the row is left `ready` with its
 keys on it — the video's and the cover's — then the api is knocked on so the phones get told.
 
@@ -103,17 +104,23 @@ def montage(conn, ref):
     s3 = media.storage()
     with tempfile.TemporaryDirectory() as workdir:
         workdir = pathlib.Path(workdir)
-        judged, large_copies = [], {}
+        judged, originals = [], {}
         for index, item in enumerate(items):
             media_id, kind, original_key, preview_key, captured_at, created_at = item
             original = workdir / f"original-{index}"
             # A download that fails is left fatal on purpose: the bytes may well arrive next time,
             # and swallowing an unreachable bucket would quietly cut a video out of half a memory.
             s3.download_file(media.bucket(), original_key, str(original))
+            originals[str(media_id)] = original
+            # A photograph is judged on the large copy and not on the forty megapixels it was
+            # uploaded at — the same file the piece will be cut from below (`_back_to_originals`).
+            looked_at = original
             if kind == "photo" and preview_key:
-                large_copies[str(media_id)] = preview_key
+                looked_at = media.large_copy(
+                    s3, preview_key, workdir / f"large-{index}.jpg"
+                ) or original
             judged.append(selection.judge(selection.Piece(
-                media_id=str(media_id), kind=kind, path=original,
+                media_id=str(media_id), kind=kind, path=looked_at,
                 when=captured_at or created_at, captured_at=captured_at,
             )))
 
@@ -180,9 +187,9 @@ def montage(conn, ref):
         # are.
         chosen = rhythm.fit(chosen, rhythm.beats(track))
 
-        # And only now, for the photographs that actually made the cut, the lighter file to cut
-        # them from.
-        chosen = _off_large_copies(s3, chosen, large_copies, orientation, workdir)
+        # And only now, for the photographs that actually made the cut, whether the copy they were
+        # judged on is also the file the piece is cut from.
+        chosen = _back_to_originals(chosen, originals, orientation)
 
         assembled = workdir / "montage.mp4"
         clips = assembly.assemble(chosen, orientation, track, workdir, assembled)
@@ -233,41 +240,33 @@ def montage(conn, ref):
     _tell_the_api(ref)
 
 
-def _off_large_copies(s3, chosen, large_copies, orientation, workdir):
-    """The chosen pieces again, each photograph pointed at its large copy where that copy is big
-    enough for the canvas — the original stays behind otherwise.
+def _back_to_originals(chosen, originals, orientation):
+    """The chosen pieces again, each photograph put back on its original where the large copy it
+    was judged on is too small for the canvas.
 
-    The copy is the 2048px JPEG the preview already made of every photo (`media.media_preview`), and
-    the canvas is 1920×1080 either way up, so it almost always has pixels to spare: cutting a piece
-    from it instead of from the original is the same picture off a tenth of the bytes and a
-    twentieth of the work. «Big enough» is measured and not assumed — the cap is on the long side,
-    so a panorama's copy can come back shorter than the canvas, and a photo smaller than 2048 to
-    begin with was never enlarged. Anything under the canvas in either direction would have to be
-    blown up, and then the original is the sharper file to cut from.
+    Everything above this line has been looking at the 2048px JPEG the preview already made of every
+    photo (`media.media_preview`), and the canvas is 1920×1080 either way up, so that copy almost
+    always has pixels to spare: cutting the piece from it instead of from the original is the same
+    picture off a tenth of the bytes and a twentieth of the work. «Big enough» is measured and not
+    assumed — the cap is on the long side, so a panorama's copy can come back shorter than the
+    canvas, and a photo smaller than 2048 to begin with was never enlarged. Anything under the
+    canvas in either direction would have to be blown up, and then the original is the sharper file
+    to cut from — even though the отсев's own verdict on it was made on the copy, which is a
+    judgement about the picture and not about how many pixels it is stored in.
 
-    Videos are not touched: their preview is a 720p copy, which is half the height the montage is
-    assembled at.
-
-    A copy that will not come out of the bucket is not worth failing an ordered video over — the
-    original is already on disk and makes the same piece, only slower.
+    Videos are never on a copy to begin with: their preview is a 720p re-encode, which is half the
+    height the montage is assembled at and smoothed over exactly where sharpness is measured.
     """
     width, height = assembly.CANVASES[orientation]
     pieces = []
     for piece in chosen:
-        key = large_copies.get(piece.media_id)
-        if key:
-            try:
-                copy = workdir / f"large-{piece.media_id}.jpg"
-                s3.download_file(media.bucket(), key, str(copy))
-                size = media._dimensions(copy)
-                if size and size[0] >= width and size[1] >= height:
-                    piece = dataclasses.replace(piece, path=copy)
-                else:
-                    log.info("large copy of %s is %s, too small for the canvas — off the original",
-                             piece.media_id, size)
-            except Exception as exc:
-                log.warning("could not take the large copy of %s, cutting from the original: %s",
-                            piece.media_id, exc)
+        original = originals[piece.media_id]
+        if piece.path != original:
+            size = media._dimensions(piece.path)
+            if not (size and size[0] >= width and size[1] >= height):
+                log.info("large copy of %s is %s, too small for the canvas — off the original",
+                         piece.media_id, size)
+                piece = dataclasses.replace(piece, path=original)
         pieces.append(piece)
     return pieces
 

@@ -69,6 +69,61 @@ def test_a_frame_the_analysis_throws_out_says_why(conn, s3, memory, tmp_path):
     assert screening_of(conn, item_id) == (True, selection.EXPOSURE)
 
 
+def test_a_photograph_is_judged_on_its_large_copy_and_a_clip_on_its_original(
+    conn, s3, memory, tmp_path
+):
+    """Which file the verdict is made on — told the only way it can be told from outside: the copy
+    and the original are made to say different things about the same item.
+
+    A photograph is judged on the 2048px copy the preview left beside it, which is the very file the
+    montage cuts its piece from, so the proposal and the order are made on one frame. A clip is not:
+    its preview is a 720p re-encode, smoothed exactly where sharpness is measured.
+    """
+    black = tmp_path / "black.jpg"
+    ffmpeg("-f", "lavfi", "-i", "color=black:size=1200x800", "-frames:v", "1", str(black))
+
+    item_id, key = add_item(conn, memory, "photo", status="ready")
+    copy_key = f"previews/{item_id}.jpg"
+    s3.upload_file(str(photo(tmp_path / "original.jpg")), media.bucket(), key)
+    s3.upload_file(str(black), media.bucket(), copy_key)
+    conn.execute("UPDATE media_items SET preview_key = %s WHERE id = %s", (copy_key, item_id))
+    worker.enqueue(conn, "media_screening", item_id)
+
+    assert worker.run_once(conn) is True
+    assert screening_of(conn, item_id) == (True, selection.EXPOSURE), "снимок судят не по копии"
+
+    clip_id, clip_key = add_item(conn, memory, "video", status="ready")
+    black_clip = tmp_path / "black.mp4"
+    ffmpeg("-f", "lavfi", "-i", "color=black:size=1280x720:rate=24:duration=3",
+           "-c:v", "libx264", "-pix_fmt", "yuv420p", str(black_clip))
+    s3.upload_file(str(video(tmp_path / "clip.mp4")), media.bucket(), clip_key)
+    s3.upload_file(str(black_clip), media.bucket(), f"previews/{clip_id}.mp4")
+    conn.execute("UPDATE media_items SET preview_key = %s WHERE id = %s",
+                 (f"previews/{clip_id}.mp4", clip_id))
+    worker.enqueue(conn, "media_screening", clip_id)
+
+    assert worker.run_once(conn) is True
+    assert screening_of(conn, clip_id) == (False, None), "клип судят не по оригиналу"
+
+
+def test_a_copy_the_bucket_will_not_give_back_leaves_the_original_to_judge(
+    conn, s3, memory, tmp_path
+):
+    """The copy is what this job would rather look at, never what it needs: a key that leads
+    nowhere costs the item its speed, not its proposal."""
+    item_id, key = add_item(conn, memory, "photo", status="ready")
+    black = tmp_path / "black.jpg"
+    ffmpeg("-f", "lavfi", "-i", "color=black:size=1200x800", "-frames:v", "1", str(black))
+    s3.upload_file(str(black), media.bucket(), key)
+    conn.execute("UPDATE media_items SET preview_key = 'previews/never-uploaded.jpg' "
+                 "WHERE id = %s", (item_id,))
+    worker.enqueue(conn, "media_screening", item_id)
+
+    assert worker.run_once(conn) is True
+
+    assert screening_of(conn, item_id) == (True, selection.EXPOSURE)
+
+
 def test_a_file_that_does_not_read_is_a_proposal_too(conn, s3, memory, tmp_path):
     """«Не посчитано» must not be forever. These bytes are in the bucket and they are not a picture,
     and fetching them again would read exactly the same — so the answer is given now."""
