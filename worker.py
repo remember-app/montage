@@ -124,27 +124,22 @@ def sweep_photos_without_previews(conn):
 
 
 def sweep_media_without_frame_info(conn):
-    """Ready material nobody has read the camera and the place off yet, given the job that reads.
+    """Ready material nobody has measured or read the camera off yet, given the job that does both.
 
     Everything taken in before the worker learned to read them is like this: `media_preview` queues
     the job as an item goes `ready`, and for old material that moment is long past. The original is
-    still in the bucket, so this costs the member nothing.
+    still in the bucket, so this costs the member nothing — no re-upload, no prompt.
 
-    What says «this file has been read» is the job and not the columns: a frame whose camera wrote
-    nothing down keeps five nulls and is indistinguishable from an unread one, so a sweep that went
-    by the columns would fetch and probe most of the library once an hour forever. Hence the
-    condition below — anything but a job that failed, which `_catch_up` gives one more go a day
-    later like every other catch-up here.
+    The size is what says «this file has been read», and the camera could not: a frame whose camera
+    wrote nothing down keeps those columns null — an ordinary answer, indistinguishable from an
+    unread file — while a picture that is in the gallery at all has a width, `media_preview` having
+    made its thumbnail out of one. So the original is fetched once and the item is left alone
+    after, and a catch-up that failed all three times gets its one more go a day later, like every
+    other catch-up here.
     """
-    queued = _catch_up(
-        conn, "media_frame_info",
-        """NOT EXISTS (
-             SELECT 1 FROM jobs looked
-             WHERE looked.type = 'media_frame_info' AND looked.ref = item.id::text
-               AND looked.status <> 'failed')""",
-    )
+    queued = _catch_up(conn, "media_frame_info", "item.width IS NULL")
     if queued:
-        log.info("queued a camera and a place for %s ready item(s) that had none", queued)
+        log.info("queued a size, a camera and a place for %s ready item(s) that had none", queued)
     return queued
 
 

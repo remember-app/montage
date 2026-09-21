@@ -118,23 +118,30 @@ def _duration(path):
 
 
 def _dimensions(path):
-    """`(width, height)` of the picture as ffprobe reports it, or None when it does not say.
+    """`(width, height)` of the picture as it is *seen*, or None when ffprobe does not say.
 
-    The stored size, which is the displayed one only for a file this worker made itself: a photo
-    straight off a sideways phone is stored one way round and decoded the other (see the EXIF note
-    at the end of `media_preview`). So this is asked of derivatives — it answers «is this copy big
-    enough for the canvas» in `montage.py` — and never of somebody's original.
+    A clip the phone was held upright for is stored on its side with a display matrix beside it
+    saying to stand it up, and answers here the way it plays — taller than wide. Everything that
+    decodes it sees the same picture: ffmpeg turns it on the way out unless told not to.
+
+    A photograph's turn is written in EXIF instead, which ffmpeg reads only from version 8 and out
+    of HEIC not even there — those are measured by Pillow in `_photo_info`.
     """
+    probed = _run(
+        "ffprobe", "-v", "error", "-protocol_whitelist", "file", "-select_streams", "v:0",
+        "-show_entries", "stream=width,height:stream_side_data=rotation", "-of", "json", str(path),
+    )
     try:
-        width, height = _run(
-            "ffprobe", "-v", "error", "-protocol_whitelist", "file", "-select_streams", "v:0",
-            "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", str(path),
-        ).strip().split("x")
-        return int(width), int(height)
-    except ValueError:
-        # Nothing to read the size off: no video stream at all, or more than one answer. Callers
-        # treat that as «cannot say» and fall back on what they had.
+        stream, = json.loads(probed)["streams"]
+        width, height = stream["width"], stream["height"]
+    except (ValueError, KeyError):
+        # Nothing to read the size off: no picture in the file at all, or more than one answer.
+        # Callers treat that as «cannot say» and fall back on what they had.
         return None
+    # A quarter turn either way swaps the sides; half a turn and none leave them as they are.
+    upended = any(abs(side.get("rotation", 0)) % 180 == 90
+                  for side in stream.get("side_data_list", ()))
+    return (height, width) if upended else (width, height)
 
 
 def _refuse_playlists(path):
@@ -206,9 +213,9 @@ def media_preview(conn, ref):
         _upload(s3, thumbnail, thumbnail_key, "image/jpeg")
 
     # The measured length replaces the one the phone declared at intent, which was only ever a claim.
-    # ponytail: `width`/`height` stay untouched — ffprobe reports the stored dimensions and ffmpeg
-    # previews the EXIF-rotated ones, so the two disagree on every sideways phone photo. Fill them
-    # when the gallery needs the aspect ratio before the thumbnail loads.
+    # `width`/`height` are not written here but by `media_frame_info` below, which is queued at the
+    # end of this handler: they are read off the original like the camera and the place, and one
+    # owner for the lot means one answer and one catch-up.
     landed = conn.execute(
         """UPDATE media_items
            SET status = 'ready', thumbnail_key = %s, preview_key = %s,
@@ -288,16 +295,20 @@ def give_up(conn, ref):
     )
 
 
-# --- the camera and the place -----------------------------------------------
-# The two lines «Камера» and «Место» of the sheet «Сведения о кадре» (doc-02, the layout in
+# --- the size, the camera and the place --------------------------------------
+# The lines «Размер», «Камера» and «Место» of the sheet «Сведения о кадре» (doc-02, the layout in
 # `design/screens/SheetFrameInfo.html`), read out of the file the phone uploaded and written onto
 # the row for the api to hand out — exactly as `thumbnail_key` is (the api's migration
 # `100.do.frame-info.sql`). Nothing here is computed: what the camera did not write down stays null.
 
 FrameInfo = collections.namedtuple(
-    "FrameInfo", "camera_model focal_length_mm aperture latitude longitude"
+    "FrameInfo", "width height camera_model focal_length_mm aperture latitude longitude"
 )
-NOTHING = FrameInfo(None, None, None, None, None)  # a file that says nothing about either
+NOTHING = FrameInfo(None, None, None, None, None, None, None)  # a file that says nothing at all
+
+# The EXIF orientations that lay the picture on its side: the sensor wrote its frame one way round
+# and the person sees it the other. «6» is the sideways phone photograph every gallery is full of.
+UPENDED = {5, 6, 7, 8}
 
 # ±DD.DDDD±DDD.DDDD±AAA.AAA/ — how a phone writes down where a clip was shot (ISO 6709). The third
 # number is the altitude, which nobody asks for.
@@ -325,7 +336,7 @@ def _degrees(value, hemisphere):
 
 
 def _photo_info(path):
-    """A photograph's own EXIF — HEIC off an iPhone as readily as JPEG.
+    """A photograph's size and its own EXIF — HEIC off an iPhone as readily as JPEG.
 
     Read by a library and not by ffprobe, which is otherwise this module's every answer about a
     file: ffmpeg hands EXIF over from version 8 onward, and out of HEIC not at all before it, so
@@ -333,16 +344,25 @@ def _photo_info(path):
     """
     try:
         with Image.open(path) as photo:
+            width, height = photo.size
             exif = photo.getexif()
             model = exif.get(ExifTags.Base.Model)
+            if exif.get(ExifTags.Base.Orientation) in UPENDED:
+                # The sideways phone: the file holds the sensor's frame and a note saying which way
+                # up it goes, and the size a person sees is that note applied. HEIC comes out of
+                # `pi_heif` already turned, with the note reset to «1», so this is JPEG's case.
+                width, height = height, width
             optics = exif.get_ifd(ExifTags.IFD.Exif)
             place = exif.get_ifd(ExifTags.IFD.GPSInfo)
     except (OSError, ValueError, SyntaxError, Image.DecompressionBombError) as exc:
         # Not a picture this library knows — and `kind` is only the phone's word for the file.
-        # Nothing to read is not a failure: the frame keeps its five empty columns like any other.
+        # Nothing to read is not a failure: the frame keeps its empty columns like any other, and
+        # the size is asked of ffprobe instead (`frame_info`).
         log.info("nothing to read a camera off: %s", exc)
         return NOTHING
     return FrameInfo(
+        width=width,
+        height=height,
         # EXIF keeps the make («Apple») in a tag of its own — «iPhone 15 Pro» is the model alone.
         camera_model=str(model or "").strip() or None,
         focal_length_mm=_number(optics.get(ExifTags.Base.FocalLength)),
@@ -374,26 +394,36 @@ def _clip_info(path):
 
 
 def frame_info(path, kind):
-    """What the camera left in the file, and None in place of everything it left out. Most material
-    carries none of it: a screenshot, a frame re-saved by an editor, anything that came through a
-    messenger.
+    """How big the frame is, and what the camera left in the file — None in place of everything it
+    left out. Most material carries none of the latter: a screenshot, a frame re-saved by an
+    editor, anything that came through a messenger.
+
+    The size is the one line almost every frame can answer, and it is measured the way the frame is
+    *seen*: a photograph taken sideways and a clip shot upright both come back taller than wide.
+    A file with no picture in it at all keeps those two columns empty like the rest.
 
     The place is the coordinates and stays the coordinates. Turning them into «Усадьба Остафьево»
     takes an outside geocoder — a paid service, a registration, and a trip to the network with
     somebody's whereabouts in the query; whether the product wants a name at all is the chief's
     question and not one to guess at here (TASK-191).
     """
-    return _clip_info(path) if kind == "video" else _photo_info(path)
+    info = _clip_info(path) if kind == "video" else _photo_info(path)
+    if info.width is None:
+        # Every clip, and a «photograph» Pillow would not open — `kind` is only the phone's word for
+        # the file. ffprobe measures what the preview was made out of, so anything that reached the
+        # gallery at all has a size here.
+        width, height = _dimensions(path) or (None, None)
+        info = info._replace(width=width, height=height)
+    return info
 
 
 def media_frame_info(conn, ref):
-    """One media item: the original out of R2, what its camera wrote down onto the row.
+    """One media item: the original out of R2, how big its picture is and what its camera wrote
+    down, onto the row.
 
-    A job of its own rather than one more step of `media_preview`, because the job row is what
-    remembers that this file has been read. Five nulls is a perfectly ordinary answer — most
-    material carries no metadata at all — and it looks exactly like a file nobody has opened yet,
-    so a catch-up that went by the columns would fetch and probe half the library every hour, for
-    as long as the worker runs.
+    A job of its own rather than one more step of `media_preview`, so that the original is read
+    once for every answer the sheet wants off the file, and the catch-up that fills them in for old
+    material costs a download and a probe — never the whole re-encode a second preview would be.
     """
     row = conn.execute(
         "SELECT kind, original_key FROM media_items WHERE id = %s", (ref,)
@@ -415,13 +445,13 @@ def media_frame_info(conn, ref):
 
     conn.execute(
         """UPDATE media_items
-           SET camera_model = %s, focal_length_mm = %s, aperture = %s,
+           SET width = %s, height = %s, camera_model = %s, focal_length_mm = %s, aperture = %s,
                latitude = %s, longitude = %s, updated_at = now()
            WHERE id = %s""",
         (*info, ref),
     )
     found = {name: value for name, value in info._asdict().items() if value is not None}
-    log.info("media item %s: %s", ref, found or "the file says nothing about camera or place")
+    log.info("media item %s: %s", ref, found or "the file says nothing about size, camera or place")
 
 
 # --- the sweep --------------------------------------------------------------

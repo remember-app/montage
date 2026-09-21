@@ -13,6 +13,7 @@ import subprocess
 import uuid
 
 import pytest
+from PIL import ExifTags, Image
 
 import media
 import worker
@@ -47,6 +48,30 @@ def video(path):
         "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(path),
     )
+    return path
+
+
+def sideways_photo(path, size=(1200, 800), orientation=6):
+    """A photograph off a phone held sideways: the sensor's own frame, and the EXIF note saying
+    which way up it goes. Drawn by Pillow — `ffmpeg` writes no EXIF at all."""
+    exif = Image.Exif()
+    exif[ExifTags.Base.Orientation] = orientation
+    Image.new("RGB", size, "gray").save(path, exif=exif)
+    return path
+
+
+def upright_video(path):
+    """A clip the phone was held upright for: stored on its side, with a display matrix beside it
+    saying to stand it up. Written in two passes because that matrix survives only a copy —
+    re-encoding turns the picture itself instead and drops it, autorotate doing its job."""
+    stored = video(path.with_name("stored.mp4"))
+    ffmpeg("-display_rotation", "90", "-i", str(stored), "-c", "copy", str(path))
+    return path
+
+
+def sound(path):
+    """A second of tone and no picture at all: a file with nothing whatever to measure."""
+    ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-c:a", "aac", str(path))
     return path
 
 
@@ -129,6 +154,13 @@ def read_frame_info(conn, item_id):
         """SELECT camera_model, focal_length_mm, aperture, latitude, longitude
            FROM media_items WHERE id = %s""",
         (item_id,),
+    ).fetchone()
+
+
+def read_size(conn, item_id):
+    """The sheet's «Размер 4032 × 3024», off the same row."""
+    return conn.execute(
+        "SELECT width, height FROM media_items WHERE id = %s", (item_id,)
     ).fetchone()
 
 
@@ -347,10 +379,46 @@ def test_the_guard_refuses_what_ffmpeg_calls_a_playlist(tmp_path):
         media._refuse_playlists(playlist)
 
 
-# --- the camera and the place -----------------------------------------------
-# The lines «Камера» и «Место» of the sheet «Сведения о кадре», read off the original.
+# --- the size, the camera and the place --------------------------------------
+# The lines «Размер», «Камера» и «Место» of the sheet «Сведения о кадре», read off the original.
 
 MOSCOW_SOUTH = (pytest.approx(55.518, abs=0.0005), pytest.approx(37.53, abs=0.0005))
+
+
+@pytest.mark.parametrize("kind, draw, name, seen_as", [
+    ("photo", photo, "original.jpg", (1200, 800)),
+    # The sideways phone: 1200×800 on the sensor, and the EXIF note stands it up.
+    ("photo", sideways_photo, "sideways.jpg", (800, 1200)),
+    ("video", video, "original.mp4", (1280, 1440)),
+    # And the clip shot upright: stored 1280×1440, played the other way round.
+    ("video", upright_video, "upright.mp4", (1440, 1280)),
+])
+def test_a_frame_is_measured_the_way_it_is_seen(conn, s3, memory, tmp_path, kind, draw, name,
+                                                seen_as):
+    """«Размер 4032 × 3024» on the sheet: the pixels a person sees, not the ones the sensor wrote.
+    A file turned by its metadata is the ordinary case — every photograph taken with the phone on
+    its side, and every clip shot holding it upright."""
+    item_id, key = add_item(conn, memory, kind)
+    s3.upload_file(str(draw(tmp_path / name)), media.bucket(), key)
+    worker.enqueue(conn, "media_frame_info", item_id)
+
+    assert worker.run_once(conn) is True
+
+    assert read_size(conn, item_id) == seen_as
+
+
+def test_a_file_with_no_picture_in_it_is_left_unmeasured(conn, s3, memory, tmp_path):
+    """Nothing to measure is not a failure: the two columns stay empty, the job is done, and the
+    sheet leaves the line out — `kind` being only the phone's word for what it sent."""
+    item_id, key = add_item(conn, memory, "photo")
+    s3.upload_file(str(sound(tmp_path / "original.m4a")), media.bucket(), key)
+    job_id = worker.enqueue(conn, "media_frame_info", item_id)
+
+    assert worker.run_once(conn) is True
+
+    assert read_size(conn, item_id) == (None, None)
+    status, = conn.execute("SELECT status FROM jobs WHERE id = %s", (job_id,)).fetchone()
+    assert status == "done"
 
 
 @pytest.mark.parametrize("fixture", ["exif-photo.jpg", "exif-photo.heic"])
@@ -383,8 +451,8 @@ def test_a_clip_brings_its_camera_and_its_place_off_the_container(conn, s3, memo
 
 
 @pytest.mark.parametrize("draw, name", [(photo, "original.jpg"), (video, "original.mp4")])
-def test_a_file_that_carries_nothing_leaves_every_column_empty(conn, s3, memory, tmp_path,
-                                                               draw, name):
+def test_a_file_that_carries_nothing_leaves_the_camera_empty(conn, s3, memory, tmp_path,
+                                                             draw, name):
     """Which is most material: a screenshot, a frame re-saved by an editor, anything that came
     through a messenger. Reading it is not a failure and the job says so — nor is a file that is
     no photograph at all, `kind` being only the phone's word for what it sent."""
@@ -425,9 +493,9 @@ def test_the_sweep_reads_the_camera_off_material_from_before(conn, s3, memory):
 
 
 def test_the_sweep_stops_asking_about_a_file_that_carries_nothing(conn, s3, memory, tmp_path):
-    """Five empty columns is an answer, not a gap — and it looks exactly like a file nobody has
-    opened yet. Going by the columns, the sweep would fetch and probe most of a library every hour
-    for as long as the worker runs; it goes by the job that already read this one."""
+    """Empty camera columns are an answer, not a gap — and they look exactly like a file nobody has
+    opened yet. What the sweep goes by is the size, which this one has like every other picture;
+    going by the camera it would fetch and probe most of a library every hour forever."""
     item_id, key = add_item(conn, memory, "photo", status="ready")
     s3.upload_file(str(photo(tmp_path / "original.jpg")), media.bucket(), key)
 
@@ -437,3 +505,19 @@ def test_the_sweep_stops_asking_about_a_file_that_carries_nothing(conn, s3, memo
 
     worker.sweep_media_without_frame_info(conn)
     assert only_jobs_for(conn, item_id, "media_frame_info") == 1, "an hour later, not asked again"
+
+
+def test_the_sweep_measures_a_frame_that_was_read_before_sizes(conn, s3, memory, tmp_path):
+    """A frame the worker had already read back when it took the camera and nothing else: the job
+    stands `done` on it, and the size is missing all the same. It is measured on the next pass, and
+    nobody uploads anything again."""
+    item_id, key = add_item(conn, memory, "photo", status="ready")
+    s3.upload_file(str(photo(tmp_path / "original.jpg")), media.bucket(), key)
+    already_read = worker.enqueue(conn, "media_frame_info", item_id)
+    conn.execute("UPDATE jobs SET status = 'done' WHERE id = %s", (already_read,))
+
+    worker.sweep_media_without_frame_info(conn)
+    assert only_jobs_for(conn, item_id, "media_frame_info") == 2, "it is asked for once more"
+    assert worker.run_once(conn) is True
+
+    assert read_size(conn, item_id) == (1200, 800)
