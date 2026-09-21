@@ -202,4 +202,4 @@ def test_the_proposal_does_not_decide_what_goes_into_a_video(conn, s3, memory, t
 
     status, _, duration, error_text = read_montage(conn, montage_id)
     assert (status, error_text) == ("ready", None)
-    assert 10 <= duration <= 11, "the same video as the one nobody marked at all"
+    assert 8.5 <= duration <= 9.5, "the same video as the one nobody marked at all"
