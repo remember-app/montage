@@ -495,6 +495,34 @@ def test_a_photo_the_organizer_marked_exclude_stays_out_of_the_video(conn, s3, m
     assert about(duration, 8.0), "one of the four pieces was left out on the order's own word"
 
 
+def test_the_order_judges_a_photograph_on_the_same_copy_the_proposal_did(
+    conn, s3, memory, tmp_path
+):
+    """Which file the отсев looks at when a video is ordered — told from outside the only way it
+    can be: the large copy beside this photograph is black and the original behind it is a picture.
+
+    The frame is thrown out, which means the order judged the copy — the same file
+    `screening.media_screening` wrote its proposal on and the same one the piece would have been cut
+    from. Two places looking at two different files would show the organizer one thing in the
+    gallery and put another in the video.
+    """
+    photo_id = material(conn, s3, memory, tmp_path)[0]
+    black = tmp_path / "black.jpg"
+    ffmpeg("-f", "lavfi", "-i", "color=black:size=2048x1366", "-frames:v", "1", str(black))
+    s3.upload_file(str(black), media.bucket(), f"previews/{photo_id}.jpg")
+    conn.execute("UPDATE media_items SET preview_key = %s WHERE id = %s",
+                 (f"previews/{photo_id}.jpg", photo_id))
+    montage_id = order(conn, memory, {"target_seconds": 30})
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    status, _, duration, error_text = read_montage(conn, montage_id)
+    assert (status, error_text) == ("ready", None)
+    # Two stills and the clip: the same nine seconds less two joins as a piece struck out by hand.
+    assert about(duration, 8.0), "снимок с чёрной копией остался в ролике — судили оригинал"
+
+
 def test_the_floor_does_not_count_the_pieces_the_organizer_struck_out(conn, s3, memory, tmp_path):
     """Four files the отсев is happy with, two of them named in «исключить». The floor is what can
     actually end up on screen, and `selection.choose` throws the struck-out two away whatever the
@@ -609,28 +637,24 @@ def test_a_photograph_is_scaled_once_for_the_piece_and_not_once_a_frame(tmp_path
     assert (picture["width"], picture["height"]) == assembly.CANVASES["landscape"]
 
 
-def test_a_photograph_is_cut_from_its_large_copy_when_that_covers_the_canvas(s3, tmp_path):
-    """The montage is cut from the 2048px copy the preview already made, not from the original off
-    somebody's camera: the same picture on the canvas out of a tenth of the bytes. The copy's cap is
-    on its long side, so whether it covers the canvas is measured rather than assumed — the very
-    same file is enough for a landscape montage and short for a portrait one.
+def test_a_photograph_is_cut_from_the_large_copy_it_was_judged_on_unless_it_is_short(tmp_path):
+    """The montage is cut from the 2048px copy the preview already made — the same file the отсев
+    looked at — and not from the original off somebody's camera: the same picture on the canvas out
+    of a tenth of the bytes. The copy's cap is on its long side, so whether it covers the canvas is
+    measured rather than assumed: the very same file is enough for a landscape montage and short
+    for a portrait one, and a photo whose copy never got made was judged on the original anyway.
     """
-    key = f"previews/{uuid.uuid4()}.jpg"
-    s3.upload_file(str(photo(tmp_path / "large.jpg", size="2048x1366")), media.bucket(), key)
     original = tmp_path / "original"
-    piece = selection.Piece(media_id="one", kind="photo", path=original)
+    copy = photo(tmp_path / "large.jpg", size="2048x1366")
+    judged_on_the_copy = selection.Piece(media_id="one", kind="photo", path=copy)
+    judged_on_the_original = selection.Piece(media_id="two", kind="photo", path=original)
+    originals = {"one": original, "two": original}
 
-    try:
-        (landscape,) = montage._off_large_copies(
-            s3, [piece], {"one": key}, "landscape", tmp_path)
-        (portrait,) = montage._off_large_copies(
-            s3, [piece], {"one": key}, "portrait", tmp_path)
-        # And a photo whose copy never got made — the sweep has not caught up with it yet.
-        (alone,) = montage._off_large_copies(s3, [piece], {}, "landscape", tmp_path)
-    finally:
-        s3.delete_object(Bucket=media.bucket(), Key=key)
+    (landscape,) = montage._back_to_originals([judged_on_the_copy], originals, "landscape")
+    (portrait,) = montage._back_to_originals([judged_on_the_copy], originals, "portrait")
+    (alone,) = montage._back_to_originals([judged_on_the_original], originals, "landscape")
 
-    assert probe(landscape.path)["streams"][0]["width"] == 2048, "ролик режется не из копии"
+    assert landscape.path == copy, "ролик режется не из копии"
     assert portrait.path == original, "1366 в высоту мало для холста 1080×1920 — нужен оригинал"
     assert alone.path == original
 

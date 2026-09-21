@@ -34,6 +34,13 @@ DEDUP_SECONDS = 2.0  # two shots this close together are one moment, not two
 # Every frame is judged on a small grey copy of itself: blur and exposure both survive the scaling,
 # and 96×54 is 5k pixels rather than 2M — cheap enough to judge every sampled second of every file
 # in the memory.
+#
+# What is handed in matters to these numbers, though, and not only to how long they take: swscale
+# cannot fit its filter past about a 64× reduction, so a 12032px original squeezed straight to 96
+# is *sampled* rather than averaged. That reads high on sharpness (aliasing counts as detail) and
+# wrong on exposure — a frame whose true mean luma is 25 came out at 13. A photograph therefore
+# arrives here as the 2048px copy the preview made of it (`media.large_copy`), which is a plain
+# average of every pixel, and the thresholds below are set against that (TASK-184).
 SAMPLE_WIDTH, SAMPLE_HEIGHT = 96, 54
 SAMPLE_FPS = 1.0  # «семпл кадров ≈1/сек»
 MIN_SHARPNESS = 5.0  # variance of the Laplacian under which a frame is just blur
@@ -65,7 +72,8 @@ class Piece:
     captured_at: datetime.datetime | None = None  # None → this file takes no part in the dedup
     kind: str = "photo"
     # On disk in the workdir, not in R2 — every other `…_key` in this worker is a bucket key, and
-    # this one is what ffmpeg is pointed at: first the downloaded original, then the cut of it.
+    # this one is what ffmpeg is pointed at: first the downloaded file the отсев looks at (a
+    # photograph's large copy where there is one, the original otherwise), then the cut of it.
     path: pathlib.Path = pathlib.Path()
     start: float = 0.0  # where in the original the cut begins
     # The moment `_best_moment` scored, in the original's own timeline — not where the cut begins.
@@ -189,7 +197,7 @@ def judge(piece):
         # Fetching them again would fail identically, so one bad file costs the memory that file
         # and not its whole video: anyone who can upload could otherwise deny the organizer a
         # montage for good, and «повторить» would meet the same file.
-        log.info("cannot read the original of %s, leaving it out: %s", piece.media_id, exc)
+        log.info("cannot read the file of %s, leaving it out: %s", piece.media_id, exc)
         return dataclasses.replace(piece, rejected=UNREADABLE)
 
     moment, why = _best_moment(frames)

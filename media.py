@@ -238,6 +238,27 @@ def _upload(s3, path, key, content_type):
     s3.upload_file(str(path), bucket(), key, ExtraArgs={"ContentType": content_type})
 
 
+def large_copy(s3, preview_key, into):
+    """A photograph's 2048px copy out of the bucket, or None when it will not come.
+
+    The copy `media_preview` made above, fetched by everything that would rather look at a
+    photograph than at the forty megapixels it was uploaded at: the отсев judges it
+    (`screening.media_screening`, `montage.montage`) and the montage cuts its pieces from it.
+
+    None and not an exception, because nobody who asks for it has to have it: the original is the
+    file this copy was made from, and every caller can fall back on it — slower, and for the отсев
+    measured on a coarser sample, but never wrong. A copy that is missing, not made yet, or in an
+    unreachable bucket is not worth failing an ordered video or a screening proposal over.
+    """
+    try:
+        s3.download_file(bucket(), preview_key, str(into))
+        return into
+    except Exception as exc:
+        log.warning("could not take the large copy %s, falling back on the original: %s",
+                    preview_key, exc)
+        return None
+
+
 def give_up(conn, ref):
     """Out of retries. The item is failed too, so the gallery stops waiting on it and shows a
     placeholder with «повторить» (architecture.md, «Обработка ошибок»).

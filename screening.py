@@ -33,24 +33,34 @@ log = logging.getLogger("montage.screening")
 
 
 def media_screening(conn, ref):
-    """One item: the original out of R2, `judge`'s verdict onto the row."""
+    """One item: the file out of R2, `judge`'s verdict onto the row."""
     row = conn.execute(
-        "SELECT kind, original_key FROM media_items WHERE id = %s", (ref,)
+        "SELECT kind, original_key, preview_key FROM media_items WHERE id = %s", (ref,)
     ).fetchone()
     if row is None:
         # Deleted while the job waited — a member left and took their material with them. Nothing to
         # screen and nothing wrong: retrying would only fail three times.
         log.info("media item %s is gone, nothing to screen", ref)
         return
-    kind, original_key = row
+    kind, original_key, preview_key = row
 
     with tempfile.TemporaryDirectory() as workdir:
-        original = pathlib.Path(workdir) / "original"
-        # The original and not the preview beside it: a video is cut from the original, and the 720p
-        # re-encode smooths away the very edges sharpness is measured in — a proposal made on the
-        # preview would quietly disagree with what the order itself makes of the same file.
-        media.storage().download_file(media.bucket(), original_key, str(original))
-        judged = selection.judge(selection.Piece(media_id=str(ref), kind=kind, path=original))
+        workdir = pathlib.Path(workdir)
+        # A photograph is judged on the large copy the preview made of it (2048px, `media_preview`)
+        # and not on the forty megapixels it was uploaded at: the same picture, decoded in a tenth
+        # of the time — and the same file the montage cuts the piece from, so the proposal and the
+        # order are made on one and the same frame. No copy yet, or one the bucket will not give
+        # back: the original, which is what this job has always looked at.
+        #
+        # A video stays on its original whatever copy exists beside it: its preview is a 720p
+        # re-encode, which smooths away the very edges sharpness is measured in.
+        s3, looked_at = media.storage(), None
+        if kind == "photo" and preview_key:
+            looked_at = media.large_copy(s3, preview_key, workdir / "large.jpg")
+        if looked_at is None:
+            looked_at = workdir / "original"
+            s3.download_file(media.bucket(), original_key, str(looked_at))
+        judged = selection.judge(selection.Piece(media_id=str(ref), kind=kind, path=looked_at))
 
     # `false` and not `null` for a frame that passed: null is «the analysis has not looked yet», and
     # the gallery has to be able to tell the two apart (the api's migration 060).
