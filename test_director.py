@@ -307,6 +307,22 @@ def test_a_burst_of_one_moment_reaches_the_director_as_one_shot(described):
     assert "m-9" not in asked(net) and "секундой позже" not in asked(net)
     assert "собака под столом" in asked(net), "the sharpest of the burst stands for it"
     assert [piece.media_id for piece in film] == ["m-1", "m-2", "m-3"]
+    # И сколько кадров за ним стояло, кусок несёт на себе — журналу монтажа серия одна запись
+    # «взял 1 из 2», ровно как на пути отсева (`montage._write_thoughts`).
+    assert [piece.series_size for piece in film] == [1, 1, 2]
+
+
+def test_the_question_keeps_the_order_the_memory_is_read_in(described):
+    """Порядок вопроса — тот, в котором воспоминание читается, и дедуп его не переставляет: свои
+    кадры он возвращает своим порядком, первыми — те, у кого даты съёмки нет вовсе. Модели же
+    материал показывают так, как он пришёл, и «третий кадр» в плане значит третий сверху."""
+    describe(described, "m-9", "торт несут мимо окна")
+    undated = dataclasses.replace(shot("m-9", 7), captured_at=None)
+
+    _, _, net = directed(described, pieces=[MATERIAL[0], undated, *MATERIAL[1:]], story=STORY)
+
+    question = asked(net)
+    assert sorted(("m-1", "m-9", "m-2", "m-3"), key=question.index) == ["m-1", "m-9", "m-2", "m-3"]
 
 
 def test_the_shot_the_organizer_asked_for_is_the_one_its_burst_is_shown_by(described):

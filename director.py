@@ -76,9 +76,17 @@ def direct(conn, pieces, target_seconds, include=(), exclude=(), story="", ref=N
     # One shot per moment, by the отбор's own дедуп: a director shown a whole burst can put two
     # frames of the same second next to each other in the plan, and every duplicate in the question
     # is paid for as well. «Включить» wins its burst here exactly as it does in `selection.choose`.
-    _, duplicates = selection._dedup(material, always=include)
+    kept, duplicates = selection._dedup(material, always=include)
     swallowed = {piece.media_id for piece in duplicates}
-    candidates = {piece.media_id: piece for piece in material if piece.media_id not in swallowed}
+    # Размер серии — с оставшегося от неё кадра, и дальше он едет с куском до журнала: «взял 1 из 4»
+    # на режиссёрском этапе — та же одна запись, что и на пути отсева. Порядок вопроса при этом
+    # наш, а не дедупа: спрашивается тот же материал и в том же порядке, в каком читается
+    # воспоминание, — дедуп возвращает кадры своим (кто без даты съёмки, тот первым).
+    series = {piece.media_id: piece.series_size for piece in kept}
+    candidates = {
+        piece.media_id: dataclasses.replace(piece, series_size=series[piece.media_id])
+        for piece in material if piece.media_id not in swallowed
+    }
     known = _known(conn, candidates)
     if not any(what.get("description") for what in known.values()):
         # Nothing has been described yet — the memory became ready before there was a key, and the

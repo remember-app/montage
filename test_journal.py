@@ -109,15 +109,17 @@ def test_the_journal_tells_the_whole_assembly_stage_by_stage(conn, s3, memory, t
             for one in entries_of(conn, montage_id, "screening")] == [(dark, "skip", "exposure")]
 
     # Разбор кадров: описаний нет ни у одного файла — этап проходит и честно говорит «0 из 5».
-    assert stages["understanding"]["outcome"] == {"described": 0, "of": 5, "people": 0,
-                                                  "animals": 0}
+    assert stages["understanding"]["outcome"] == {"described": 0, "of": 5, "faces": 0,
+                                                  "people": 0, "animals": 0}
     assert entries_of(conn, montage_id, "understanding") == []
 
     # Режиссёрский этап: по файлу решение с причиной, у видео — какой кусок исходника взят.
+    # Пересвеченного кадра здесь нет вовсе: о нём рассказал отсев, и второе «мимо» с той же
+    # причиной — тот же кадр, пропущенный дважды.
     directing = entries_of(conn, montage_id, "directing")
     assert {one.media_id: (one.decision, one.reason) for one in directing} == {
         ids[1]: ("take", None), ids[2]: ("take", None), ids[3]: ("take", None),
-        ids[0]: ("skip", "excluded"), dark: ("skip", "exposure"),
+        ids[0]: ("skip", "excluded"),
     }
     assert stages["directing"]["outcome"] == {"frames": 3, "of": 5}
     clip = next(one for one in directing if one.media_id == ids[3])
@@ -285,51 +287,75 @@ def test_a_journal_that_cannot_be_written_does_not_cost_the_montage(conn):
 
 def test_the_understanding_stage_tells_what_was_seen_and_who_was_in_frame(conn, memory):
     """Разбор кадров пересказывает то, что уже записано (`media_understandings`): описание словами
-    модели и метки «что увидел». Итог — сколько кадров описано и скольких воспоминание на них
-    узнало."""
+    модели и метки «что увидел». Итог — сколько кадров описано, сколько лиц на них и скольких
+    воспоминание узнало: «37 лиц, 5 людей в главных» на экране «Ролик готов».
+
+    Лица и люди — разные числа, и разойтись они должны именно здесь: «человек-1» стоит на обоих
+    описанных кадрах, значит, лиц три, а людей двое.
+    """
     journal_ready(conn)
     memory_id, _ = memory
     montage_id = order(conn, memory, {})
     described, _ = add_item(conn, memory, "photo", status="ready")
+    again, _ = add_item(conn, memory, "photo", status="ready")
     silent, _ = add_item(conn, memory, "photo", status="ready")
-    conn.execute(
-        """INSERT INTO media_understandings (media_id, memory_id, description, cast_labels)
-           VALUES (%s, %s, %s, %s)""",
-        (described, str(memory_id), "Бабушка смеётся, Лиза обнимает её",
-         ["человек-1", "человек-2", "животное-1"]),
-    )
-    judged = [selection.Piece(media_id=described), selection.Piece(media_id=silent)]
+    for media_id, description, cast in (
+        (described, "Бабушка смеётся, Лиза обнимает её", ["человек-1", "человек-2", "животное-1"]),
+        (again, "Бабушка у окна", ["человек-1"]),
+    ):
+        conn.execute(
+            """INSERT INTO media_understandings (media_id, memory_id, description, cast_labels)
+               VALUES (%s, %s, %s, %s)""",
+            (media_id, str(memory_id), description, cast),
+        )
+    judged = [selection.Piece(media_id=one) for one in (described, again, silent)]
 
     journal.begin(conn, montage_id, len(judged), 60)
     montage._what_was_seen(conn, montage_id, judged)
 
-    assert [(one.media_id, one.thought, one.labels)
-            for one in entries_of(conn, montage_id, "understanding")] == [
-        (described, "Бабушка смеётся, Лиза обнимает её", ["человек-1", "человек-2", "животное-1"])
-    ]
+    # Порядком записей этап ничего не рассказывает — они про разные кадры и ложатся одной пачкой.
+    assert {one.media_id: (one.thought, one.labels)
+            for one in entries_of(conn, montage_id, "understanding")} == {
+        described: ("Бабушка смеётся, Лиза обнимает её",
+                    ["человек-1", "человек-2", "животное-1"]),
+        again: ("Бабушка у окна", ["человек-1"]),
+    }
     assert stages_of(conn, montage_id)["understanding"]["outcome"] == {
-        "described": 1, "of": 2, "people": 2, "animals": 1
+        "described": 2, "of": 3, "faces": 3, "people": 2, "animals": 1
     }
 
 
 def test_a_series_is_one_entry_and_the_organizer_is_visible_in_the_decisions(conn, memory):
     """Серия одинаковых кадров — одна запись «взял 1 из 4» на том, кто из неё остался, а не три
     «мимо, дубль» рядом. Слово организатора видно с обеих сторон: `included` на том, что он велел
-    взять, `excluded` на вычеркнутом."""
+    взять, `excluded` на вычеркнутом.
+
+    А смазанного кадра на этом этапе нет вовсе: о нём рассказал отсев своей записью, и второе
+    «мимо» с той же причиной — тот же кадр, пропущенный дважды, и завышенный счётчик «Мимо N».
+    """
     journal_ready(conn)
     montage_id = order(conn, memory, {})
     of_a_burst = selection.Piece(media_id=str(uuid.uuid4()), kind="photo", series_size=4)
     asked_for = selection.Piece(media_id=str(uuid.uuid4()), kind="video", seconds=3.0, start=4.0,
                                 duration=10.0)
-    struck_out = selection.Piece(media_id=str(uuid.uuid4()), rejected=selection.EXCLUDED)
-    swallowed = selection.Piece(media_id=str(uuid.uuid4()), rejected=selection.DUPLICATE)
-    journal.begin(conn, montage_id, 4, 60)
+    # Вычеркнутый и съеденный дедупом отсев прошли — их причины ставит уже `selection.choose`,
+    # копией куска, ровно как здесь; смазанный пришёл с причиной с самого отсева.
+    struck_out = selection.Piece(media_id=str(uuid.uuid4()))
+    swallowed = selection.Piece(media_id=str(uuid.uuid4()))
+    blurred = selection.Piece(media_id=str(uuid.uuid4()), rejected=selection.BLUR)
+    judged = [of_a_burst, asked_for, struck_out, swallowed, blurred]
+    journal.begin(conn, montage_id, len(judged), 60)
 
-    montage._write_choices(conn, montage_id, [of_a_burst, asked_for],
-                           [struck_out, swallowed], {asked_for.media_id})
+    montage._write_choices(
+        conn, montage_id, [of_a_burst, asked_for],
+        [dataclasses.replace(struck_out, rejected=selection.EXCLUDED),
+         dataclasses.replace(swallowed, rejected=selection.DUPLICATE), blurred],
+        {asked_for.media_id}, judged,
+    )
 
     written = {one.media_id: one for one in entries_of(conn, montage_id, "directing")}
     assert swallowed.media_id not in written, "серию рассказала одна запись выше"
+    assert blurred.media_id not in written, "о смазанном рассказал отсев, второго «мимо» нет"
     assert (written[of_a_burst.media_id].decision, written[of_a_burst.media_id].series_size) == (
         "take", 4
     )
@@ -341,6 +367,29 @@ def test_a_series_is_one_entry_and_the_organizer_is_visible_in_the_decisions(con
     assert (written[struck_out.media_id].decision, written[struck_out.media_id].reason) == (
         "skip", selection.EXCLUDED
     )
+
+
+def test_the_series_the_director_kept_is_one_entry_too(conn, memory):
+    """«Взял 1 из 4» — и на пути с нейросетью: серию прорежает тот же дедуп ещё до вопроса модели
+    (`director.direct`), размер серии едет до журнала на самом куске, и рассказана она одной
+    записью — мыслью режиссёра о том кадре, который из неё остался."""
+    journal_ready(conn)
+    montage_id = order(conn, memory, {})
+    of_a_burst = selection.Piece(media_id=str(uuid.uuid4()), kind="photo", series_size=4)
+    alone = selection.Piece(media_id=str(uuid.uuid4()), kind="photo")
+    journal.begin(conn, montage_id, 2, 60)
+
+    montage._write_thoughts(
+        conn, montage_id, [of_a_burst, alone],
+        [{"media_id": of_a_burst.media_id, "thought": "Вносят торт", "decision": "take"},
+         {"media_id": alone.media_id, "thought": "Накрывают на стол", "decision": "take"}],
+        set(),
+    )
+
+    written = {one.media_id: one for one in entries_of(conn, montage_id, "directing")}
+    assert (written[of_a_burst.media_id].decision,
+            written[of_a_burst.media_id].series_size) == ("take", 4)
+    assert written[alone.media_id].series_size is None, "кадр сам по себе — не серия"
 
 
 def test_the_director_tells_the_journal_the_plan_it_built(
