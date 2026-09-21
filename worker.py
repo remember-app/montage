@@ -76,33 +76,47 @@ HANDLERS = {
 # Housekeeping the loop runs at start-up and then once an interval, beside `media`'s own sweep.
 
 
+def _catch_up(conn, type_, missing):
+    """Queue `type_` for every ready item that `missing` picks out — and only where nothing is
+    already doing it.
+
+    `missing` is the condition over `media_items item` saying what this item has not got; it is the
+    one thing that differs between the catch-ups below, and it is a constant of this module, never
+    anything a request carries. Everything around it is the same for all of them, which is why it
+    is written once:
+
+    an item already `queued` or `running` is left to finish, so an hourly sweep does not pile jobs
+    on one that is simply still working — and one whose catch-up has just been given up on is left
+    alone for a day. Three attempts is the whole retry policy (`run_once`), and a sweep that queued
+    a fresh job the next hour would make it endless: an original that is not in the bucket at all
+    would be downloaded and encoded three times an hour for as long as the worker runs, and a frame
+    the model chokes on would be *paid for* three times an hour. A day later it is tried once more,
+    because what failed may as easily have been an hour of R2 being unreachable or a day's limit on
+    the account, and one such hour must not cost every old item its large copy — or its description
+    — for good. Returns how many were queued.
+    """
+    return conn.execute(
+        f"""INSERT INTO jobs (type, ref)
+            SELECT %s, item.id::text FROM media_items item
+            WHERE item.status = 'ready' AND {missing}
+              AND NOT EXISTS (
+                SELECT 1 FROM jobs job
+                WHERE job.type = %s AND job.ref = item.id::text
+                  AND (job.status IN ('queued', 'running')
+                       OR (job.status = 'failed'
+                           AND job.updated_at > now() - make_interval(hours => %s))))""",
+        (type_, type_, CATCH_UP_AFTER_HOURS),
+    ).rowcount
+
+
 def sweep_photos_without_previews(conn):
     """Photos that are `ready` but carry no large copy, given the job that makes one.
 
     Every photo taken in before the worker learned to make one is like this, and nothing else will
     ever come for them: the api queues `media_preview` at upload and the upload is long over. The
     original is still in the bucket, so this costs the member nothing — no re-upload, no prompt.
-
-    A photo already `queued` or `running` is left alone, so an hourly sweep does not pile jobs on
-    one that is simply still working. Nor is one whose catch-up has just been given up on: three
-    attempts is the whole retry policy, and a sweep that queued a fresh job the next hour would make
-    it endless — a photo whose original is not in the bucket at all would be downloaded and encoded
-    three times an hour for as long as the worker runs. A day later it is tried once more, because
-    the thing that failed may as easily have been an hour of R2 being unreachable, and one such hour
-    must not cost every old photo its large copy for good. Returns how many were queued.
     """
-    queued = conn.execute(
-        """INSERT INTO jobs (type, ref)
-           SELECT 'media_preview', item.id::text FROM media_items item
-           WHERE item.kind = 'photo' AND item.status = 'ready' AND item.preview_key IS NULL
-             AND NOT EXISTS (
-               SELECT 1 FROM jobs job
-               WHERE job.type = 'media_preview' AND job.ref = item.id::text
-                 AND (job.status IN ('queued', 'running')
-                      OR (job.status = 'failed'
-                          AND job.updated_at > now() - make_interval(hours => %s))))""",
-        (CATCH_UP_AFTER_HOURS,),
-    ).rowcount
+    queued = _catch_up(conn, "media_preview", "item.kind = 'photo' AND item.preview_key IS NULL")
     if queued:
         log.info("queued a large copy for %s photo(s) that had none", queued)
     return queued
@@ -115,69 +129,58 @@ def sweep_media_without_screening(conn):
     moment an item goes `ready` (`media.media_preview`), and for old material that moment is long
     past. Until the job has run both columns are `null` — «не посчитано», which the gallery shows as
     no opinion at all rather than as a frame the analysis kept.
-
-    The guards are `sweep_photos_without_previews`'s above, for the same reasons: an item already
-    `queued` or `running` is left to finish, and one whose screening has just been given up on is
-    left alone for `CATCH_UP_AFTER_HOURS` rather than downloaded and judged three times an hour for
-    as long as the worker runs. Returns how many were queued.
     """
-    queued = conn.execute(
-        """INSERT INTO jobs (type, ref)
-           SELECT 'media_screening', item.id::text FROM media_items item
-           WHERE item.status = 'ready' AND item.screening_rejected IS NULL
-             AND NOT EXISTS (
-               SELECT 1 FROM jobs job
-               WHERE job.type = 'media_screening' AND job.ref = item.id::text
-                 AND (job.status IN ('queued', 'running')
-                      OR (job.status = 'failed'
-                          AND job.updated_at > now() - make_interval(hours => %s))))""",
-        (CATCH_UP_AFTER_HOURS,),
-    ).rowcount
+    queued = _catch_up(conn, "media_screening", "item.screening_rejected IS NULL")
     if queued:
         log.info("queued a screening proposal for %s ready item(s) that had none", queued)
     return queued
 
 
-def sweep_media_without_understanding(conn):
-    """Ready media nobody has described yet, given the job that describes it.
+def sweep_media_without_ai_answers(conn):
+    """Ready media the cloud model was never asked about: frames with no description, clips with no
+    transcript.
 
-    Everything that became ready before this worker learned to describe frames is like this, and so
-    is everything that was ready while there was no key to describe it with: the job is queued at
-    the end of `media.media_preview`, and a job that found no cloud model stored nothing and left
-    the frame as it was. Hence the first line — with no model configured this sweep would queue the
-    whole library every hour to have every job of it answer «nobody to ask».
+    Both jobs are queued at the end of `media.media_preview` and both are lost the same way. One:
+    the item became ready while there was no key at all — the job then stored nothing and left the
+    item as it was. Two, and this is the one that bites: the model refused. An account over its free
+    limit answers «429» to every call, three attempts go in a minute and the job is `failed` for
+    good — and nothing ever comes back for that frame, because ordering a video does not describe
+    anything, it only reads what is already in the tables (doc-03). A memory then holds a hundred
+    failed descriptions and an AI montage that will never turn on, however often it is re-ordered —
+    which is a thing that has happened here, on a free tier. This sweep is what comes back.
 
-    Same restraint as the photos' catch-up above: an item already on its way is left alone, and one
-    whose description failed three times is left for a day before it is asked for again — a frame
-    the model cannot read would otherwise be sent to it three times an hour, and that one costs
-    money rather than CPU. Returns how many were queued.
+    Hence the first line — with no model configured there is simply nothing to do, and without it
+    the whole library would be queued every hour for every job of it to answer «nobody to ask». The
+    two are asked in one sweep so that a worker without a key says so once an hour and not twice.
 
-    ponytail: the whole library at once, in one insert. A cap per sweep is the knob to add when a
-    real key makes a first sweep over a year of memories a bill rather than a queue.
+    ponytail: the whole library at once, in one insert each. A cap per sweep is the knob to add when
+    a real key makes a first sweep over a year of memories a bill rather than a queue.
     """
     if ai.from_env() is None:
         return 0
-    queued = conn.execute(
-        """INSERT INTO jobs (type, ref)
-           SELECT 'media_understanding', item.id::text FROM media_items item
-           WHERE item.status = 'ready' AND item.preview_key IS NOT NULL
-             AND NOT EXISTS (
-               SELECT 1 FROM media_understandings seen WHERE seen.media_id = item.id::text)
-             AND NOT EXISTS (
-               SELECT 1 FROM jobs job
-               WHERE job.type = 'media_understanding' AND job.ref = item.id::text
-                 AND (job.status IN ('queued', 'running')
-                      OR (job.status = 'failed'
-                          AND job.updated_at > now() - make_interval(hours => %s))))""",
-        (CATCH_UP_AFTER_HOURS,),
-    ).rowcount
-    if queued:
-        log.info("queued a description for %s media item(s) that had none", queued)
-    return queued
+    # A description is made out of the copies `media_preview` left, never the original — a frame
+    # whose large copy is not made yet is `sweep_photos_without_previews`'s first.
+    described = _catch_up(
+        conn, "media_understanding",
+        """item.preview_key IS NOT NULL AND NOT EXISTS (
+             SELECT 1 FROM media_understandings seen WHERE seen.media_id = item.id::text)""",
+    )
+    if described:
+        log.info("queued a description for %s media item(s) that had none", described)
+    # Speech is a clip's alone, and an empty row is an answer (`speech.py`): a silent clip has one
+    # and is not asked about again.
+    transcribed = _catch_up(
+        conn, "media_speech",
+        """item.kind = 'video' AND NOT EXISTS (
+             SELECT 1 FROM media_speech said WHERE said.media_id = item.id::text)""",
+    )
+    if transcribed:
+        log.info("queued a transcript for %s clip(s) that had none", transcribed)
+    return described + transcribed
 
 
 SWEEPS = (media.sweep_stale_uploads, sweep_photos_without_previews,
-          sweep_media_without_screening, sweep_media_without_understanding)
+          sweep_media_without_screening, sweep_media_without_ai_answers)
 
 
 # --- the loop ---------------------------------------------------------------
