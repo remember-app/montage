@@ -26,6 +26,7 @@ this module only reads and writes rows by id.
 """
 
 import collections
+import dataclasses
 import json
 import logging
 import os
@@ -88,7 +89,7 @@ def montage(conn, ref):
     items = conn.execute(
         # Ordered the way the gallery orders the same rows (api, `src/media/gallery.ts`): the
         # finished video runs in the order the memory is already read in.
-        """SELECT id, kind, original_key, captured_at, created_at
+        """SELECT id, kind, original_key, preview_key, captured_at, created_at
            FROM media_items WHERE memory_id = %s AND status = 'ready'
            ORDER BY coalesce(captured_at, created_at), id""",
         (memory_id,),
@@ -102,12 +103,15 @@ def montage(conn, ref):
     s3 = media.storage()
     with tempfile.TemporaryDirectory() as workdir:
         workdir = pathlib.Path(workdir)
-        judged = []
-        for index, (media_id, kind, original_key, captured_at, created_at) in enumerate(items):
+        judged, large_copies = [], {}
+        for index, item in enumerate(items):
+            media_id, kind, original_key, preview_key, captured_at, created_at = item
             original = workdir / f"original-{index}"
             # A download that fails is left fatal on purpose: the bytes may well arrive next time,
             # and swallowing an unreachable bucket would quietly cut a video out of half a memory.
             s3.download_file(media.bucket(), original_key, str(original))
+            if kind == "photo" and preview_key:
+                large_copies[str(media_id)] = preview_key
             judged.append(selection.judge(selection.Piece(
                 media_id=str(media_id), kind=kind, path=original,
                 when=captured_at or created_at, captured_at=captured_at,
@@ -176,6 +180,10 @@ def montage(conn, ref):
         # are.
         chosen = rhythm.fit(chosen, rhythm.beats(track))
 
+        # And only now, for the photographs that actually made the cut, the lighter file to cut
+        # them from.
+        chosen = _off_large_copies(s3, chosen, large_copies, orientation, workdir)
+
         assembled = workdir / "montage.mp4"
         clips = assembly.assemble(chosen, orientation, track, workdir, assembled)
         duration = media._duration(assembled)
@@ -223,6 +231,45 @@ def montage(conn, ref):
         return
     log.info("montage %s is ready: %s clips, %.1fs", ref, len(clips), duration or 0)
     _tell_the_api(ref)
+
+
+def _off_large_copies(s3, chosen, large_copies, orientation, workdir):
+    """The chosen pieces again, each photograph pointed at its large copy where that copy is big
+    enough for the canvas — the original stays behind otherwise.
+
+    The copy is the 2048px JPEG the preview already made of every photo (`media.media_preview`), and
+    the canvas is 1920×1080 either way up, so it almost always has pixels to spare: cutting a piece
+    from it instead of from the original is the same picture off a tenth of the bytes and a
+    twentieth of the work. «Big enough» is measured and not assumed — the cap is on the long side,
+    so a panorama's copy can come back shorter than the canvas, and a photo smaller than 2048 to
+    begin with was never enlarged. Anything under the canvas in either direction would have to be
+    blown up, and then the original is the sharper file to cut from.
+
+    Videos are not touched: their preview is a 720p copy, which is half the height the montage is
+    assembled at.
+
+    A copy that will not come out of the bucket is not worth failing an ordered video over — the
+    original is already on disk and makes the same piece, only slower.
+    """
+    width, height = assembly.CANVASES[orientation]
+    pieces = []
+    for piece in chosen:
+        key = large_copies.get(piece.media_id)
+        if key:
+            try:
+                copy = workdir / f"large-{piece.media_id}.jpg"
+                s3.download_file(media.bucket(), key, str(copy))
+                size = media._dimensions(copy)
+                if size and size[0] >= width and size[1] >= height:
+                    piece = dataclasses.replace(piece, path=copy)
+                else:
+                    log.info("large copy of %s is %s, too small for the canvas — off the original",
+                             piece.media_id, size)
+            except Exception as exc:
+                log.warning("could not take the large copy of %s, cutting from the original: %s",
+                            piece.media_id, exc)
+        pieces.append(piece)
+    return pieces
 
 
 def give_up(conn, ref, error_text):

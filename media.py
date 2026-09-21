@@ -108,6 +108,26 @@ def _duration(path):
         return None
 
 
+def _dimensions(path):
+    """`(width, height)` of the picture as ffprobe reports it, or None when it does not say.
+
+    The stored size, which is the displayed one only for a file this worker made itself: a photo
+    straight off a sideways phone is stored one way round and decoded the other (see the EXIF note
+    at the end of `media_preview`). So this is asked of derivatives — it answers «is this copy big
+    enough for the canvas» in `montage.py` — and never of somebody's original.
+    """
+    try:
+        width, height = _run(
+            "ffprobe", "-v", "error", "-protocol_whitelist", "file", "-select_streams", "v:0",
+            "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", str(path),
+        ).strip().split("x")
+        return int(width), int(height)
+    except ValueError:
+        # Nothing to read the size off: no video stream at all, or more than one answer. Callers
+        # treat that as «cannot say» and fall back on what they had.
+        return None
+
+
 def _refuse_playlists(path):
     """Stop before encoding anything if the «media» is really a list of other files to fetch.
 
