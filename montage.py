@@ -179,6 +179,13 @@ def montage(conn, ref):
             # would be there on a retry.
             return _give_up_for_good(conn, ref, "в ролик нечего ставить: весь материал исключён")
 
+        # Both ways of directing stop at the piece that would not fit the order, so what comes back
+        # from either is usually shorter than the length that was asked for. Here the clips already
+        # in the video are held longer until it runs that long — one step after both of them, so
+        # that no way of directing a video can go round the ordered length. Музыки это не касается:
+        # ролик набирает заказанную длину и под дорожку, и с живым звуком.
+        chosen = selection.stretch(chosen, target_seconds)
+
         # The pieces are chosen and in their places by now — all that is settled here is how long
         # each is held, so that the join lands on a beat. A track with no tempo leaves them as they
         # are, and so does a montage with no music at all: биты ищутся по всей собранной дорожке —

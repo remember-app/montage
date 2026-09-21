@@ -27,7 +27,11 @@ import media
 
 DEFAULT_TARGET_SECONDS = 60.0  # what the api fills `params.target_seconds` with when nobody says
 
-PHOTO_SECONDS = 3.0  # a still held on screen; a plain frame, no Ken Burns
+# A still held on screen; a plain frame, no Ken Burns. The same 2.5 seconds the api counts the
+# longest orderable video by — «сумма всех видео плюс 2,5 секунды на фото» (doc-03) — so this number
+# is not this module's alone to move: changed here and nowhere else, the app would offer a length
+# the worker cannot reach.
+PHOTO_SECONDS = 2.5
 CLIP_SECONDS = 4.0  # «3–5 сек вокруг лучшего момента»
 DEDUP_SECONDS = 2.0  # two shots this close together are one moment, not two
 
@@ -314,3 +318,55 @@ def choose(pieces, target_seconds, include=(), exclude=()):
             continue
         chosen.append(piece)
     return sorted(chosen, key=lambda piece: piece.when), rejected
+
+
+# --- the length that was ordered ---------------------------------------------
+
+
+def stretch(pieces, target_seconds):
+    """The same pieces in the same order, their clips held longer, until the video runs as long as
+    the order asked for.
+
+    Whoever directed the montage — the отбор above or the режиссёр beside it — picked these out of
+    what the memory holds, and both stop at the first piece that would not fit the ordered length.
+    So what comes back from them is never longer than the order and is usually shorter than it, by
+    however much the piece that did not fit would have taken. When nothing else can be *added*, the
+    length is kept by holding what is already in the video for longer, and that is this step: the
+    ordered length is a promise and not a wish (doc-03, «Длина ролика — число секунд»).
+
+    Only clips grow. A photograph is held for the `PHOTO_SECONDS` the screen promises — a still
+    stretched to a minute is not a longer video, it is a stopped one — and a clip only while its
+    own file has anything left to show: the cut widens around the same best moment (`cut_to`), up
+    to the whole file and no further. The missing seconds are shared out equally, the shortest file
+    first, so what one clip cannot give is given by the others instead of being lost.
+
+    Nothing is added to the video here and nothing is taken out of it: a frame the отсев turned
+    down, or the organizer struck out, does not come back because there are seconds going spare —
+    the length is filled out of what is already in the video. Material that runs out before the
+    order is filled is not an error either: the video is as long as there was material for, and
+    that is the whole of it.
+
+    The crossfades are counted in, because `assembly.length_of` counts them: the half-second each
+    join eats is missing out of the finished file exactly as an unfilled second is.
+    """
+    missing = target_seconds - assembly.length_of(pieces)
+    if missing <= 0:
+        return list(pieces)
+    lengths = [piece.seconds for piece in pieces]
+    # A photograph has nowhere to grow to, and neither has a clip whose length ffmpeg would not
+    # tell: asked past what is really in the file, ffmpeg hands back a shorter piece than it was
+    # told to, and every join after it lands wrong.
+    room = [piece.duration - piece.seconds if piece.kind == "video" and piece.duration else 0.0
+            for piece in pieces]
+    growing = sorted((index for index, free in enumerate(room) if free > 0), key=room.__getitem__)
+    log.info("%.1fs short of the %.0fs ordered, %s clip(s) can be held longer",
+             missing, target_seconds, len(growing))
+    for served, index in enumerate(growing):
+        # An equal share of what is still missing, out of the clips that can still take one. The
+        # shortest file is served first, and what it cannot hold stays in `missing` for the longer
+        # ones behind it — which is what makes the shares equal wherever they can be.
+        grown = min(missing / (len(growing) - served), room[index])
+        lengths[index] += grown
+        missing -= grown
+    return [cut_to(piece, seconds) if seconds > piece.seconds else piece
+            for piece, seconds in zip(pieces, lengths)]

@@ -39,9 +39,9 @@ MAX_PIECE_SECONDS = 6.0
 
 # How far past the end of the track its beats are counted. A track shorter than the montage is
 # played again from the top by `assembly`, and the beats go round with it — the grid simply repeats
-# every track length. Half an hour is well past the longest montage the api will take an order for
-# (`MONTAGE_TARGET_SECONDS_MAX`, 300 seconds by default), and it is a few thousand numbers: cheaper
-# than working out whether it is enough.
+# every track length. Half an hour is well past the longest montage anyone can order — ten minutes
+# (doc-03, «не больше 10 минут») — and it is a few thousand numbers: cheaper than working out
+# whether it is enough.
 HORIZON_SECONDS = 30 * 60
 
 log = logging.getLogger("montage.rhythm")
@@ -148,7 +148,15 @@ def _room(piece):
     """How long a piece may be held at most: a photograph as long as you like — it is a still — and
     a clip only while there is anything left in its file past the point it is cut from. Stretched
     further, it comes back from ffmpeg shorter than asked for, and the join misses the beat by
-    exactly that difference."""
+    exactly that difference.
+
+    A piece that is already longer than the window is not pulled back into it: the length it
+    arrived with was given to it to make the video as long as it was ordered
+    (`selection.stretch`), and a ceiling for the sake of the music would quietly take those seconds
+    out of the montage again. The window bounds what the *beats* may do to a piece, not how long a
+    piece may be.
+    """
+    ceiling = max(MAX_PIECE_SECONDS, piece.seconds)
     if piece.kind == "video" and piece.duration:
-        return min(MAX_PIECE_SECONDS, piece.duration - piece.start)
-    return MAX_PIECE_SECONDS
+        return min(ceiling, piece.duration - piece.start)
+    return ceiling

@@ -69,8 +69,9 @@ def test_only_what_fits_the_asked_for_length_gets_in_and_it_gets_in_in_order():
 
     chosen, rejected = selection.choose(pieces, target_seconds=8)
 
-    # Three seconds each, half a second eaten by every crossfade: 3, 5.5, 8 — a fourth would be 10.5.
-    assert assembly.length_of(chosen) == 8
+    # Two and a half seconds each, half a second eaten by every crossfade: 2.5, 4.5, 6.5 — a fourth
+    # would be 8.5.
+    assert assembly.length_of(chosen) == 6.5
     assert chosen == [pieces[1], pieces[3], pieces[4]], "the sharpest three, back in date order"
     assert [piece.rejected for piece in rejected] == [selection.NO_ROOM] * 2
 
@@ -156,10 +157,10 @@ def test_what_the_organizer_asked_for_is_paid_for_out_of_everyone_elses_time():
 
     chosen, rejected = selection.choose(pieces, target_seconds=8, include=["m0"])
 
-    # Three seconds each and half a second off every join: m0 asked for, then the two sharpest that
-    # still fit — 3, 5.5, 8 — and the fourth would be 10.5.
+    # Two and a half seconds each and half a second off every join: m0 asked for, then the two
+    # sharpest that still fit — 2.5, 4.5, 6.5 — and the fourth would be 8.5.
     assert [piece.media_id for piece in chosen] == ["m0", "m3", "m4"]
-    assert assembly.length_of(chosen) == 8
+    assert assembly.length_of(chosen) == 6.5
     assert {piece.media_id: piece.rejected for piece in rejected} == {
         "m1": selection.NO_ROOM, "m2": selection.NO_ROOM
     }
@@ -189,6 +190,116 @@ def test_ids_from_the_order_are_matched_as_text():
     chosen = cut([at(0, 90, media_id="mine"), at(30, 10)], target_seconds=60, exclude=[Uuid()])
 
     assert [piece.media_id for piece in chosen] == [""]
+
+
+# --- the length that was ordered ---------------------------------------------
+# What `choose` picks is never longer than the order and is usually shorter than it; `stretch` is
+# what turns the ordered length from a wish into a promise. Both are arithmetic over pieces, so a
+# ten-minute montage is checked here in milliseconds instead of being encoded — that a real video
+# comes out that long is `test_montage.py`'s.
+
+
+def clip(second, sharpness, *, duration=60.0, media_id=""):
+    """A piece as `judge` cuts one out of a video file that runs `duration` seconds: the default
+    four seconds around a best moment in the middle of it."""
+    return dataclasses.replace(
+        at(second, sharpness, media_id=media_id), kind="video", duration=duration,
+        best_second=duration / 2, seconds=min(selection.CLIP_SECONDS, duration),
+    )
+
+
+@pytest.mark.parametrize("target_seconds", [60, 300, 600])
+def test_a_video_ordered_out_of_material_to_spare_comes_out_the_length_it_was_ordered(
+    target_seconds
+):
+    """The promise itself, at the three lengths the product talks in: a minute, five minutes and
+    the ten-minute ceiling. Twenty minute-long clips and ten photographs is material with room to
+    spare at all three — so the answer is the length that was asked for, not «as much as the
+    default four seconds a clip happened to add up to»."""
+    material = [clip(minute * 60, 100 - minute, media_id=f"v{minute}") for minute in range(20)]
+    material += [at(minute * 60 + 30, 50 - minute, media_id=f"p{minute}") for minute in range(10)]
+
+    chosen, _ = selection.choose(material, target_seconds)
+    video = selection.stretch(chosen, target_seconds)
+
+    # Five per cent of the order, and never less than three seconds: the ordered length is kept to
+    # within a join or two, not to the frame.
+    assert assembly.length_of(video) == pytest.approx(
+        target_seconds, abs=max(target_seconds * 0.05, 3)
+    )
+
+
+def test_an_order_for_everything_there_is_takes_every_piece_whole():
+    """The longest video the app offers — «сумма всех видео плюс 2,5 секунды на фото» (doc-03) —
+    and it means exactly what it says: every clip runs from its first frame to its last and every
+    photograph is held its 2.5 seconds. The finished file is shorter than that sum by its
+    crossfades, which is the one thing the number cannot include: a join is half a second of two
+    pieces at once."""
+    videos = [clip(minute * 60, 10, duration=length, media_id=f"v{minute}")
+              for minute, length in enumerate((12.0, 30.0, 7.0))]
+    photos = [at(minute * 60 + 30, 10, media_id=f"p{minute}") for minute in range(3)]
+    everything = sum(piece.duration for piece in videos) + selection.PHOTO_SECONDS * len(photos)
+
+    chosen, rejected = selection.choose(videos + photos, everything)
+    video = selection.stretch(chosen, everything)
+
+    assert rejected == [], "nothing was left out of an order for everything"
+    assert {piece.media_id: piece.seconds for piece in video} == {
+        "v0": 12.0, "v1": 30.0, "v2": 7.0, "p0": 2.5, "p1": 2.5, "p2": 2.5
+    }
+    assert [piece.start for piece in video if piece.kind == "video"] == [0.0] * 3, (
+        "a clip held whole starts at its own beginning"
+    )
+
+
+def test_the_missing_seconds_are_shared_out_equally_and_a_photograph_gets_none_of_them():
+    """Two clips and a still against an order none of them can fill on its own. The clips take an
+    equal share of what is missing until one of them runs out of file, and the seconds it could not
+    hold go to the other rather than out of the video. The still is held its 2.5 seconds either
+    way: a photograph stretched to fill time is a stopped video, not a longer one."""
+    short = clip(0, 10, duration=5.0, media_id="short")  # a second left in it past the default cut
+    long_one = clip(60, 10, duration=60.0, media_id="long")
+    still = at(120, 10, media_id="photo")
+
+    video = selection.stretch([short, long_one, still], target_seconds=20.0)
+
+    # 4 + 4 + 2.5 less two joins is 9.5, so 10.5 is missing: the short clip can only take one of
+    # the 5.25 it was offered, and the other 9.5 all go to the long one.
+    assert [piece.seconds for piece in video] == [5.0, 13.5, 2.5]
+    assert assembly.length_of(video) == 20.0
+
+
+def test_material_that_runs_out_makes_a_shorter_video_and_not_a_failure():
+    """Ten minutes ordered out of eleven seconds of material. The video is eleven seconds long —
+    no error, and nothing shown twice to make up the difference."""
+    material = [clip(0, 10, duration=6.0, media_id="v"),
+                at(60, 9, media_id="p0"), at(120, 8, media_id="p1")]
+
+    chosen, _ = selection.choose(material, 600)
+    video = selection.stretch(chosen, 600)
+
+    assert [piece.media_id for piece in video] == ["v", "p0", "p1"]
+    assert assembly.length_of(video) == 10.0, "the whole clip and both stills, less two joins"
+
+
+def test_nothing_that_was_left_out_comes_back_to_fill_the_length():
+    """The length is kept by holding what is in the video longer, never by putting back what was
+    left out of it: a frame the organizer struck out is not worth more because there is time going
+    spare, and neither is one the отсев turned down. The same step fills the length for the
+    director's film and the отбор's alike (`montage.py` calls it after both), so this is the answer
+    on both paths."""
+    struck = at(0, 900, media_id="no")
+    blurred = dataclasses.replace(at(30, 5, media_id="blur"), rejected=selection.BLUR)
+    material = [clip(60, 10, duration=8.0, media_id="v"),
+                at(120, 10, media_id="p0"), at(180, 10, media_id="p1")]
+
+    chosen, rejected = selection.choose([struck, blurred, *material], 600, exclude=["no"])
+    video = selection.stretch(chosen, 600)
+
+    assert [piece.media_id for piece in video] == ["v", "p0", "p1"]
+    assert {piece.media_id: piece.rejected for piece in rejected} == {
+        "no": selection.EXCLUDED, "blur": selection.BLUR
+    }
 
 
 # --- judging a frame ---------------------------------------------------------
