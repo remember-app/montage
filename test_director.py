@@ -84,11 +84,16 @@ def described(conn):
     return conn
 
 
-def directed(conn, fixture="gemini_plan.json", pieces=MATERIAL, target_seconds=60.0, **order):
-    """The film the recorded director plans, and the request it was planned out of."""
+def directed(conn, fixture="gemini_plan.json", pieces=MATERIAL, target_seconds=60.0,
+             provider=ai.Gemini, **order):
+    """The film the recorded director plans, what it said while planning it, and the request it was
+    planned out of."""
     net = Recorded(fixture)
-    brain = ai.AI(conn, ai.Gemini("test-key", transport=net))
-    return director.direct(conn, pieces, target_seconds, brain=brain, ref="montage-3", **order), net
+    brain = ai.AI(conn, provider("test-key", transport=net))
+    film, thoughts = director.direct(
+        conn, pieces, target_seconds, brain=brain, ref="montage-3", **order
+    )
+    return film, thoughts, net
 
 
 def asked(net):
@@ -103,7 +108,7 @@ def test_the_plan_is_the_order_the_lengths_and_the_reading_behind_it(described):
     """Everything the director is for, in one: the pieces come back in the order it put them in,
     each at the length it asked for, and it was given what the pipeline already knows about them
     rather than a list of file names."""
-    film, net = directed(described, story=STORY, target_seconds=30)
+    film, _, net = directed(described, story=STORY, target_seconds=30)
 
     assert [piece.media_id for piece in film] == ["m-1", "m-2", "m-3"]
     assert [piece.seconds for piece in film] == [3.0, 4.0, 3.0]
@@ -124,8 +129,8 @@ def test_the_plan_is_the_order_the_lengths_and_the_reading_behind_it(described):
 def test_two_stories_over_the_same_material_are_two_different_films(described):
     """The reason the director exists at all: the same four files, two orders, and the video is not
     the same video. Nothing but the story differs between these two calls."""
-    birthday, first = directed(described, "gemini_plan.json", story=STORY)
-    about_the_dog, second = directed(described, "gemini_plan_again.json", story="про собаку")
+    birthday, _, first = directed(described, "gemini_plan.json", story=STORY)
+    about_the_dog, _, second = directed(described, "gemini_plan_again.json", story="про собаку")
 
     assert [piece.media_id for piece in birthday] == ["m-1", "m-2", "m-3"]
     assert [piece.media_id for piece in about_the_dog] == ["m-3", "m-1"]
@@ -141,7 +146,7 @@ def test_the_music_and_what_the_organizer_asked_of_it_go_to_the_director(describ
     (doc-03, «все запросы обязательно сохраняются»), а прочитать, почему ролик вышел таким, можно
     только там.
     """
-    _, net = directed(
+    _, _, net = directed(
         described, story=STORY,
         music=[{"track": "warm", "seconds": 121.0}, {"track": "свой трек", "seconds": 48.2}],
         music_note="торт поставь под припев второго трека",
@@ -162,7 +167,7 @@ def test_what_is_said_in_a_clip_goes_to_the_director_too(conn):
     describe(conn, "m-2", "вносят торт")
     describe(conn, "m-3", "собака под столом")
 
-    _, net = directed(conn, story=STORY)
+    _, _, net = directed(conn, story=STORY)
 
     assert "Ну что, все собрались?" in asked(net)
 
@@ -171,7 +176,7 @@ def test_a_clip_is_never_held_longer_than_it_actually_runs(described):
     """The plan asks for four seconds of a two-second clip. What it gets is the two there are —
     booked in at four, the crossfade chain would walk off the end of the montage."""
     two_seconds = shot("m-2", 5, kind="video", duration=2.0, best_second=1.0)
-    film, _ = directed(described, pieces=[MATERIAL[0], two_seconds, MATERIAL[2]])
+    film, *_ = directed(described, pieces=[MATERIAL[0], two_seconds, MATERIAL[2]])
 
     assert [piece.seconds for piece in film] == [3.0, 2.0, 3.0]
 
@@ -179,11 +184,104 @@ def test_a_clip_is_never_held_longer_than_it_actually_runs(described):
 def test_a_plan_longer_than_the_video_that_was_ordered_is_cut_back_to_it(described):
     """The length is in the prompt, but the prompt is not a promise: ten seconds of plan against
     eight seconds ordered leaves the piece that does not fit out of the film."""
-    film, _ = directed(described, target_seconds=8)
+    film, thoughts, _ = directed(described, target_seconds=8)
 
     # Three and four seconds with half a second of crossfade between them is 6.5; the third piece
     # would make it 9.
     assert [piece.media_id for piece in film] == ["m-1", "m-2"]
+    # И рассказано это тем же словом: кадр, который планировали, но он не влез, — «мимо, места нет».
+    assert [(one["media_id"], one["decision"], one.get("reason")) for one in thoughts] == [
+        ("m-1", "take", None), ("m-2", "take", None), ("m-3", "skip", selection.NO_ROOM)
+    ]
+
+
+# --- что режиссёр рассказал о своём плане ------------------------------------
+
+
+def about(thoughts, media_id):
+    """Что режиссёр сказал об одном кадре — одной репликой, или ни одной."""
+    (one,) = [one for one in thoughts if one.get("media_id") == media_id]
+    return one
+
+
+def test_the_director_says_what_it_sees_which_part_it_is_and_where_to_look(described):
+    """Рассказ режиссёра целиком, порядком плана: мысль о плане в целом первой и без кадра, за ней
+    по реплике на каждый показанный кадр — мысль его словами, часть истории номером и названием,
+    рамка «куда смотрит» долями, — а кадр, который он в план не взял, идёт «мимо» с его же
+    причиной, а не с кодом.
+    """
+    film, thoughts, _ = directed(described, "gemini_plan_thoughts.json", story=STORY)
+
+    assert [piece.media_id for piece in film] == ["m-1", "m-2"]
+    assert thoughts[0] == {"thought": (
+        "План на две части: сперва сборы за столом, потом торт — на нём и держим финал. "
+        "Собака под столом в эту историю не встала."
+    )}, "обзорная мысль — первой записью и без кадра: она про фильм, а не про кусок"
+    assert [one.get("media_id") for one in thoughts] == [None, "m-1", "m-2", "m-3"]
+
+    assert about(thoughts, "m-1") == {
+        "media_id": "m-1", "decision": "take",
+        "thought": "Стол накрывают, гости ещё собираются — с этого вечер и начинается.",
+        "story_part": 1, "story_part_title": "Сборы",
+    }
+    assert about(thoughts, "m-2") == {
+        "media_id": "m-2", "decision": "take",
+        "thought": "Вносят торт — главный момент вечера, держу подольше и смотрю на свечи.",
+        "story_part": 2, "story_part_title": "Торт",
+        "focus_x": 0.3, "focus_y": 0.05, "focus_w": 0.25, "focus_h": 0.5,
+    }
+    assert about(thoughts, "m-3") == {
+        "media_id": "m-3", "decision": "skip", "reason": "собака не про этот вечер"
+    }
+
+
+def test_a_plan_written_before_the_director_spoke_is_still_a_plan(described):
+    """Расширение, а не новый формат: записанный ответ без мыслей, частей и рамок разбирается тем
+    же разбором. Порядок и длины из него те же, что были, `accent` становится мыслью о кадре, а
+    частей и рамок в рассказе просто нет — выдумывать их за модель некому.
+    """
+    film, thoughts, _ = directed(described, "gemini_plan.json", story=STORY)
+
+    assert [piece.media_id for piece in film] == ["m-1", "m-2", "m-3"]
+    assert [piece.seconds for piece in film] == [3.0, 4.0, 3.0]
+    assert about(thoughts, "m-2") == {
+        "media_id": "m-2", "decision": "take", "thought": "вносят торт — главный момент вечера",
+        "story_part": None, "story_part_title": None,
+    }
+
+
+def test_the_same_plan_comes_back_whole_from_the_other_provider(described):
+    """Поставщик на слова режиссёра не влияет: тот же расширенный план, записанный ответом OpenAI,
+    читается ровно так же — разбор живёт у двери к модели, а не у каждого адаптера."""
+    film, thoughts, _ = directed(described, "openai_plan.json", provider=ai.OpenAI, story=STORY)
+
+    assert [piece.media_id for piece in film] == ["m-1", "m-2", "m-3"]
+    assert thoughts[0]["thought"].startswith("Три части по кадру")
+    assert about(thoughts, "m-2")["focus_w"] == 0.5
+    assert [one.get("story_part") for one in thoughts] == [None, 1, 2, 3]
+
+
+def test_what_the_director_made_up_does_not_reach_the_journal(described):
+    """Ответ модели — недоверенный ввод, а мысль увидят все участники воспоминания. Чужой кадр в
+    плане, часть «нулевая», рамка за краем кадра и рамка из трёх долей — всё это выдумки, и до
+    экрана они не доходят; мысль о кадре при этом остаётся, потерять её из-за кривой рамки было бы
+    хуже.
+    """
+    film, thoughts, net = directed(described, "gemini_plan_wild.json", story=STORY)
+
+    assert [piece.media_id for piece in film] == ["m-1", "m-2", "m-3"]
+    assert "m-404" not in asked(net), "модели такого кадра не показывали"
+    assert not [one for one in thoughts if one.get("media_id") == "m-404"], (
+        "и рассказывать о нём нечего: в журнале только кадры воспоминания"
+    )
+    # Рамка либо целая и внутри кадра, либо никакой: 1.4 — не доля, 0.9 + 0.4 вылезает за край,
+    # а из трёх долей рамку не собрать.
+    assert not [one for one in thoughts if any(key.startswith("focus") for key in one)]
+    assert about(thoughts, "m-1")["story_part"] is None, "«часть 0» — не номер части"
+    assert about(thoughts, "m-2")["story_part"] == 2, "а число строкой — номер"
+    assert about(thoughts, "m-3")["thought"] is None, "мысль списком — не мысль"
+    # Длина, которую нельзя прочитать числом, оставляет кусок таким, каким его отрезал отсев.
+    assert [piece.seconds for piece in film] == [3.0, 4.0, selection.PHOTO_SECONDS]
 
 
 # --- one shot per moment ----------------------------------------------------
@@ -204,7 +302,7 @@ def test_a_burst_of_one_moment_reaches_the_director_as_one_shot(described):
     describe(described, "m-9", "собака под столом, кадр секундой позже")
     blurrier = twin_of(MATERIAL[2], "m-9", sharpness=1.0)
 
-    film, net = directed(described, pieces=[*MATERIAL, blurrier], story=STORY)
+    film, _, net = directed(described, pieces=[*MATERIAL, blurrier], story=STORY)
 
     assert "m-9" not in asked(net) and "секундой позже" not in asked(net)
     assert "собака под столом" in asked(net), "the sharpest of the burst stands for it"
@@ -218,7 +316,7 @@ def test_the_shot_the_organizer_asked_for_is_the_one_its_burst_is_shown_by(descr
     describe(described, "m-9", "собака под столом, кадр секундой позже")
     blurrier = twin_of(MATERIAL[2], "m-9", sharpness=1.0)
 
-    film, net = directed(described, pieces=[*MATERIAL, blurrier], include=["m-9"])
+    film, _, net = directed(described, pieces=[*MATERIAL, blurrier], include=["m-9"])
 
     assert "секундой позже" in asked(net), "the shot that was asked for"
     assert "m-3" not in asked(net), "and not the sharper one beside it"
@@ -233,7 +331,7 @@ def test_a_struck_out_piece_is_never_even_shown_to_the_director(described):
     """«Исключить» is not a filter over the answer — the piece does not go into the question, so
     there is nothing for the model to name. Named here anyway (the recorded plan has all three),
     which is exactly the case this rule has to survive: a model that says otherwise."""
-    film, net = directed(described, exclude=["m-3"])
+    film, _, net = directed(described, exclude=["m-3"])
 
     assert [piece.media_id for piece in film] == ["m-1", "m-2"]
     assert "m-3" not in asked(net) and "собака" not in asked(net)
@@ -243,7 +341,7 @@ def test_told_both_at_once_the_piece_stays_out_of_the_film_too(described):
     """The same contradiction `selection.choose` settles the same way: named on both of the
     organizer's own lists, a piece is struck out before the director ever sees it — «исключить» is
     what cannot be undone once a video is made, so it is the one that wins here as well."""
-    film, net = directed(described, include=["m-3"], exclude=["m-3"])
+    film, _, net = directed(described, include=["m-3"], exclude=["m-3"])
 
     assert [piece.media_id for piece in film] == ["m-1", "m-2"]
     assert "m-3" not in asked(net) and "собака" not in asked(net)
@@ -253,10 +351,14 @@ def test_a_piece_the_organizer_asked_for_is_in_the_film_even_if_the_plan_forgot_
     """«Включить» is not the model's to refuse. The recorded plan names three pieces and this is a
     fourth, so the only way it can be in the film is the rule putting it back."""
     describe(described, "m-4", "все машут в камеру")
-    film, net = directed(described, pieces=[*MATERIAL, shot("m-4", 15)], include=["m-4"])
+    film, thoughts, net = directed(described, pieces=[*MATERIAL, shot("m-4", 15)],
+                                   include=["m-4"])
 
     assert [piece.media_id for piece in film] == ["m-1", "m-2", "m-3", "m-4"]
     assert '"must_include": true' in asked(net), "and it was asked for, not only forced afterwards"
+    # И в журнале это «беру» при любом плане: модель о кадре не сказала ничего, а он в ролике.
+    (about_it,) = [one for one in thoughts if one.get("media_id") == "m-4"]
+    assert (about_it["decision"], about_it.get("thought")) == ("take", None)
 
 
 def test_a_piece_the_selection_turned_down_is_in_the_film_when_the_organizer_asks_for_it(described):
@@ -265,7 +367,7 @@ def test_a_piece_the_selection_turned_down_is_in_the_film_when_the_organizer_ask
     it — and it goes in with nothing about it rejected."""
     dark = dataclasses.replace(MATERIAL[2], rejected=selection.EXPOSURE)
 
-    film, net = directed(described, pieces=[*MATERIAL[:2], dark], include=["m-3"])
+    film, _, net = directed(described, pieces=[*MATERIAL[:2], dark], include=["m-3"])
 
     assert [piece.media_id for piece in film] == ["m-1", "m-2", "m-3"]
     assert [piece.rejected for piece in film] == [None] * 3
@@ -277,7 +379,7 @@ def test_what_the_selection_turned_down_and_nobody_asked_for_is_not_offered(desc
     frame nobody named is not on that list."""
     blurred = dataclasses.replace(MATERIAL[2], rejected=selection.BLUR)
 
-    film, net = directed(described, pieces=[*MATERIAL[:2], blurred])
+    film, _, net = directed(described, pieces=[*MATERIAL[:2], blurred])
 
     assert [piece.media_id for piece in film] == ["m-1", "m-2"]
     assert "m-3" not in asked(net)
@@ -288,7 +390,7 @@ def test_a_file_with_no_frame_in_it_stays_out_even_when_the_organizer_asked_for_
     screen, and a director cannot be shown one either."""
     broken = dataclasses.replace(MATERIAL[2], rejected=selection.UNREADABLE)
 
-    film, net = directed(described, pieces=[*MATERIAL[:2], broken], include=["m-3"])
+    film, _, net = directed(described, pieces=[*MATERIAL[:2], broken], include=["m-3"])
 
     assert [piece.media_id for piece in film] == ["m-1", "m-2"]
     assert "m-3" not in asked(net)
@@ -302,7 +404,7 @@ def test_without_a_cloud_model_nobody_is_asked_and_the_selection_cuts_the_video(
     montage is the montage it has always been (`montage.py` falls back to `selection.choose`)."""
     monkeypatch.setattr(ai, "from_env", lambda *_, **__: None)
 
-    assert director.direct(conn, MATERIAL, 60.0, ref="montage-3") is None
+    assert director.direct(conn, MATERIAL, 60.0, ref="montage-3") == (None, ())
     assert conn.execute("SELECT count(*) FROM ai_requests").fetchone()[0] == 0
 
 
@@ -310,7 +412,7 @@ def test_material_nobody_has_described_yet_is_left_to_the_selection(conn):
     """A memory that became ready before there was a key, with the hourly sweep not yet through it.
     Ordering frames it has never seen is what the model would be paid for here, and the algorithm
     at least looks at the pixels."""
-    film, net = directed(conn, story=STORY)
+    film, _, net = directed(conn, story=STORY)
 
     assert film is None
     assert net.requests == [], "and nobody was asked anything"
@@ -322,7 +424,7 @@ def test_a_plan_with_nothing_of_ours_in_it_falls_back_instead_of_making_an_empty
     — and `montage.py` reads None as «nobody directed this»."""
     describe(described, "m-9", "единственное, что у нас есть")
 
-    film, _ = directed(described, pieces=[shot("m-9", 0)])
+    film, *_ = directed(described, pieces=[shot("m-9", 0)])
 
     assert film is None
 

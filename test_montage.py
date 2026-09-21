@@ -612,15 +612,16 @@ def test_a_montage_that_opens_on_a_video_with_a_dark_start_gets_a_bright_cover(
     )
 
 
-def planning_over(monkeypatch, media_ids):
-    """The recorded plan (`fixtures/gemini_plan.json`) as the only cloud model this worker can find.
+def planning_over(monkeypatch, media_ids, fixture="gemini_plan.json"):
+    """The recorded plan (`fixtures/gemini_plan*.json`) as the only cloud model this worker can
+    find.
 
     The ids in it are this run's own: a montage is planned over material whose ids Postgres makes up
     at insert time, so the three the answer was written about are rewritten into the three actually
     ordered. Everything else — what a plan is, what a step of it carries — is the recorded file's,
     and nothing here goes anywhere near the network.
     """
-    recorded = Recorded("gemini_plan.json")
+    recorded = Recorded(fixture)
     for index, media_id in enumerate(media_ids, start=1):
         recorded.answer = recorded.answer.replace(f"m-{index}".encode(), media_id.encode())
     monkeypatch.setattr(ai, "from_env", lambda *_, **__: ai.Gemini("test-key", transport=recorded))

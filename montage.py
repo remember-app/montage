@@ -202,12 +202,12 @@ def montage(conn, ref):
         # The director first, and the отбор whenever there is no director: no cloud model, nothing
         # described for it to read, or an answer with nothing of ours in it (`director.direct`).
         journal.start(conn, ref, "directing", total=len(judged))
-        chosen = director.direct(
+        # Вторым — слова режиссёра-нейросети о том, что он планировал: мысль о плане в целом и по
+        # записи на каждый показанный ему кадр. Ролик они не меняют, они и есть рассказ о нём.
+        chosen, thoughts = director.direct(
             conn, judged, target_seconds, include, exclude, story=story, ref=ref,
             music=_music_heard(ordered_music, tracks), music_note=music_note,
         )
-        # Решения режиссёра-нейросети — мысли, части истории, рамки — в журнал пишет TASK-202: они
-        # в самом плане, а не в том, что вернулось сюда. Здесь рассказывает о себе только отсев.
         turned_down = None
         if chosen is None:
             chosen, turned_down = selection.choose(judged, target_seconds, include, exclude)
@@ -226,9 +226,14 @@ def montage(conn, ref):
         # ролик набирает заказанную длину и под дорожку, и с живым звуком.
         chosen = selection.stretch(chosen, target_seconds)
 
+        # Кто резал ролик, тот о нём и рассказывает: отсев — своими решениями, режиссёр-нейросеть —
+        # своими словами. Итог этапа один на обоих, частями истории его наполняет только второй.
         if turned_down is not None:
             _write_choices(conn, ref, chosen, turned_down, include)
-        journal.finish(conn, ref, "directing", frames=len(chosen), of=len(judged))
+        else:
+            _write_thoughts(conn, ref, chosen, thoughts, include)
+        journal.finish(conn, ref, "directing", frames=len(chosen), of=len(judged),
+                       **_story_parts(thoughts))
 
         # The pieces are chosen and in their places by now — all that is settled here is how long
         # each is held, so that the join lands on a beat. A track with no tempo leaves them as they
@@ -445,16 +450,64 @@ def _write_choices(conn, ref, chosen, turned_down, include):
             conn, ref, "directing", media_id=piece.media_id, decision="take",
             reason=ORGANIZER_ASKED if piece.media_id in include else None,
             series_size=piece.series_size if piece.series_size > 1 else None,
-            # Фотографию держат целиком, и куска исходника у неё нет — в ролик идёт вся.
-            **({"source_from_seconds": round(piece.start, 2),
-                "source_to_seconds": round(piece.start + piece.seconds, 2)}
-               if piece.kind == "video" else {}),
+            **_source_cut(piece),
         )
     for piece in turned_down:
         if piece.rejected == selection.DUPLICATE:
             continue  # его серия уже рассказана одной записью выше
         journal.entry(conn, ref, "directing", media_id=piece.media_id, decision="skip",
                       reason=piece.rejected)
+
+
+def _write_thoughts(conn, ref, chosen, thoughts, include):
+    """Рассказ режиссёра-нейросети в журнал: мысль о плане в целом, а за ней — что он сказал о
+    каждом кадре, который видел, порядком плана.
+
+    Пишется там же, где решения отсева, и по той же причине — после набора заказанной длины
+    (`selection.stretch`): «беру 0:04–0:07» должно называть тот кусок исходника, который в ролик и
+    пойдёт. Слова здесь режиссёра, а куски наши: сколько секунд кадра взято и по чьему слову он в
+    ролике, видно отсюда, а не из плана.
+    """
+    laid = {piece.media_id: piece for piece in chosen}
+    for thought in thoughts:
+        fields = dict(thought)
+        piece = laid.get(fields.get("media_id"))
+        if piece is not None:
+            # «Включить» — слово организатора, и в журнале оно его: тот же `included`, что у отсева,
+            # поверх любой мысли модели об этом кадре.
+            if piece.media_id in include:
+                fields["reason"] = ORGANIZER_ASKED
+            fields.update(_source_cut(piece))
+        journal.entry(conn, ref, "directing", **fields)
+
+
+def _story_parts(thoughts):
+    """На какие части режиссёр разложил историю — итогом этапа: сколько их и как они называются.
+
+    По самим репликам, а не отдельным полем плана: часть у кадра уже названа, и второй счёт рядом с
+    первым разошёлся бы с ним. Частей нет вовсе — ролик резал отсев, или в плане их не было, — и
+    итог о них молчит: отсутствующий ключ экран просто не рисует.
+    """
+    parts = {}
+    for thought in thoughts:
+        if thought.get("story_part"):
+            parts.setdefault(thought["story_part"], thought.get("story_part_title"))
+    if not parts:
+        return {}
+    return {"parts": len(parts),
+            "part_titles": [parts[number] for number in sorted(parts) if parts[number]] or None}
+
+
+def _source_cut(piece):
+    """Какой кусок исходника пойдёт в ролик, секундами от начала файла.
+
+    Фотографию держат целиком, и куска исходника у неё нет — в ролик идёт вся, а колонки остаются
+    пустыми.
+    """
+    if piece.kind != "video":
+        return {}
+    return {"source_from_seconds": round(piece.start, 2),
+            "source_to_seconds": round(piece.start + piece.seconds, 2)}
 
 
 def _back_to_originals(chosen, originals, orientation):

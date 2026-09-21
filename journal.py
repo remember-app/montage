@@ -28,6 +28,7 @@
 import functools
 import json
 import logging
+import unicodedata
 
 # Ручка оценки времени: сколько секунд этап тратит на один файл материала и на одну секунду
 # готового ролика. Числа — «на глаз», и подстраивать их по реальным прогонам надо здесь: больше
@@ -211,21 +212,44 @@ def entry(conn, ref, stage, **fields):
 
 
 def _fit(fields):
-    """Те же поля, обрезанные по потолкам контракта.
+    """Те же поля, вычищенные и обрезанные по потолкам контракта.
 
-    Длинное приходит от модели — описание кадра, название части, метки, — и база держит потолки
-    `CHECK`-ами: без обрезки реплика не легла бы вовсе. Лучше хвост фразы, чем пустое место в
-    рассказе.
+    Длинное приходит от модели — описание кадра, мысль режиссёра, название части, метки, — и база
+    держит потолки `CHECK`-ами: без обрезки реплика не легла бы вовсе. Лучше хвост фразы, чем
+    пустое место в рассказе. Пустое после чистки не пишется вовсе: колонки без значения экран
+    просто не рисует, а пустая строка — это «модель сказала пустоту».
     """
     fitted = dict(fields)
     for name, characters in (("thought", THOUGHT_CHARACTERS), ("reason", REASON_CHARACTERS),
                              ("story_part_title", TITLE_CHARACTERS)):
         if fitted.get(name) is not None:
-            fitted[name] = str(fitted[name])[:characters]
+            fitted[name] = _clean(fitted[name])[:characters] or None
     if fitted.get("labels") is not None:
-        labels = [str(one).strip() for one in fitted["labels"]]
+        labels = [_clean(one) for one in fitted["labels"]]
         labels = [one for one in labels if one][:LABELS_COUNT]
         while labels and len(",".join(labels)) > LABELS_CHARACTERS:
             labels.pop()
         fitted["labels"] = labels or None
     return fitted
+
+
+def _clean(words):
+    """Слова модели без служебных символов и лишних пробелов.
+
+    Мысль режиссёра и описание кадра — чужие слова, а увидят их все участники воспоминания: в
+    рассказе о ролике не нужны ни перевод строки, ни управляющий символ, ни невидимая метка,
+    разворачивающая текст справа налево, — на чужом экране они рисуются неизвестно чем. Остаётся
+    сам текст и одинарные пробелы между словами.
+
+    Управляющий символ (`Cc` по Юникоду) — это разрыв между словами, и на его месте остаётся
+    пробел; невидимая разметка (`Cf`) стоит посреди слова и уходит без следа, иначе слово
+    разломилось бы надвое там, где его никто не ломал.
+    """
+    letters = []
+    for letter in str(words):
+        category = unicodedata.category(letter)
+        if category == "Cc":
+            letters.append(" ")
+        elif category != "Cf":
+            letters.append(letter)
+    return " ".join("".join(letters).split())

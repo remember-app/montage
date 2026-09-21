@@ -323,8 +323,23 @@ PLAN = (
     "Под ролик играет музыка из music — треки подряд, в этом порядке и такой длины; в music_note "
     "пожелания организатора, как их использовать, — учитывай их в порядке и длине кусков. Список "
     "music пустой — музыки в ролике нет вовсе, звучит живой звук самих видео. "
-    'Ответ — JSON вида {"plan": [{"media_id": "...", "seconds": 3.5, "accent": "..."}]}.'
+    "Рассказывай вслух, как режиссируешь: это читают все участники воспоминания, пока ролик "
+    "собирается. В overview — общая мысль о плане: на какие части разошлась история и сколько "
+    "каждая идёт, до 500 символов. На каждом куске: thought — что в кадре видишь и почему берёшь "
+    "его, до 500 символов; part и part_title — номер части истории и её название, до 80 символов; "
+    "focus — рамка, куда на кадре смотреть, долями кадра от 0 до 1 (x, y — левый верхний угол, w "
+    "и h — ширина и высота), и только там, где тебе есть что показать. Куски, которые в план не "
+    "вошли, перечисли в left_out с причиной в несколько слов, до 40 символов. "
+    'Ответ — JSON вида {"overview": "...", "plan": [{"media_id": "...", "seconds": 3.5, '
+    '"thought": "...", "part": 1, "part_title": "...", '
+    '"focus": {"x": 0.3, "y": 0.05, "w": 0.25, "h": 0.5}}], '
+    '"left_out": [{"media_id": "...", "reason": "..."}]}.'
 )
+
+# Частей в ролике единицы, а `story_part` в журнале — `integer` с `CHECK (> 0)`: номер больше
+# этого — не номер части, и база отвергла бы с ним всю реплику.
+PARTS_LIMIT = 99
+FOCUS_SIDES = ("x", "y", "w", "h")
 
 
 class AI:
@@ -387,17 +402,24 @@ class AI:
         assembled from the order's list whatever comes back: these two are the model's to plan the
         picture against, not to change (doc-03).
 
-        Returns {"plan": [{"media_id": ..., "seconds": ..., "accent": ...}]} or None.
+        Returns the plan as it can be read (`_planned`) or None:
+
+            {"overview": "...",
+             "plan": [{"media_id", "seconds", "thought", "part", "part_title", "focus"}],
+             "left_out": {media_id: "почему не взял"}}
+
+        The answer itself is kept whole in `ai_requests`; what comes back here is what survived
+        being read — the model's own words about the film, and nothing it made up.
         """
         prompt = json.dumps(
             {"story": story, "target_seconds": target_seconds, "music": list(music),
              "music_note": music_note, "shots": list(shots)},
             ensure_ascii=False,
         )
-        return self._call(
+        return _planned(self._call(
             "plan_montage", PLAN, prompt, (), ref,
             lambda provider: _as_json(provider.generate(PLAN, prompt)),
-        )
+        ))
 
     # --- the gateway itself ---
 
@@ -481,10 +503,18 @@ def _as_json(answer):
     one of those in an answer would be paid for, then break the journal's own UPDATE two lines
     later — and the retry would pay for it again. They are malformed here, like prose, and the row
     keeps the text that caused it.
+
+    `\\u0000` is the same trap and gets the other answer: `jsonb` takes no NUL either, but a whole
+    answer is not worth losing over an invisible character somebody's model put in a word. It is
+    thrown out — written out and escaped alike, because either way it is a NUL by the time the text
+    has been parsed — and the rest of the answer lives.
     """
     try:
+        answer = answer.replace("\x00", "").replace("\\u0000", "")
         parsed = json.loads(answer, parse_constant=_no_such_number)
-    except (ValueError, TypeError):  # a JSONDecodeError is a ValueError, and so is the one below
+    except (AttributeError, ValueError, TypeError):
+        # A JSONDecodeError is a ValueError, and so is the one `parse_constant` raises below; an
+        # AttributeError is an answer that is no text at all and has nothing to replace.
         parsed = None
     if not isinstance(parsed, dict):
         raise RuntimeError(f"the model did not answer with a JSON object: {str(answer)[:500]}")
@@ -493,3 +523,105 @@ def _as_json(answer):
 
 def _no_such_number(constant):
     raise ValueError(constant)
+
+
+# --- чтение плана режиссёра -------------------------------------------------
+# Ответ модели — недоверенный ввод, а слова режиссёра увидят все участники воспоминания и рамку
+# «куда смотрит» приложение нарисует поверх кадра. Поэтому план разбирается здесь, у самой двери, и
+# выше уходит только то, что выдержало чтение: шаг без куска — не шаг, часть не номером и рамка не
+# четырьмя долями внутри кадра — их просто нет. Чей кусок назван, здесь не проверить: что показали
+# модели, знает `director`, он и сверяет.
+
+
+def _planned(answered):
+    """План словами режиссёра — тем, что из него можно прочитать.
+
+    План без новых полей (записанный ответ, снятый до того, как режиссёра попросили говорить)
+    читается этим же разбором: мыслей, частей и рамок в нём просто нет, а порядок и длины — есть.
+    `accent` — старое имя мысли, и он ею и становится.
+    """
+    if answered is None:
+        return None
+    left_out = {}
+    for one in _listed(answered.get("left_out")):
+        media_id = _media_id(one)
+        if media_id:
+            left_out[media_id] = _said(one.get("reason"))
+    steps = (_step(one) for one in _listed(answered.get("plan")))
+    return {
+        "overview": _said(answered.get("overview")),
+        "plan": [step for step in steps if step],
+        "left_out": left_out,
+    }
+
+
+def _step(step):
+    """Один шаг плана: чей кусок, сколько секунд и что режиссёр о нём сказал."""
+    media_id = _media_id(step)
+    if media_id is None:
+        return None
+    return {
+        "media_id": media_id,
+        "seconds": step.get("seconds"),
+        "thought": _said(step.get("thought")) or _said(step.get("accent")),
+        "part": _part(step.get("part")),
+        "part_title": _said(step.get("part_title")),
+        "focus": _focus(step.get("focus")),
+    }
+
+
+def _media_id(step):
+    """Кусок, про который шаг, — строкой, как его назвали в вопросе. Не объект или без куска —
+    и шага нет: длина и мысль без кадра, к которому они относятся, ничьи."""
+    if not isinstance(step, dict):
+        return None
+    media_id = step.get("media_id")
+    if not isinstance(media_id, (str, int)) or isinstance(media_id, bool):
+        return None
+    return str(media_id).strip() or None
+
+
+def _said(words):
+    """Слова модели — строкой, или ничего вовсе: мысль, которую покажут людям, она либо сказала,
+    либо нет, и число или объект на её месте словами не станут. Длину держит и служебные символы
+    вычищает журнал (`journal._fit`) — всё, что модель говорит, идёт в базу через него."""
+    if not isinstance(words, str):
+        return None
+    return words.strip() or None
+
+
+def _part(number):
+    """Номер части истории — целым и небольшим, иначе никаким (`PARTS_LIMIT`)."""
+    try:
+        number = int(number)
+    except (TypeError, ValueError):
+        return None
+    return number if 1 <= number <= PARTS_LIMIT else None
+
+
+def _focus(frame):
+    """Рамка «куда смотрит» — четыре доли кадра, или ничего вовсе.
+
+    Долями, а не пикселями: приложение рисует её поверх миниатюры любого размера. Либо все четыре,
+    либо ни одной — три доли база не примет и отвергнет с ними всю реплику, — и только внутри
+    кадра: рамка, вылезающая за край, съехала бы по чужому кадру. Не сходится что угодно из этого
+    — рамки нет, а мысль остаётся: выдумка модели не стоит того, чтобы потерять её слова.
+    """
+    if not isinstance(frame, dict):
+        return None
+    try:
+        x, y, width, height = (float(frame[side]) for side in FOCUS_SIDES)
+    except (KeyError, TypeError, ValueError):
+        return None
+    # `NaN` проходит сквозь любое сравнение ложью, поэтому проверка написана «должно быть так», а
+    # не «не должно быть эдак»: рамка с ним не сходится и выбрасывается вместе с остальными.
+    if not (0 <= x and 0 <= y and 0 < width and 0 < height
+            and x + width <= 1 and y + height <= 1):
+        return None
+    return dict(zip(FOCUS_SIDES, (x, y, width, height)))
+
+
+def _listed(value):
+    """То, что пришло списком, — списком; всё остальное пусто. Строку иначе разобрало бы по
+    буквам, а каждая буква стала бы шагом плана."""
+    return value if isinstance(value, list) else []

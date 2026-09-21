@@ -1,0 +1,30 @@
+{
+  "id": "interactions/3f9a8b7c6d5e4f30",
+  "model": "gemini-3.8-flash",
+  "steps": [
+    {
+      "type": "model_output",
+      "content": [
+        {
+          "type": "text",
+          "text": "{\"overview\": \"План\\u0007 на две‮ части\\u0000\", \"plan\": [{\"media_id\": \"m-1\", \"seconds\": 3.0, \"thought\": \"стол\\u001b[31m накрывают\\nгости​ собираются\", \"part\": 0, \"part_title\": \"Сборы\", \"focus\": {\"x\": 1.4, \"y\": 0.1, \"w\": 0.3, \"h\": 0.3}}, {\"media_id\": \"m-2\", \"seconds\": 4.0, \"thought\": \"торт\", \"part\": \"2\", \"part_title\": \"Торт\", \"focus\": {\"x\": 0.9, \"y\": 0.1, \"w\": 0.4, \"h\": 0.3}}, {\"media_id\": \"m-404\", \"seconds\": 3.0, \"thought\": \"кадр, которого никому не показывали\", \"part\": 2, \"part_title\": \"Торт\", \"focus\": {\"x\": 0.1, \"y\": 0.1, \"w\": 0.2, \"h\": 0.2}}, {\"media_id\": \"m-3\", \"seconds\": \"сколько получится\", \"thought\": [\"мысль\", \"списком\"], \"part\": 3, \"part_title\": \"Собака\", \"focus\": {\"x\": \"0.1\", \"y\": 0.2, \"w\": 0.4}}], \"left_out\": \"ничего\"}"
+        }
+      ]
+    }
+  ],
+  "output_text": "{\"overview\": \"План\\u0007 на две‮ части\\u0000\", \"plan\": [{\"media_id\": \"m-1\", \"seconds\": 3.0, \"thought\": \"стол\\u001b[31m накрывают\\nгости​ собираются\", \"part\": 0, \"part_title\": \"Сборы\", \"focus\": {\"x\": 1.4, \"y\": 0.1, \"w\": 0.3, \"h\": 0.3}}, {\"media_id\": \"m-2\", \"seconds\": 4.0, \"thought\": \"торт\", \"part\": \"2\", \"part_title\": \"Торт\", \"focus\": {\"x\": 0.9, \"y\": 0.1, \"w\": 0.4, \"h\": 0.3}}, {\"media_id\": \"m-404\", \"seconds\": 3.0, \"thought\": \"кадр, которого никому не показывали\", \"part\": 2, \"part_title\": \"Торт\", \"focus\": {\"x\": 0.1, \"y\": 0.1, \"w\": 0.2, \"h\": 0.2}}, {\"media_id\": \"m-3\", \"seconds\": \"сколько получится\", \"thought\": [\"мысль\", \"списком\"], \"part\": 3, \"part_title\": \"Собака\", \"focus\": {\"x\": \"0.1\", \"y\": 0.2, \"w\": 0.4}}], \"left_out\": \"ничего\"}",
+  "usage": {
+    "input_tokens_by_modality": [
+      {
+        "modality": "text",
+        "tokens": 468
+      }
+    ],
+    "total_cached_tokens": 0,
+    "total_input_tokens": 468,
+    "total_output_tokens": 231,
+    "total_thought_tokens": 140,
+    "total_tokens": 839,
+    "total_tool_use_tokens": 0
+  }
+}
