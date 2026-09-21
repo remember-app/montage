@@ -75,6 +75,18 @@ def test_the_beats_go_round_with_a_track_shorter_than_the_montage(click):
     assert len(second) == len([moment for moment in moments if moment < SECONDS])
 
 
+def test_the_tempo_of_a_track_is_the_one_it_was_drawn_to(click):
+    """Темп дорожки — то единственное, что из ритма уходит в журнал монтажа: «подогнал под
+    «Тёплую», 100 ударов». Считается он по тем же битам, что двигают склейки, поэтому у
+    метронома в сто ударов ответ — сто; битов нет — нет и темпа, и журнал о нём молчит.
+
+    Удар-другой в минуту — не разница: биты библиотека кладёт на сетку своих окон анализа, и та
+    же сотня выходит из неё то 99, то 101. Число это показывают человеку, а не режут по нему.
+    """
+    assert abs(rhythm.tempo(rhythm.beats(click)) - round(60 / GAP)) <= 2
+    assert rhythm.tempo(()) is None
+
+
 def test_a_track_with_no_tempo_in_it_gives_no_beats(tmp_path):
     """The fallback: an even drone is not a tempo, and a rhythm must not be invented out of it."""
     drone = tmp_path / "drone.wav"

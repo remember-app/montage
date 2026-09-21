@@ -17,6 +17,7 @@ a second of CPU per track, and no signal processing of our own in the worker bec
 import bisect
 import logging
 import pathlib
+import statistics
 import tempfile
 
 import librosa
@@ -82,6 +83,21 @@ def beats(path):
     circles = max(int(HORIZON_SECONDS / length), 1)
     return tuple(float(moment) + length * circle
                  for circle in range(circles) for moment in moments)
+
+
+def tempo(moments):
+    """Темп дорожки в ударах в минуту — по тем же битам, что двигают склейки, или None, когда
+    битов нет.
+
+    Считается по медиане расстояний между соседними битами, а не по среднему: сетка повторяется
+    вместе с зациклённым треком (`beats`), и на шве круга один промежуток всегда не такой, как
+    остальные. Число идёт в журнал монтажа и больше никуда — на сборку темп не влияет, склейки
+    попадают в сами биты.
+    """
+    if len(moments) < 2:
+        return None
+    steps = [after - before for before, after in zip(moments, moments[1:]) if after > before]
+    return round(60 / statistics.median(steps)) if steps else None
 
 
 def fit(pieces, moments):

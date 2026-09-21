@@ -137,7 +137,7 @@ def length_of(pieces):
     return sum(piece.seconds for piece in pieces) - CROSSFADE_SECONDS * (len(pieces) - 1)
 
 
-def assemble(pieces, orientation, track, workdir, out):
+def assemble(pieces, orientation, track, workdir, out, on_clip=None):
     """The chosen pieces as one video at `out`, and the normalised clips it was made of.
 
     `track` is a file — the montage's whole soundtrack, however many tracks of whose it was built
@@ -149,11 +149,18 @@ def assemble(pieces, orientation, track, workdir, out):
     The clips come back because they are the only place the lengths are true: `_normalise` is asked
     for a length and the file that comes out of it is measured rather than believed, and whoever
     cuts a cover off the montage needs those measured numbers to find its opening piece in it.
+
+    `on_clip` is called with how many pieces are encoded so far, every time one more is — the one
+    thing this module tells anybody while it works, and the montage takes minutes: «склеено 12 из
+    61» on the live screen is that number and nothing else. Nothing is asked of it and nothing is
+    read back, so a caller with nothing to show simply does not pass one.
     """
     clips = []
     for index, piece in enumerate(pieces):
         clip = workdir / f"clip-{index}.mp4"
         _normalise(piece, orientation, clip, live_sound=track is None)
+        if on_clip:
+            on_clip(index + 1)
         # Measured, not the length that was asked for. `-t` cuts against the *video* stream while
         # `_duration` reads the container, which is the longest stream in it — a clip whose audio
         # outruns its picture normalises shorter than declared. `_assemble` steps the crossfade

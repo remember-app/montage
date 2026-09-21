@@ -21,6 +21,10 @@ replaceable on their own, which is what the spec asks of the montage service (do
 The first two answer the same question and hand back the same thing; the director is asked first
 and the отбор cuts the video whenever it answers None, which is every montage made today.
 
+Рассказ о сборке — журнал монтажа, который читают вживую, пока ролик собирается, — ведётся отсюда и
+только отсюда: `journal.py` умеет его записать, а **что** записать, видно по тому, что вернули
+модули. Сами они о журнале не знают, иначе замена любого из них тащила бы за собой рассказ о нём.
+
 The steps are architecture.md, «Montage-пайплайн», with one departure: selection (its step 4) runs
 before normalisation (its step 3), so only the pieces that made the cut are ever encoded to 1080p
 instead of every file the memory holds. `montages` and `media_items` belong to the api's migrations;
@@ -38,11 +42,21 @@ import urllib.request
 
 import assembly
 import director
+import journal
 import media
 import rhythm
 import selection
 
 MIN_ITEMS = 3  # «Меньше 3 → сразу failed» — the api refuses the order at this number too
+
+# Код причины, по которой кусок стоит в ролике не по чьей-то оценке, а по слову организатора:
+# «включить» из заказа. Словарь причин в журнале — воркера (README api, «Запись журнала»), и это
+# единственный код, которым отмечено взятое, а не пропущенное.
+ORGANIZER_ASKED = "included"
+
+# Как воспоминание само называет тех, кого узнало на кадрах: «человек-1», «животное-2»
+# (`ai.py`, промпт описания). Журналу они нужны только чтобы сказать, скольких этап разобрал.
+PEOPLE_LABEL, ANIMAL_LABEL = "человек", "животное"
 
 # Под каким ключом в бакете лежит трек, который организатор загрузил сам (api, `music_uploads`).
 # Тем и отличается от id трека полки в одном и том же списке `params.music_tracks`.
@@ -105,11 +119,17 @@ def montage(conn, ref):
         # is not the last word. Not a transient failure — three retries would find the same library.
         return _give_up_for_good(conn, ref, "недостаточно материала для ролика")
 
+    # Журнал сборки — до первого скачанного байта: пять этапов с оценкой времени стоят на экране с
+    # первой секунды, а рассказ о каждом дописывается по ходу (`journal.py`). Повтор того же ролика
+    # начинает журнал с чистого листа.
+    journal.begin(conn, ref, len(items), target_seconds)
+
     video_key = f"montages/{ref}.mp4"
     s3 = media.storage()
     with tempfile.TemporaryDirectory() as workdir:
         workdir = pathlib.Path(workdir)
         judged, originals = [], {}
+        journal.start(conn, ref, "screening", total=len(items))
         for index, item in enumerate(items):
             media_id, kind, original_key, preview_key, captured_at, created_at = item
             original = workdir / f"original-{index}"
@@ -124,10 +144,22 @@ def montage(conn, ref):
                 looked_at = media.large_copy(
                     s3, preview_key, workdir / f"large-{index}.jpg"
                 ) or original
-            judged.append(selection.judge(selection.Piece(
+            looked_over = selection.judge(selection.Piece(
                 media_id=str(media_id), kind=kind, path=looked_at,
                 when=captured_at or created_at, captured_at=captured_at,
-            )))
+            ))
+            judged.append(looked_over)
+            if looked_over.rejected:
+                # Запись на каждый отсеянный файл: «мимо» и код причины. Прошедшие считает итог
+                # этапа — строка на каждый годный кадр рассказу ничего не добавляет.
+                journal.entry(conn, ref, "screening", media_id=looked_over.media_id,
+                              decision="skip", reason=looked_over.rejected)
+            # По файлу, а не по всей папке разом: этап идёт минутами, и «61 из 212» на экране
+            # должно двигаться, пока он идёт.
+            journal.progress(conn, ref, "screening", index + 1)
+        no_good = collections.Counter(piece.rejected for piece in judged if piece.rejected)
+        journal.finish(conn, ref, "screening", kept=len(judged) - sum(no_good.values()),
+                       of=len(judged), reasons=dict(no_good))
 
         # The floor again, now against what survived. The count above was of rows; files drop out
         # here for being unreadable or having no usable frame in them, and three rows that come to
@@ -157,6 +189,10 @@ def montage(conn, ref):
                 "материал не годится для ролика: файлы не читаются, кадры испорчены или исключены",
             )
 
+        # Разбор кадров — то, что о них уже знает пайплайн. Ни о чём никого не спрашивает: описания
+        # пишет `understanding.py` задолго до заказа, и читаются они готовыми.
+        _what_was_seen(conn, ref, judged)
+
         # Музыка раньше режиссёра: под что собирают ролик — часть того, из чего он строит план.
         tracks, refusal = _music_files(ordered_music, s3, workdir)
         if refusal:
@@ -165,14 +201,18 @@ def montage(conn, ref):
 
         # The director first, and the отбор whenever there is no director: no cloud model, nothing
         # described for it to read, or an answer with nothing of ours in it (`director.direct`).
+        journal.start(conn, ref, "directing", total=len(judged))
         chosen = director.direct(
             conn, judged, target_seconds, include, exclude, story=story, ref=ref,
             music=_music_heard(ordered_music, tracks), music_note=music_note,
         )
+        # Решения режиссёра-нейросети — мысли, части истории, рамки — в журнал пишет TASK-202: они
+        # в самом плане, а не в том, что вернулось сюда. Здесь рассказывает о себе только отсев.
+        turned_down = None
         if chosen is None:
-            chosen, rejected = selection.choose(judged, target_seconds, include, exclude)
+            chosen, turned_down = selection.choose(judged, target_seconds, include, exclude)
             log.info("montage %s takes %s piece(s) and leaves out %s", ref, len(chosen),
-                     dict(collections.Counter(piece.rejected for piece in rejected)))
+                     dict(collections.Counter(piece.rejected for piece in turned_down)))
         if not chosen:
             # Only reachable through the order itself: everything the memory holds is on the
             # organizer's «исключить» list. There is no video to make of nothing, and the same list
@@ -186,13 +226,28 @@ def montage(conn, ref):
         # ролик набирает заказанную длину и под дорожку, и с живым звуком.
         chosen = selection.stretch(chosen, target_seconds)
 
+        if turned_down is not None:
+            _write_choices(conn, ref, chosen, turned_down, include)
+        journal.finish(conn, ref, "directing", frames=len(chosen), of=len(judged))
+
         # The pieces are chosen and in their places by now — all that is settled here is how long
         # each is held, so that the join lands on a beat. A track with no tempo leaves them as they
         # are, and so does a montage with no music at all: биты ищутся по всей собранной дорожке —
         # по всему списку треков разом, — а когда дорожки нет, куски держатся ровно так, как их
         # выбрали отсев или режиссёр.
+        journal.start(conn, ref, "rhythm", total=len(chosen))
+        moments, moved = (), 0
         if track:
-            chosen = rhythm.fit(chosen, rhythm.beats(track))
+            moments = rhythm.beats(track)
+            to_the_beat = rhythm.fit(chosen, moments)
+            moved = sum(before.seconds != after.seconds
+                        for before, after in zip(chosen, to_the_beat))
+            chosen = to_the_beat
+        # Под что подогнаны куски: треки в том порядке, в каком они играют (id полки и ключи своих,
+        # ровно как в заказе — называет их приложение), темп дорожки и сколько склеек сдвинулось.
+        # Ролик без музыки говорит это честно: список треков пуст, и подгонять было не подо что.
+        journal.finish(conn, ref, "rhythm", track=ordered_music, bpm=rhythm.tempo(moments),
+                       cuts=moved)
 
         # Which piece stands where in the video is settled by this line and nothing below moves it:
         # `_back_to_originals` swaps a file and `assembly` encodes what it is given. So the layout
@@ -205,7 +260,13 @@ def montage(conn, ref):
         chosen = _back_to_originals(chosen, originals, orientation)
 
         assembled = workdir / "montage.mp4"
-        clips = assembly.assemble(chosen, orientation, track, workdir, assembled)
+        journal.start(conn, ref, "assembly", total=len(chosen))
+        clips = assembly.assemble(
+            chosen, orientation, track, workdir, assembled,
+            # По готовому куску, а не по каждому движению ffmpeg: «склеено 12 из 61» — это всё, что
+            # сборка может рассказать о себе, пока идёт, и этого хватает.
+            on_clip=lambda done: journal.progress(conn, ref, "assembly", done),
+        )
         # The same layout again, off the clips as they were really encoded. `assemble` measures
         # every normalised piece instead of believing the length it asked for, and a clip whose
         # picture is shorter than its container claims comes back shorter — the crossfade chain is
@@ -213,6 +274,11 @@ def montage(conn, ref):
         _write_layout(conn, ref, clips)
         duration = media._duration(assembled)
         media._upload(s3, assembled, video_key, "video/mp4")
+        # Склейка кончилась там, где ролик лёг в хранилище: сколько склеек в нём и какой он длины.
+        # Обложка за этой чертой — кадр из готового файла, и ролику, у которого её не вышло взять,
+        # она не стоит ни этапа, ни минуты (ниже).
+        journal.finish(conn, ref, "assembly", cuts=max(len(clips) - 1, 0),
+                       seconds=round(duration or 0, 1))
 
         # The still the list of videos stands on, cut off the finished file with the same scale a
         # preview thumbnail gets (`media.media_preview`) — but not off frame zero. The montage opens
@@ -331,6 +397,66 @@ def _music_heard(named, files):
     ]
 
 
+@journal.quiet
+def _what_was_seen(conn, ref, judged):
+    """Этап «разбираем, что на кадрах» в журнал: описание и кто в кадре — на каждый файл, о котором
+    это уже записано.
+
+    Своей работы у этапа нет и не должно быть: кадры описывает `understanding.py` задолго до
+    заказа, по одному, и второй ролик из тех же медиа ничего не описывает заново (doc-03). Этап от
+    этого не исчезает с экрана — он честно говорит «описано 0 из 14», и это сегодняшнее состояние
+    продукта, пока ключа от модели нет (decision-10), а не пропущенный шаг.
+
+    Описание — единственное место в журнале, где стоят чужие слова, а не код: их сказала модель, и
+    приложению их только показать. Метки «что увидел» — `cast_labels` воспоминания, по ним же
+    считается, скольких людей и животных этап разобрал.
+    """
+    journal.start(conn, ref, "understanding", total=len(judged))
+    seen = conn.execute(
+        """SELECT media_id, description, cast_labels FROM media_understandings
+           WHERE media_id = ANY(%s)""",
+        ([piece.media_id for piece in judged],),
+    ).fetchall()
+    cast = set()
+    for media_id, description, labels in seen:
+        cast.update(labels or ())
+        journal.entry(conn, ref, "understanding", media_id=media_id, thought=description,
+                      labels=labels)
+    journal.finish(
+        conn, ref, "understanding", described=len(seen), of=len(judged),
+        people=sum(label.startswith(PEOPLE_LABEL) for label in cast),
+        animals=sum(label.startswith(ANIMAL_LABEL) for label in cast),
+    )
+
+
+def _write_choices(conn, ref, chosen, turned_down, include):
+    """Решения отсева в журнал: что взято в ролик, что мимо и почему.
+
+    Пишется после набора заказанной длины (`selection.stretch`): «беру 0:04–0:07» должно называть
+    тот кусок исходника, который в ролик и пойдёт, а не тот, что был до растяжки.
+
+    Серия одинаковых кадров — одна запись «взял 1 из N» на том, кто из неё остался: три строки
+    «мимо, дубль» рядом с ней рассказывают то же самое трижды, а размер серии несёт сам кусок
+    (`selection._dedup`). Слово организатора видно с обеих сторон: `excluded` на вычеркнутом,
+    `included` на том, что он велел взять.
+    """
+    for piece in chosen:
+        journal.entry(
+            conn, ref, "directing", media_id=piece.media_id, decision="take",
+            reason=ORGANIZER_ASKED if piece.media_id in include else None,
+            series_size=piece.series_size if piece.series_size > 1 else None,
+            # Фотографию держат целиком, и куска исходника у неё нет — в ролик идёт вся.
+            **({"source_from_seconds": round(piece.start, 2),
+                "source_to_seconds": round(piece.start + piece.seconds, 2)}
+               if piece.kind == "video" else {}),
+        )
+    for piece in turned_down:
+        if piece.rejected == selection.DUPLICATE:
+            continue  # его серия уже рассказана одной записью выше
+        journal.entry(conn, ref, "directing", media_id=piece.media_id, decision="skip",
+                      reason=piece.rejected)
+
+
 def _back_to_originals(chosen, originals, orientation):
     """The chosen pieces again, each photograph put back on its original where the large copy it
     was judged on is too small for the canvas.
@@ -415,6 +541,11 @@ def give_up(conn, ref, error_text):
         "UPDATE montages SET status = 'failed', error_text = %s, updated_at = now() WHERE id = %s",
         (error_text, ref),
     )
+    # Журнал остаётся как есть — до какого места ролик дошёл, видно и после падения, — а этап,
+    # который в этот момент шёл, помечается упавшим. Здесь, а не на каждом исключении по дороге:
+    # у ролика, которому очередь даст ещё две попытки, этап честнее оставить идущим, и упавшим он
+    # становится ровно тогда, когда упавшим называют сам ролик.
+    journal.failed(conn, ref)
 
 
 def _give_up_for_good(conn, ref, why):
