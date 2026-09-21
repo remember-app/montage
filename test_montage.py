@@ -78,6 +78,28 @@ def about(duration, expected):
     return abs(duration - expected) <= RHYTHM_SLACK
 
 
+BLACK = 16  # the value `selection._exposed` already counts as black
+
+
+def dimmest_edge(path):
+    """The dimmest edge in the whole file: the brightest pixel along each of a frame's four edges,
+    and the smallest of those numbers over every second of the video.
+
+    This is how a black bar is caught on the finished file instead of in the filter string that was
+    supposed to prevent it. A letterboxed montage has a whole edge row of nothing but black, so the
+    brightest pixel along it is 0; a canvas the picture fills has something in every edge. The
+    frames come from `selection`'s own 96×54 grey sampling — coarse, but a bar is a third of the
+    canvas, and the material here is a test pattern with its corners lit.
+    """
+    width = selection.SAMPLE_WIDTH
+    dimmest = 255
+    for frame in selection._grey_frames(path, per_second=selection.SAMPLE_FPS):
+        rows = [frame[at:at + width] for at in range(0, len(frame), width)]
+        edges = (rows[0], rows[-1], [row[0] for row in rows], [row[-1] for row in rows])
+        dimmest = min(dimmest, *(max(edge) for edge in edges))
+    return dimmest
+
+
 def material(conn, s3, memory, tmp_path):
     """Three photographs and a clip in the bucket, `ready`, as the previews leave them. Their ids
     come back in the order the montage reads them, for the tests that name one in the order."""
@@ -105,7 +127,8 @@ def test_a_memory_of_photos_and_a_clip_becomes_one_playable_video(conn, s3, memo
     # instead of overlapped would come to twelve, which is outside the window even with the slack.
     assert about(duration, 10.5)
 
-    assembled = probe(fetch(s3, video_key, tmp_path / "montage.mp4"))
+    assembled_file = fetch(s3, video_key, tmp_path / "montage.mp4")
+    assembled = probe(assembled_file)
     assert about(float(assembled["format"]["duration"]), 10.5)
     tracks = {stream["codec_type"]: stream for stream in assembled["streams"]}
     assert set(tracks) == {"video", "audio"}, "picture and music both landed"
@@ -114,6 +137,9 @@ def test_a_memory_of_photos_and_a_clip_becomes_one_playable_video(conn, s3, memo
     assert (tracks["video"]["width"], tracks["video"]["height"]) == (1920, 1080), (
         "an order that says nothing about orientation is the horizontal canvas, as it always was"
     )
+    # And the vertical clip in that material (1280×1440) fills the horizontal canvas instead of
+    # standing between two black bars: it is cropped to the canvas, not padded into it.
+    assert dimmest_edge(assembled_file) > BLACK, "чёрные поля по краям горизонтального ролика"
 
     # And the cover beside it, on the same row — the list of videos shows a still, not a black
     # rectangle, before anyone presses play.
@@ -196,11 +222,11 @@ def test_a_music_file_that_will_not_open_fails_the_montage_instead_of_retrying(
 
 def test_a_montage_ordered_portrait_is_assembled_the_other_way_up(conn, s3, memory, tmp_path):
     """The organizer asked for a video to watch on a phone. The same material, the same length, the
-    same everything else — padded into 1080×1920 instead of 1920×1080. The numbers are written out
+    same everything else — cut into 1080×1920 instead of 1920×1080. The numbers are written out
     here rather than read off `assembly.CANVASES`, which is the thing under test."""
     montage_id = order(conn, memory, {"target_seconds": 30, "orientation": "portrait"})
     # Stills 1200×800 and a clip 1280×1440 — material shot both ways round, and the portrait canvas
-    # pads every piece of it rather than cropping any.
+    # crops every piece of it to itself rather than padding any into it.
     material(conn, s3, memory, tmp_path)
     worker.enqueue(conn, "montage", montage_id)
 
@@ -210,9 +236,12 @@ def test_a_montage_ordered_portrait_is_assembled_the_other_way_up(conn, s3, memo
     assert (status, error_text) == ("ready", None)
     assert about(duration, 10.5), "turning the canvas does not change what goes in it"
 
-    assembled = probe(fetch(s3, video_key, tmp_path / "portrait.mp4"))
-    tracks = {stream["codec_type"]: stream for stream in assembled["streams"]}
+    assembled_file = fetch(s3, video_key, tmp_path / "portrait.mp4")
+    tracks = {stream["codec_type"]: stream for stream in probe(assembled_file)["streams"]}
     assert (tracks["video"]["width"], tracks["video"]["height"]) == (1080, 1920)
+    # The real size is only half of it: a vertical file made of horizontal stills is exactly where
+    # black bars are burnt in, and 1080×1920 is 1080×1920 with or without them.
+    assert dimmest_edge(assembled_file) > BLACK, "чёрные поля по краям вертикального ролика"
 
     # The cover too: it is cut from the assembled file at the thumbnail width and keeps that file's
     # own shape, so a vertical montage gets a vertical cover with nobody deciding it should. The one
