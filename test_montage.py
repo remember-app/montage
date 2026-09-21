@@ -10,6 +10,8 @@ R2_ENDPOINT points at.
 """
 
 import json
+import re
+import subprocess
 import uuid
 
 import pytest
@@ -338,6 +340,184 @@ def test_a_music_file_that_will_not_open_fails_the_montage_instead_of_retrying(
     status, _, _, error_text = read_montage(conn, montage_id)
     assert status == "failed"
     assert "трек" in error_text
+
+
+# --- список треков, и пустой список -----------------------------------------
+
+
+def tone(path, seconds=3.0, frequency=880):
+    """Секунды слышимого звука — трек, который в собранной дорожке ни с чем не спутаешь."""
+    ffmpeg("-f", "lavfi", "-i", f"sine=frequency={frequency}:duration={seconds}", str(path))
+    return path
+
+
+def hush(path, seconds=3.0):
+    """Столько же тишины — второй трек, слышный ровно наоборот: по нему и видно порядок."""
+    ffmpeg("-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", "-t", str(seconds), str(path))
+    return path
+
+
+def loudness(path, at, seconds=1.2):
+    """Насколько громко звучит кусочек файла: `mean_volume` в децибелах, как его считает ffmpeg.
+    Тишина — около −91 дБ (или −inf), живой звук и музыка — на десятки децибел громче."""
+    done = subprocess.run(
+        ("ffmpeg", "-nostdin", "-y", "-ss", str(at), "-t", str(seconds), "-i", str(path),
+         "-af", "volumedetect", "-f", "null", "-"),
+        capture_output=True, text=True, check=True,
+    )
+    (mean,) = re.findall(r"mean_volume: (\S+) dB", done.stderr)
+    return float(mean)
+
+
+def test_the_tracks_of_an_order_become_one_soundtrack_in_the_order_they_were_given(tmp_path):
+    """Список любой длины — одна дорожка: треки идут друг за другом в заданном порядке, стык
+    проходит коротким фейдом, и дорожка выходит короче суммы ровно на него. Порядок проверяется
+    звуком: первым отдан тон, вторым тишина, и в дорожке громкое стоит впереди тихого — собранная
+    задом наперёд, она звучала бы наоборот."""
+    tracks = [tone(tmp_path / "tone.wav"), hush(tmp_path / "hush.wav")]
+
+    soundtrack = assembly.one_track(tracks, tmp_path)
+
+    assert float(probe(soundtrack)["format"]["duration"]) == pytest.approx(
+        6.0 - assembly.TRACK_FADE_SECONDS, abs=0.2
+    )
+    assert loudness(soundtrack, at=0.2) > loudness(soundtrack, at=3.6) + 30, (
+        "треки в дорожке идут не в том порядке, в каком их заказали"
+    )
+    # И два вырожденных случая: собирать нечего, и собирать не из чего.
+    assert assembly.one_track(tracks[:1], tmp_path) is tracks[0], "один трек незачем пересобирать"
+    assert assembly.one_track([], tmp_path) is None, "пустой список — это «без музыки»"
+
+
+def test_a_montage_under_a_list_of_tracks_is_cut_to_the_beat_of_the_whole_soundtrack(
+    conn, s3, memory, tmp_path
+):
+    """Свой трек и трек полки вперемешку: воркер склеивает их в одну дорожку и ищет ритм по ней —
+    склейки идут в такт всему списку, а не первому файлу из него.
+
+    Проверяется на последней склейке, как и под одним загруженным треком: за ней стоит последний
+    кусок, которого подгонка не касается, и его длина известна — 2,5 секунды, которые держится
+    фотография. Биты берутся у дорожки, собранной здесь же и из тех же двух файлов: это ровно та,
+    под которую собрали ролик.
+    """
+    track_key = f"music/{uuid.uuid4()}.wav"
+    s3.upload_file(str(click_track(tmp_path / "click.wav")), media.bucket(), track_key)
+    montage_id = order(conn, memory, {"target_seconds": 30, "music_tracks": [track_key, "warm"]})
+    # Клип первым (он старше всех), чтобы ролик закрывала фотография: её длина известна и подгонка
+    # ритма последний кусок не трогает. Набирать заказанные тридцать секунд тут нечем — клип и так
+    # взят целиком, а фотографии не растягиваются (`selection.stretch`).
+    _, key = add_item(conn, memory, "video", status="ready", age_hours=5)
+    s3.upload_file(str(video(tmp_path / "clip.mp4")), media.bucket(), key)
+    for index in range(3):
+        _, key = add_item(conn, memory, "photo", status="ready")
+        s3.upload_file(str(photo(tmp_path / f"photo-{index}.jpg")), media.bucket(), key)
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    status, video_key, duration, error_text = read_montage(conn, montage_id)
+    assert (status, error_text) == ("ready", None)
+    assembled = {stream["codec_type"] for stream in probe(
+        fetch(s3, video_key, tmp_path / "montage.mp4")
+    )["streams"]}
+    assert assembled == {"video", "audio"}, "картинка и музыка обе на месте"
+
+    soundtrack = assembly.one_track([tmp_path / "click.wav", assembly.track_file("warm")], tmp_path)
+    beats = rhythm.beats(soundtrack)
+    assert beats, "в дорожке из метронома и музыки есть темп, иначе проверять нечего"
+    last_join = duration - selection.PHOTO_SECONDS + assembly.CROSSFADE_SECONDS / 2
+    assert min(abs(last_join - beat) for beat in beats) < 0.1, (
+        f"последняя склейка, на {last_join:.2f}, не попала в бит дорожки"
+    )
+    assert abs(duration - 9.0) > 0.2, "куски тянули к битам, а не оставили как выбрали"
+
+
+def test_an_order_with_no_music_at_all_keeps_the_live_sound_of_the_videos(
+    conn, s3, memory, tmp_path
+):
+    """Пустой список — «без музыки», и тогда ролик звучит сам собой: у клипов остаётся их
+    собственный звук, фотографии молчат (макет MontageMusicNone, «Только живой звук из видео»).
+    Клип тут новее всех, поэтому стоит в конце ролика: конец должен звучать, начало — нет.
+
+    Ритма в таком ролике нет вовсе — подгонять склейки не подо что, и куски держатся ровно столько,
+    сколько им дали отсев и набор заказанной длины: три фотографии по 2,5 секунды и трёхсекундный
+    клип, минус полсекунды на каждую из трёх склеек. Заказанные тридцать секунд набрать нечем —
+    клип и так взят целиком, а фотографии не растягиваются, — так что длина тут ровная и видно,
+    что куски никто не двигал. Под музыку те же четыре файла дают другую длину (тест выше).
+    """
+    montage_id = order(conn, memory, {"target_seconds": 30, "music_tracks": []})
+    for index in range(3):
+        _, key = add_item(conn, memory, "photo", status="ready", age_hours=5 - index)
+        s3.upload_file(str(photo(tmp_path / f"photo-{index}.jpg")), media.bucket(), key)
+    _, key = add_item(conn, memory, "video", status="ready")  # новее всех → последним в ролике
+    s3.upload_file(str(video(tmp_path / "clip.mp4")), media.bucket(), key)
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    status, video_key, duration, error_text = read_montage(conn, montage_id)
+    assert (status, error_text) == ("ready", None)
+    assert duration == pytest.approx(9.0, abs=0.3), "без музыки куски никто не двигал"
+
+    assembled = fetch(s3, video_key, tmp_path / "montage.mp4")
+    sound = [stream for stream in probe(assembled)["streams"] if stream["codec_type"] == "audio"]
+    assert [stream["codec_name"] for stream in sound] == ["aac"], "дорожка одна, и она есть"
+    assert loudness(assembled, at=7.2) > loudness(assembled, at=0.5) + 30, (
+        "в конце ролика должен звучать клип, а в начале — молчать фотография"
+    )
+
+
+def mute_clip(path, seconds=3.0):
+    """Клип, снятый с выключенным микрофоном: картинка есть, звуковой дорожки нет вовсе."""
+    ffmpeg("-f", "lavfi", "-i", f"testsrc=size=640x480:rate=24:duration={seconds}",
+           "-c:v", "libx264", "-pix_fmt", "yuv420p", str(path))
+    return path
+
+
+def test_without_music_every_piece_gets_a_track_even_when_it_has_nothing_to_say(tmp_path):
+    """Звук ролика без музыки склеивается тем же перехлёстом, что и картинка, а склеивать
+    что-то с ничем нельзя: дорожка есть у каждого куска — у клипа своя, у фотографии и у клипа,
+    снятого без звука, тишина той же формы и той же длины."""
+    silent_ones = (
+        ("фотография", selection.Piece(kind="photo", seconds=2.0, path=photo(tmp_path / "p.jpg"))),
+        ("немой клип", selection.Piece(kind="video", seconds=2.0,
+                                       path=mute_clip(tmp_path / "mute.mp4"))),
+        ("клип со звуком", selection.Piece(kind="video", seconds=2.0,
+                                           path=video(tmp_path / "loud.mp4"))),
+    )
+    for name, piece in silent_ones:
+        clip = tmp_path / f"clip-{len(name)}.mp4"
+        assembly._normalise(piece, "landscape", clip, live_sound=True)
+
+        normalised = probe(clip)
+        assert {stream["codec_type"] for stream in normalised["streams"]} == {"video", "audio"}, (
+            f"у куска «{name}» нет звуковой дорожки — сборке нечего будет склеивать"
+        )
+        assert float(normalised["format"]["duration"]) == pytest.approx(2.0, abs=0.15), (
+            f"кусок «{name}» вышел не той длины, и склейки разъедутся на эту разницу"
+        )
+
+
+def test_what_the_order_says_about_music_is_read_the_old_way_too():
+    """Форма заказа: список треков, пустой список — «без музыки», и заказ старой формы, в котором
+    списка нет вовсе. Последнее и есть повтор упавшего ролика: он лежит в базе так, как его
+    записали до списков, и собраться должен как собирался — свой трек, трек полки или «тёплая» по
+    умолчанию."""
+    assert montage._ordered_music({"music_tracks": ["warm", "music/abc"]}) == (
+        ["warm", "music/abc"], None
+    )
+    assert montage._ordered_music({"music_tracks": []}) == ([], None)
+
+    assert montage._ordered_music({}) == ([assembly.DEFAULT_TRACK], None)
+    assert montage._ordered_music({"music_track_id": "calm"}) == (["calm"], None)
+    assert montage._ordered_music({"music_track_key": "music/abc", "music_track_id": "calm"}) == (
+        ["music/abc"], None
+    ), "ключ своего трека сильнее id полки, как и было"
+
+    named, refusal = montage._ordered_music({"music_tracks": ["warm", "polka"]})
+    assert named is None and "polka" in refusal
+    named, refusal = montage._ordered_music({"music_track_id": "polka"})
+    assert named is None and "polka" in refusal
 
 
 def test_a_montage_ordered_portrait_is_assembled_the_other_way_up(conn, s3, memory, tmp_path):

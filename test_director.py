@@ -132,6 +132,30 @@ def test_two_stories_over_the_same_material_are_two_different_films(described):
     assert STORY in asked(first) and "про собаку" in asked(second)
 
 
+def test_the_music_and_what_the_organizer_asked_of_it_go_to_the_director(described):
+    """Под что соберут ролик — часть того, из чего режиссёр строит план: треки по порядку, длина
+    каждого и пожелания организатора его же словами. Дорожку от этого никто не перекраивает — она
+    собрана до вопроса; в запросе она для того, чтобы под неё лёг порядок и длина кусков.
+
+    И то и другое обязано оказаться в журнале запросов: запрос к модели сохраняется целиком
+    (doc-03, «все запросы обязательно сохраняются»), а прочитать, почему ролик вышел таким, можно
+    только там.
+    """
+    _, net = directed(
+        described, story=STORY,
+        music=[{"track": "warm", "seconds": 121.0}, {"track": "свой трек", "seconds": 48.2}],
+        music_note="торт поставь под припев второго трека",
+    )
+
+    question = asked(net)
+    assert "warm" in question and "48.2" in question, "дорожка ушла не по порядку или без длин"
+    assert "под припев второго трека" in question
+    (request,), = described.execute(
+        "SELECT request FROM ai_requests WHERE operation = 'plan_montage'"
+    ).fetchall()
+    assert "под припев второго трека" in request["prompt"] and "warm" in request["prompt"]
+
+
 def test_what_is_said_in_a_clip_goes_to_the_director_too(conn):
     """A transcript is written once and read from then on (doc-03) — and this is the reader."""
     describe(conn, "m-1", "накрывают на стол", speech="Ну что, все собрались?")

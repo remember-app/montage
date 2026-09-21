@@ -39,12 +39,16 @@ SPEECH_CHARACTERS = 400
 log = logging.getLogger("montage.director")
 
 
-def direct(conn, pieces, target_seconds, include=(), exclude=(), story="", ref=None, brain=None):
+def direct(conn, pieces, target_seconds, include=(), exclude=(), story="", ref=None, brain=None,
+           music=(), music_note=""):
     """The film the model plans out of these pieces — or None, and then nobody directed anything.
 
     `pieces` are judged (`selection.judge`), `include`/`exclude` are the organizer's two lists from
-    the order and `story` is what they said the video is about. `brain` is for the tests; the worker
-    takes the gateway the environment gives it.
+    the order and `story` is what they said the video is about. `music` is what will play under the
+    video — the tracks in the order they play and how long each runs — and `music_note` is what the
+    organizer asked be done with them, in their own words; the soundtrack itself is assembled from
+    the order's list either way, so both are here to be read and not to be obeyed. `brain` is for
+    the tests; the worker takes the gateway the environment gives it.
     """
     brain = brain or ai.AI(conn)
     if brain.provider is None:
@@ -72,7 +76,7 @@ def direct(conn, pieces, target_seconds, include=(), exclude=(), story="", ref=N
 
     planned = brain.plan_montage(
         [_shot(piece, known, include) for piece in candidates.values()],
-        story=story, target_seconds=target_seconds, ref=ref,
+        story=story, target_seconds=target_seconds, music=music, music_note=music_note, ref=ref,
     )
     log.info("montage %s: the director's plan is %s", ref, planned)
 
