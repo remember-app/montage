@@ -1,4 +1,5 @@
-"""The `media_preview` job, and the hourly sweep of uploads that were never finished.
+"""The `media_preview` and `media_frame_info` jobs, and the hourly sweep of uploads that were never
+finished.
 
 The api writes a `media_items` row, takes the bytes into R2 and queues the job; from `processing`
 onward the row is this worker's (see the api's migration `004.do.media.sql`). Here the original is
@@ -9,14 +10,22 @@ is left `ready` with the derivative keys on it.
 `media_items` belongs to the api's migrations. This module only reads and writes rows by id.
 """
 
+import collections
+import json
 import logging
 import os
 import pathlib
+import re
 import subprocess
 import tempfile
 
 import boto3
+import pi_heif
 from botocore.config import Config
+from PIL import ExifTags, Image
+
+# HEIC is what an iPhone uploads, and Pillow opens it only once this is said (`_photo_info`).
+pi_heif.register_heif_opener()
 
 STALE_UPLOAD_HOURS = 24  # a day in `pending_upload` means the phone is not coming back
 
@@ -227,6 +236,11 @@ def media_preview(conn, ref):
     if kind == "video":
         conn.execute("INSERT INTO jobs (type, ref) VALUES ('media_speech', %s)", (ref,))
 
+    # And what the camera itself wrote into the original — its model, the optics, the place. The
+    # sheet «Сведения о кадре» shows all three long before any video is ordered, and reading them
+    # is `media_frame_info` below.
+    conn.execute("INSERT INTO jobs (type, ref) VALUES ('media_frame_info', %s)", (ref,))
+
     # And straight on to what is in it: the frame is describable the moment the copies exist, and
     # the director wants it described long before anybody orders a video (`understanding.py`). The
     # row is inserted here rather than through `worker.enqueue` because the worker imports this
@@ -272,6 +286,142 @@ def give_up(conn, ref):
         "WHERE id = %s AND status <> 'ready'",
         (ref,),
     )
+
+
+# --- the camera and the place -----------------------------------------------
+# The two lines «Камера» and «Место» of the sheet «Сведения о кадре» (doc-02, the layout in
+# `design/screens/SheetFrameInfo.html`), read out of the file the phone uploaded and written onto
+# the row for the api to hand out — exactly as `thumbnail_key` is (the api's migration
+# `100.do.frame-info.sql`). Nothing here is computed: what the camera did not write down stays null.
+
+FrameInfo = collections.namedtuple(
+    "FrameInfo", "camera_model focal_length_mm aperture latitude longitude"
+)
+NOTHING = FrameInfo(None, None, None, None, None)  # a file that says nothing about either
+
+# ±DD.DDDD±DDD.DDDD±AAA.AAA/ — how a phone writes down where a clip was shot (ISO 6709). The third
+# number is the altitude, which nobody asks for.
+# ponytail: decimal degrees only. The standard also allows ±DDMM.MM, and a camera that writes it
+# that way would land here as no place at all — add it when one turns up.
+ISO6709 = re.compile(r"([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)")
+
+
+def _number(value):
+    """A number as EXIF holds it — a rational, as a rule. None when the tag is not there at all,
+    and when what is in it will not become a number."""
+    try:
+        return float(value)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def _degrees(value, hemisphere):
+    """One EXIF coordinate: degrees, minutes and seconds in one tag, north or south in another."""
+    parts = [_number(part) for part in value] if isinstance(value, tuple) else []
+    if len(parts) != 3 or None in parts:
+        return None
+    degrees = parts[0] + parts[1] / 60 + parts[2] / 3600
+    return -degrees if str(hemisphere or "").strip().upper() in ("S", "W") else degrees
+
+
+def _photo_info(path):
+    """A photograph's own EXIF — HEIC off an iPhone as readily as JPEG.
+
+    Read by a library and not by ffprobe, which is otherwise this module's every answer about a
+    file: ffmpeg hands EXIF over from version 8 onward, and out of HEIC not at all before it, so
+    whether the sheet had a camera line would depend on which ffmpeg the host happens to carry.
+    """
+    try:
+        with Image.open(path) as photo:
+            exif = photo.getexif()
+            model = exif.get(ExifTags.Base.Model)
+            optics = exif.get_ifd(ExifTags.IFD.Exif)
+            place = exif.get_ifd(ExifTags.IFD.GPSInfo)
+    except (OSError, ValueError, SyntaxError, Image.DecompressionBombError) as exc:
+        # Not a picture this library knows — and `kind` is only the phone's word for the file.
+        # Nothing to read is not a failure: the frame keeps its five empty columns like any other.
+        log.info("nothing to read a camera off: %s", exc)
+        return NOTHING
+    return FrameInfo(
+        # EXIF keeps the make («Apple») in a tag of its own — «iPhone 15 Pro» is the model alone.
+        camera_model=str(model or "").strip() or None,
+        focal_length_mm=_number(optics.get(ExifTags.Base.FocalLength)),
+        # The f-number, so that 1.8 is what the app puts on screen as «f/1.8».
+        aperture=_number(optics.get(ExifTags.Base.FNumber)),
+        latitude=_degrees(place.get(ExifTags.GPS.GPSLatitude),
+                          place.get(ExifTags.GPS.GPSLatitudeRef)),
+        longitude=_degrees(place.get(ExifTags.GPS.GPSLongitude),
+                           place.get(ExifTags.GPS.GPSLongitudeRef)),
+    )
+
+
+def _clip_info(path):
+    """A clip's own tags, off the container: the camera and the place, which a phone writes there,
+    and nothing about the optics, which it writes nowhere. Nothing is decoded for these."""
+    tags = json.loads(_run(
+        "ffprobe", "-v", "error", "-protocol_whitelist", "file",
+        "-show_entries", "format_tags", "-of", "json", str(path),
+    )).get("format", {}).get("tags", {})
+    # An iPhone keeps both under its own names; ffmpeg gives Android's place as a plain `location`.
+    place = tags.get("com.apple.quicktime.location.ISO6709") or tags.get("location")
+    where = ISO6709.match(place.strip()) if place else None
+    return NOTHING._replace(
+        camera_model=(tags.get("com.apple.quicktime.model") or tags.get("model") or "").strip()
+                     or None,
+        latitude=float(where[1]) if where else None,
+        longitude=float(where[2]) if where else None,
+    )
+
+
+def frame_info(path, kind):
+    """What the camera left in the file, and None in place of everything it left out. Most material
+    carries none of it: a screenshot, a frame re-saved by an editor, anything that came through a
+    messenger.
+
+    The place is the coordinates and stays the coordinates. Turning them into «Усадьба Остафьево»
+    takes an outside geocoder — a paid service, a registration, and a trip to the network with
+    somebody's whereabouts in the query; whether the product wants a name at all is the chief's
+    question and not one to guess at here (TASK-191).
+    """
+    return _clip_info(path) if kind == "video" else _photo_info(path)
+
+
+def media_frame_info(conn, ref):
+    """One media item: the original out of R2, what its camera wrote down onto the row.
+
+    A job of its own rather than one more step of `media_preview`, because the job row is what
+    remembers that this file has been read. Five nulls is a perfectly ordinary answer — most
+    material carries no metadata at all — and it looks exactly like a file nobody has opened yet,
+    so a catch-up that went by the columns would fetch and probe half the library every hour, for
+    as long as the worker runs.
+    """
+    row = conn.execute(
+        "SELECT kind, original_key FROM media_items WHERE id = %s", (ref,)
+    ).fetchone()
+    if row is None:
+        # Deleted while the job waited — a member left and took their material with them. Nothing
+        # to read and nothing wrong: retrying would only fail three times.
+        log.info("media item %s is gone, nothing to read a camera off", ref)
+        return
+    kind, original_key = row
+
+    with tempfile.TemporaryDirectory() as workdir:
+        original = pathlib.Path(workdir) / "original"
+        storage().download_file(bucket(), original_key, str(original))
+        # These bytes came off somebody's phone and ffprobe is about to be pointed at them: the
+        # same guard the preview puts in front of ffmpeg, for the same reason.
+        _refuse_playlists(original)
+        info = frame_info(original, kind)
+
+    conn.execute(
+        """UPDATE media_items
+           SET camera_model = %s, focal_length_mm = %s, aperture = %s,
+               latitude = %s, longitude = %s, updated_at = now()
+           WHERE id = %s""",
+        (*info, ref),
+    )
+    found = {name: value for name, value in info._asdict().items() if value is not None}
+    log.info("media item %s: %s", ref, found or "the file says nothing about camera or place")
 
 
 # --- the sweep --------------------------------------------------------------

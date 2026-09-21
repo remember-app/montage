@@ -65,6 +65,7 @@ def dummy(conn, ref):
 HANDLERS = {
     "dummy": dummy,
     "media_preview": media.media_preview,
+    "media_frame_info": media.media_frame_info,
     "media_screening": screening.media_screening,
     "media_speech": speech.transcribe,
     "media_understanding": understanding.media_understanding,
@@ -119,6 +120,31 @@ def sweep_photos_without_previews(conn):
     queued = _catch_up(conn, "media_preview", "item.kind = 'photo' AND item.preview_key IS NULL")
     if queued:
         log.info("queued a large copy for %s photo(s) that had none", queued)
+    return queued
+
+
+def sweep_media_without_frame_info(conn):
+    """Ready material nobody has read the camera and the place off yet, given the job that reads.
+
+    Everything taken in before the worker learned to read them is like this: `media_preview` queues
+    the job as an item goes `ready`, and for old material that moment is long past. The original is
+    still in the bucket, so this costs the member nothing.
+
+    What says «this file has been read» is the job and not the columns: a frame whose camera wrote
+    nothing down keeps five nulls and is indistinguishable from an unread one, so a sweep that went
+    by the columns would fetch and probe most of the library once an hour forever. Hence the
+    condition below — anything but a job that failed, which `_catch_up` gives one more go a day
+    later like every other catch-up here.
+    """
+    queued = _catch_up(
+        conn, "media_frame_info",
+        """NOT EXISTS (
+             SELECT 1 FROM jobs looked
+             WHERE looked.type = 'media_frame_info' AND looked.ref = item.id::text
+               AND looked.status <> 'failed')""",
+    )
+    if queued:
+        log.info("queued a camera and a place for %s ready item(s) that had none", queued)
     return queued
 
 
@@ -180,7 +206,8 @@ def sweep_media_without_ai_answers(conn):
 
 
 SWEEPS = (media.sweep_stale_uploads, sweep_photos_without_previews,
-          sweep_media_without_screening, sweep_media_without_ai_answers)
+          sweep_media_without_frame_info, sweep_media_without_screening,
+          sweep_media_without_ai_answers)
 
 
 # --- the loop ---------------------------------------------------------------
