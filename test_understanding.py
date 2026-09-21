@@ -188,7 +188,7 @@ def test_without_a_cloud_model_nothing_is_described_and_nobody_is_asked(
     assert described(conn, item_id) is None
     assert conn.execute("SELECT count(*) FROM ai_requests").fetchone()[0] == 0, \
         "the gateway was never entered, so it has nothing to journal"
-    assert worker.sweep_media_without_understanding(conn) == 0, \
+    assert worker.sweep_media_without_ai_answers(conn) == 0, \
         "nor is the whole library queued every hour to be told the same thing"
 
 
@@ -214,10 +214,55 @@ def test_the_sweep_picks_up_media_that_was_ready_before_there_was_anybody_to_ask
     model("gemini_describe.json")
     item_id = ready_media(conn, s3, memory, photo(tmp_path / "preview.jpg"))
 
-    worker.sweep_media_without_understanding(conn)
+    worker.sweep_media_without_ai_answers(conn)
     assert queued_understanding_for(conn, item_id) == 1
     assert worker.run_once(conn) is True
     assert described(conn, item_id) is not None
 
-    worker.sweep_media_without_understanding(conn)
+    worker.sweep_media_without_ai_answers(conn)
     assert queued_understanding_for(conn, item_id) == 0, "an hour later it is not asked for again"
+
+
+def test_the_sweep_picks_up_frames_the_model_refused_to_describe(
+    conn, s3, memory, tmp_path, monkeypatch
+):
+    """The live case this catch-up was written for: a free-tier account answering «429» to every
+    call. Three attempts go in a minute, the job is `failed` for good, and nothing else will ever
+    come for that frame — ordering a video describes nothing, it only reads what is in the tables.
+
+    So the sweep comes back for it. Not the same hour, though: a model that refuses refuses every
+    frame, and asking again an hour later is three paid calls an hour per frame for as long as the
+    worker runs. A day later, once — by which time the account's limit has rolled over, or the
+    human has bought a bigger one.
+    """
+    over_the_limit = [True]
+
+    def answering_429(request):
+        if over_the_limit[0]:
+            raise RuntimeError("HTTP Error 429: Too Many Requests")
+        return (FIXTURES / "gemini_describe.json").read_bytes()
+
+    item_id = ready_media(conn, s3, memory, photo(tmp_path / "preview.jpg"))
+    monkeypatch.setattr(
+        ai, "from_env", lambda *_, **__: ai.Gemini("test-key", transport=answering_429)
+    )
+
+    worker.sweep_media_without_ai_answers(conn)
+    assert queued_understanding_for(conn, item_id) == 1
+    for _ in range(worker.MAX_ATTEMPTS):
+        conn.execute("UPDATE jobs SET run_after = now() WHERE ref = %s", (item_id,))
+        assert worker.run_once(conn) is True
+    assert described(conn, item_id) is None
+
+    worker.sweep_media_without_ai_answers(conn)
+    assert queued_understanding_for(conn, item_id) == 0, "an hour later it is not asked all over"
+
+    conn.execute(
+        "UPDATE jobs SET updated_at = now() - make_interval(hours => %s) WHERE ref = %s",
+        (worker.CATCH_UP_AFTER_HOURS + 1, item_id),
+    )
+    worker.sweep_media_without_ai_answers(conn)
+    assert queued_understanding_for(conn, item_id) == 1, "the day after, it is given one more go"
+    over_the_limit[0] = False  # the paid tier is on: the refused frame is described for real
+    assert worker.run_once(conn) is True
+    assert described(conn, item_id)[0].startswith("Женщина")

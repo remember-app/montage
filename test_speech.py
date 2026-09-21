@@ -164,6 +164,78 @@ def test_a_clip_that_went_away_while_the_model_listened_leaves_no_words_behind(
     assert stored(conn, item_id) is None
 
 
+def only_speech_jobs_for(conn, item_id):
+    """Whatever else this database holds is not this test's business — the sweep is over the whole
+    table, and a dev stand's own clips would otherwise be queued into the run."""
+    conn.execute("DELETE FROM jobs WHERE ref IS DISTINCT FROM %s", (item_id,))
+    return conn.execute(
+        "SELECT count(*) FROM jobs WHERE type = 'media_speech' AND ref = %s AND status = 'queued'",
+        (item_id,),
+    ).fetchone()[0]
+
+
+def test_the_sweep_catches_up_a_clip_nobody_wrote_the_words_of(
+    conn, s3, memory, tmp_path, monkeypatch
+):
+    """A clip that became ready before there was a key, or whose transcription ran out of attempts:
+    nothing else will ever come for it, and the original is still in the bucket. Once written down,
+    it is not asked for again — the words are kept and reused (doc-03)."""
+    item_id = ready_clip(conn, s3, memory, tmp_path)
+    listens(monkeypatch, Recorded("gemini_transcribe.json"))
+
+    worker.sweep_media_without_ai_answers(conn)
+    assert only_speech_jobs_for(conn, item_id) == 1
+    worker.sweep_media_without_ai_answers(conn)
+    assert only_speech_jobs_for(conn, item_id) == 1, "the job on its way is left to finish"
+
+    assert worker.run_once(conn) is True
+    assert stored(conn, item_id) is not None
+
+    worker.sweep_media_without_ai_answers(conn)
+    assert only_speech_jobs_for(conn, item_id) == 0, "an hour later it is not asked for again"
+
+
+def test_the_sweep_does_not_go_on_asking_about_a_clip_it_has_given_up_on(
+    conn, memory, monkeypatch
+):
+    """An original that is not in the bucket at all — or a model refusing every call. Either way the
+    third attempt gives up, and the next hour's sweep leaves it given up on: re-asking hourly is a
+    download and three paid calls an hour per clip for as long as the worker runs. A day later it is
+    tried once, because an hour of unreachable storage or a limit that rolls over must not cost a
+    memory its transcripts for good."""
+    item_id, _ = add_item(conn, memory, "video", status="ready")
+    listens(monkeypatch, Recorded("gemini_transcribe.json"))
+
+    worker.sweep_media_without_ai_answers(conn)
+    assert only_speech_jobs_for(conn, item_id) == 1
+    for _ in range(worker.MAX_ATTEMPTS):
+        conn.execute("UPDATE jobs SET run_after = now() WHERE ref = %s", (item_id,))
+        assert worker.run_once(conn) is True
+    assert stored(conn, item_id) is None
+
+    worker.sweep_media_without_ai_answers(conn)
+    assert only_speech_jobs_for(conn, item_id) == 0, "an hour later it is not asked all over again"
+
+    conn.execute(
+        "UPDATE jobs SET updated_at = now() - make_interval(hours => %s) WHERE ref = %s",
+        (worker.CATCH_UP_AFTER_HOURS + 1, item_id),
+    )
+    worker.sweep_media_without_ai_answers(conn)
+    assert only_speech_jobs_for(conn, item_id) == 1, "the day after, it is given one more go"
+
+
+def test_without_a_cloud_model_the_sweep_queues_nothing_and_says_nothing(
+    conn, s3, memory, tmp_path
+):
+    """Today's state, and the state of any stand whose owner has not bought a key: there is nobody
+    to ask, so there is nothing to do — not the whole library queued every hour for every job of it
+    to answer the same thing."""
+    item_id = ready_clip(conn, s3, memory, tmp_path)
+
+    assert worker.sweep_media_without_ai_answers(conn) == 0
+    assert only_speech_jobs_for(conn, item_id) == 0
+
+
 @pytest.mark.parametrize("kind, queued", [("video", 1), ("photo", 0)])
 def test_a_video_that_became_ready_queues_its_own_transcription(
     conn, s3, memory, tmp_path, kind, queued
