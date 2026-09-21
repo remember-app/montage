@@ -320,6 +320,9 @@ PLAN = (
     "Ты режиссёр монтажа. Из описанных кусков материала собери план ролика: какие куски войдут, в "
     "каком порядке, сколько секунд каждый и чем он важен. Держись истории, если она задана, и "
     "укладывайся в запрошенную длину. Кусок, помеченный must_include, обязан войти в план. "
+    "Под ролик играет музыка из music — треки подряд, в этом порядке и такой длины; в music_note "
+    "пожелания организатора, как их использовать, — учитывай их в порядке и длине кусков. Список "
+    "music пустой — музыки в ролике нет вовсе, звучит живой звук самих видео. "
     'Ответ — JSON вида {"plan": [{"media_id": "...", "seconds": 3.5, "accent": "..."}]}.'
 )
 
@@ -369,7 +372,8 @@ class AI:
             lambda provider: provider.transcribe(audio),
         )
 
-    def plan_montage(self, shots, story="", target_seconds=None, ref=None):
+    def plan_montage(self, shots, story="", target_seconds=None, music=(), music_note="",
+                     ref=None):
         """The order of the film: which piece, for how long, and what it is there for.
 
         `shots` is what may go into the montage, one dict per piece — `media_id` and whatever is
@@ -377,10 +381,17 @@ class AI:
         out is simply not in this list: the surest way for it not to be in the plan is for the
         model never to see it.
 
+        `music` is the montage's soundtrack as it will actually sound — the tracks in the order
+        they play and how long each of them runs, empty when the order asked for no music at all —
+        and `music_note` is the organizer's own word on what to do with them. The soundtrack is
+        assembled from the order's list whatever comes back: these two are the model's to plan the
+        picture against, not to change (doc-03).
+
         Returns {"plan": [{"media_id": ..., "seconds": ..., "accent": ...}]} or None.
         """
         prompt = json.dumps(
-            {"story": story, "target_seconds": target_seconds, "shots": list(shots)},
+            {"story": story, "target_seconds": target_seconds, "music": list(music),
+             "music_note": music_note, "shots": list(shots)},
             ensure_ascii=False,
         )
         return self._call(

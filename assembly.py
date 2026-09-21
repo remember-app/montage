@@ -32,6 +32,13 @@ FPS = 30
 
 CROSSFADE_SECONDS = 0.5
 MUSIC_FADE_SECONDS = 1.5
+TRACK_FADE_SECONDS = 1.0  # стык двух соседних треков заказа в одной дорожке
+
+# Тишина под кусок, которому нечем звучать, — фотография и клип, снятый без звука. Нужна только
+# ролику без музыки: там дорожка ролика склеивается из дорожек кусков, а склеить что-то с ничем
+# нельзя. 44,1 кГц стерео — то же, во что приводится и живой звук клипов: так стыкуются все куски.
+SAMPLE_RATE = 44100
+SILENCE = f"anullsrc=r={SAMPLE_RATE}:cl=stereo"
 
 # The library: the five tracks of the «Под что монтировать» screen
 # (`design/screens/MontageMusic.html`), in its order and under its names — «Яркая», «Тёплая»,
@@ -84,6 +91,47 @@ def publish_tracks(s3=None):
     return published
 
 
+def one_track(tracks, workdir):
+    """Треки заказа одной дорожкой: один за другим в заданном порядке, стык — короткий фейд.
+
+    `tracks` — готовые файлы, и чей какой (полки или свой, загруженный организатором) здесь уже
+    неразличимо, как и везде ниже по сборке. Пустой список — это заказ «без музыки»: ответ None, и
+    тогда звук ролика собирается из самих клипов. Один трек отдаётся файлом как есть: перекодировать
+    его, чтобы склеить сам с собой, не с чем.
+
+    Дальше эта дорожка живёт как любой трек — в ней ищется ритм и она подгоняется под длину ролика
+    (короче ролика — играет с начала ещё раз, длиннее — обрывается вместе с картинкой).
+    """
+    if len(tracks) < 2:
+        return tracks[0] if tracks else None
+    # Перехлёст не длиннее половины самого короткого трека: acrossfade смешивает две дорожки
+    # внахлёст, и перехлёст длиннее того, что смешивается, — это уже не стык. Длина, которой файл
+    # не назвал, считается достаточной: узнать её больше неоткуда, а фейд в секунду переживёт любая
+    # музыка.
+    shortest = min((media._duration(track) or TRACK_FADE_SECONDS * 2) for track in tracks)
+    fade = max(min(TRACK_FADE_SECONDS, shortest / 2), 0.1)
+
+    inputs, chain = [], []
+    for index, track in enumerate(tracks):
+        # `-protocol_whitelist` — входная опция, и ffmpeg относит её к тому входу, перед которым
+        # она стоит: у каждого трека свой, как у каждого клипа в `_assemble`.
+        inputs += ["-protocol_whitelist", "file", "-i", str(track)]
+        # Треки разные — mp3 полки и что угодно, что загрузил организатор, — а acrossfade склеивает
+        # только одинаковое. Отсюда общий формат на входе каждого.
+        chain.append(
+            f"[{index}:a]aformat=sample_rates={SAMPLE_RATE}:channel_layouts=stereo[t{index}]"
+        )
+    label = "t0"
+    for index in range(1, len(tracks)):
+        chain.append(f"[{label}][t{index}]acrossfade=d={fade:.3f}[j{index}]")
+        label = f"j{index}"
+
+    out = workdir / "track.m4a"
+    media._ffmpeg(*inputs, "-filter_complex", ";".join(chain), "-map", f"[{label}]",
+                  "-c:a", "aac", "-b:a", "192k", str(out))
+    return out
+
+
 def length_of(pieces):
     """How long these pieces run once crossfaded — each join eats half a second of the total."""
     return sum(piece.seconds for piece in pieces) - CROSSFADE_SECONDS * (len(pieces) - 1)
@@ -92,8 +140,11 @@ def length_of(pieces):
 def assemble(pieces, orientation, track, workdir, out):
     """The chosen pieces as one video at `out`, and the normalised clips it was made of.
 
-    `track` is a file — one of the library's own or the one the organizer uploaded. Which of the two
-    it is was settled before this module was called, and nothing here can tell them apart.
+    `track` is a file — the montage's whole soundtrack, however many tracks of whose it was built
+    (`one_track`). Which of them came out of the library and which the organizer uploaded was
+    settled before this module was called, and nothing here can tell them apart. `None` is the
+    order that asked for no music at all, and then the video keeps the clips' own sound (doc-03,
+    «Без музыки ролик идёт с живым звуком самих видео»).
 
     The clips come back because they are the only place the lengths are true: `_normalise` is asked
     for a length and the file that comes out of it is measured rather than believed, and whoever
@@ -102,7 +153,7 @@ def assemble(pieces, orientation, track, workdir, out):
     clips = []
     for index, piece in enumerate(pieces):
         clip = workdir / f"clip-{index}.mp4"
-        _normalise(piece, orientation, clip)
+        _normalise(piece, orientation, clip, live_sound=track is None)
         # Measured, not the length that was asked for. `-t` cuts against the *video* stream while
         # `_duration` reads the container, which is the longest stream in it — a clip whose audio
         # outruns its picture normalises shorter than declared. `_assemble` steps the crossfade
@@ -115,7 +166,7 @@ def assemble(pieces, orientation, track, workdir, out):
     return clips
 
 
-def _normalise(piece, orientation, out):
+def _normalise(piece, orientation, out, live_sound=False):
     """One piece onto this montage's canvas: 1080p the way it was ordered, 30 fps, cropped, silent.
 
     The canvas is built here rather than held as a constant because it belongs to the order and not
@@ -133,6 +184,11 @@ def _normalise(piece, orientation, out):
 
     Silent because the finished video's only sound is the track (architecture.md: «звук исходных
     клипов по умолчанию убираем»), which also makes every clip's audio identical by having none.
+    `live_sound` is the one order that says otherwise — no music, so the video sounds like the
+    videos in it: a clip keeps its own track and everything with nothing to say (a photograph, a
+    clip shot silent) gets silence of the same shape, because `_assemble` joins the clips' sound
+    with the same crossfade as their picture and there is nothing to crossfade a missing stream
+    with.
 
     A photograph is decoded, scaled and cropped **once** and then held: `loop` re-emits the one
     frame that came out of the crop for as long as the piece runs. Looping the *input* instead
@@ -156,16 +212,33 @@ def _normalise(piece, orientation, out):
         canvas = f"{fitted},fps={FPS},format=yuv420p"
         opened = ("-ss", f"{piece.start}", "-t", f"{piece.seconds}", "-i", str(piece.path))
         cut = ()
+    added, sound = (), ("-an",)
+    if live_sound:
+        its_own = piece.kind == "video" and _has_sound(piece.path)
+        # `-shortest` для клипа, которому дописали тишину: она бесконечна, и без него кодировался
+        # бы бесконечный кусок. Фотографию всё равно кончает её собственный `-t`.
+        added = () if its_own else ("-f", "lavfi", "-i", SILENCE)
+        sound = ("-map", "0:v", "-map", "0:a" if its_own else "1:a", "-c:a", "aac", "-b:a", "128k",
+                 "-ar", str(SAMPLE_RATE), "-ac", "2", "-shortest")
     media._ffmpeg(
-        *opened, "-vf", canvas, *cut, "-an",
+        *opened, *added, "-vf", canvas, *cut, *sound,
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", str(out),
     )
 
 
+def _has_sound(path):
+    """Есть ли в файле звуковая дорожка вообще. Клип, снятый с выключенным микрофоном, — обычное
+    дело, и на попытку взять у него звук ffmpeg отвечает ошибкой, а не тишиной."""
+    return bool(media._run(
+        "ffprobe", "-v", "error", "-protocol_whitelist", "file", "-select_streams", "a:0",
+        "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(path),
+    ).strip())
+
+
 def _assemble(clips, track, out):
-    """The normalised clips into one file: crossfaded end to end, the track faded over the top."""
+    """The normalised clips into one file: crossfaded end to end, and the sound with them — the
+    track faded over the top, or the clips' own sound when the order asked for no music."""
     total = length_of(clips)
-    fade = min(MUSIC_FADE_SECONDS, total / 3)
 
     # Each xfade joins everything built so far to the next clip, starting half a second before the
     # chain ends — so the chain grows by the clip's length minus the overlap, which is `length_of`.
@@ -177,11 +250,32 @@ def _assemble(clips, track, out):
             f"duration={CROSSFADE_SECONDS}:offset={offset:.3f}[v{index}]"
         )
         label, ends_at = f"v{index}", offset + clip.seconds
-    music = len(clips)  # the track is the input after the last clip
-    chain.append(
-        f"[{music}:a]afade=t=in:st=0:d={fade:.3f},"
-        f"afade=t=out:st={total - fade:.3f}:d={fade:.3f}[a]"
-    )
+    # A single clip is never crossfaded, so there is no filter output to map — the input itself is
+    # the video, and it is named the way ffmpeg names inputs rather than filter outputs.
+    video = f"[{label}]" if len(clips) > 1 else "0:v"
+
+    music = ()
+    if track is None:
+        # Живой звук: дорожки кусков склеиваются тем же перехлёстом, что и картинки. acrossfade
+        # накладывает конец одной на начало следующей ровно так, как xfade накладывает кадры, —
+        # поэтому звук и изображение остаются вместе, а не расходятся на каждой склейке.
+        joined = "0:a"
+        for index in range(1, len(clips)):
+            chain.append(f"[{joined}][{index}:a]acrossfade=d={CROSSFADE_SECONDS}[a{index}]")
+            joined = f"a{index}"
+        audio = f"[{joined}]" if len(clips) > 1 else "0:a"
+    else:
+        fade = min(MUSIC_FADE_SECONDS, total / 3)
+        # A track shorter than the montage is played again from the top (`-stream_loop -1`), a
+        # longer one is cut off with the picture, because `-shortest` is down below. Either way the
+        # music never has to be told how long to play: the montage is cut to the material, not to
+        # the track. `-protocol_whitelist` is the track's own, like every clip's below.
+        music = ("-protocol_whitelist", "file", "-stream_loop", "-1", "-i", str(track))
+        chain.append(
+            f"[{len(clips)}:a]afade=t=in:st=0:d={fade:.3f},"  # the track is the input after the
+            f"afade=t=out:st={total - fade:.3f}:d={fade:.3f}[a]"  # last clip
+        )
+        audio = "[a]"
 
     # `-protocol_whitelist` is an *input* option: ffmpeg scopes it to the group it precedes, so the
     # one `media._ffmpeg` puts at the front guards input 0 and nothing else. This is the worker's
@@ -193,16 +287,11 @@ def _assemble(clips, track, out):
         for argument in ("-protocol_whitelist", "file", "-i", str(clip.path))
     ]
     media._ffmpeg(
-        *inputs, "-protocol_whitelist", "file",
-        # A track shorter than the montage is played again from the top (`-stream_loop -1`), a
-        # longer one is cut off with the picture, because `-shortest` is down below. Either way the
-        # music never has to be told how long to play: the montage is cut to the material, not to
-        # the track.
-        "-stream_loop", "-1", "-i", str(track),
-        "-filter_complex", ";".join(chain),
-        # A single clip is never crossfaded, so there is no filter output to map — the input itself
-        # is the video, and it is named the way ffmpeg names inputs rather than filter outputs.
-        "-map", f"[{label}]" if len(clips) > 1 else "0:v", "-map", "[a]",
+        *inputs, *music,
+        # Один кусок без музыки — единственный случай, когда склеивать нечего ни там, ни там, и
+        # цепочки фильтров нет вовсе: пустую ffmpeg не берёт.
+        *(("-filter_complex", ";".join(chain)) if chain else ()),
+        "-map", video, "-map", audio,
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-shortest", str(out),
     )
