@@ -23,7 +23,9 @@ import media
 # order (`params.orientation`). Landscape by default: the finished video leaves the app through
 # «поделиться» and 16:9 is what plays everywhere; portrait is the same 1080p turned on its side, for
 # a montage meant to be watched on the phone it was shot on. Either way material shot the other way
-# round is padded into the chosen canvas rather than cropped to it.
+# round fills the canvas and loses its edges to it, rather than keeping all of itself inside black
+# bars (человек, 2026-09-21) — a video is watched, and bars burnt into the file stay there
+# everywhere it is ever played.
 CANVASES = {"landscape": (1920, 1080), "portrait": (1080, 1920)}
 DEFAULT_ORIENTATION = "landscape"  # what an order that says nothing about orientation means
 FPS = 30
@@ -114,19 +116,28 @@ def assemble(pieces, orientation, track, workdir, out):
 
 
 def _normalise(piece, orientation, out):
-    """One piece onto this montage's canvas: 1080p the way it was ordered, 30 fps, padded, silent.
+    """One piece onto this montage's canvas: 1080p the way it was ordered, 30 fps, cropped, silent.
 
     The canvas is built here rather than held as a constant because it belongs to the order and not
     to the module — but every clip of one montage is normalised with the same `orientation`, which
     `_assemble`'s crossfades require: xfade joins two streams of one size or nothing.
+
+    A piece shaped unlike the canvas is scaled until it covers the whole of it (`increase`) and the
+    overflow is cut off the edges, centred — the way a vertical video is made of horizontal material
+    everywhere it is watched. The alternative is bars burnt into the file, and those are in it for
+    good. Centred because nothing here knows where the picture is: the crop is blind to what it
+    cuts, and moving it towards a face is `understanding`'s knowledge, not this module's.
+
+    `force_divisible_by=2` keeps the scaled size even: the crop makes the output exact either way,
+    but an odd intermediate is a size yuv420p has no chroma plane for.
 
     Silent because the finished video's only sound is the track (architecture.md: «звук исходных
     клипов по умолчанию убираем»), which also makes every clip's audio identical by having none.
     """
     width, height = CANVASES[orientation]
     canvas = (
-        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={FPS},format=yuv420p"
+        f"scale={width}:{height}:force_original_aspect_ratio=increase:force_divisible_by=2,"
+        f"crop={width}:{height},setsar=1,fps={FPS},format=yuv420p"
     )
     if piece.kind == "photo":
         opened = ("-loop", "1", "-t", f"{piece.seconds}", "-i", str(piece.path))
