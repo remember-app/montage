@@ -154,6 +154,81 @@ def test_a_memory_of_photos_and_a_clip_becomes_one_playable_video(conn, s3, memo
     assert selection._exposed(selection._grey_frames(poster_file)[0])
 
 
+def layout_of(conn, montage_id):
+    """Which frames the montage is made of and where each of them stands in it, in the order they
+    are shown — `montage_frames`, the table the frame sheet's «в каких роликах» is answered from."""
+    if conn.execute("SELECT to_regclass('montage_frames')").fetchone()[0] is None:
+        pytest.skip("montage_frames is missing — run the api's migrations first (see README.md)")
+    return conn.execute(
+        """SELECT media_id::text, start_seconds, duration_seconds
+           FROM montage_frames WHERE montage_id = %s ORDER BY start_seconds""",
+        (montage_id,),
+    ).fetchall()
+
+
+def test_the_finished_montage_says_where_in_it_each_frame_it_took_stands(
+    conn, s3, memory, tmp_path
+):
+    """Every piece of the assembled video has its second and its length written down, and the one
+    the organizer struck out has nothing written down at all — «Сведения о кадре» shows a frame the
+    videos it is in and where, and a frame that is in none of them shows none (doc-02).
+
+    Checked against the video that was actually made rather than against numbers named here: the
+    pieces are pulled to the beat of the track, so what any of them is held for is the rhythm's to
+    decide — but they must add up, join by join, to the file that came out of it.
+    """
+    ids = material(conn, s3, memory, tmp_path)
+    montage_id = order(conn, memory, {"target_seconds": 30, "exclude_media_ids": [ids[0]]})
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    status, _, duration, error_text = read_montage(conn, montage_id)
+    assert (status, error_text) == ("ready", None)
+    layout = layout_of(conn, montage_id)
+    assert [media_id for media_id, _, _ in layout] == ids[1:], (
+        "не те кадры или не в том порядке: у вошедших запись есть, у исключённого — нет"
+    )
+    assert layout[0][1] == 0.0, "the video opens on its first piece"
+    # Each piece begins where the one before it ends, less the half-second the two of them share.
+    for (_, start, seconds), (_, next_start, _) in zip(layout, layout[1:]):
+        assert next_start == pytest.approx(start + seconds - assembly.CROSSFADE_SECONDS)
+    # And the last of them ends with the video itself: the layout is of this file, not of a plan
+    # that was made before it was encoded.
+    assert layout[-1][1] + layout[-1][2] == pytest.approx(duration, abs=0.2)
+
+
+def test_a_montage_assembled_again_replaces_its_layout_instead_of_doubling_it(conn, memory):
+    """Re-ordering the same video writes its layout a second time, and the first one has to go with
+    it: a frame that was dropped from the remake would otherwise still say it stands in it, and one
+    that stayed would be listed twice.
+
+    Straight at the writing, with pieces made up here: what a remake is, as far as this table is
+    concerned, is one more run of it under the same montage id — and assembling two whole videos to
+    see that costs minutes of ffmpeg for one `delete`.
+    """
+    montage_id = order(conn, memory, {"target_seconds": 30})
+    dropped, _ = add_item(conn, memory, "photo", status="ready")
+    kept, _ = add_item(conn, memory, "photo", status="ready")
+
+    montage._write_layout(conn, montage_id, [selection.Piece(media_id=dropped, seconds=3.0)])
+    montage._write_layout(conn, montage_id, [selection.Piece(media_id=kept, seconds=4.0)])
+
+    assert layout_of(conn, montage_id) == [(kept, 0.0, 4.0)]
+
+
+def test_a_layout_that_cannot_be_written_does_not_cost_the_montage(conn, memory):
+    """The video is the thing; its layout is a line in a sheet about one frame. Minutes of encoding
+    are not thrown away because an insert did not land, so a write that fails is a warning in the
+    log — and the connection is still good afterwards, or the montage would die on the next
+    statement instead of on this one."""
+    gone = str(uuid.uuid4())  # no `montages` row, so both foreign keys refuse the rows
+
+    montage._write_layout(conn, gone, [selection.Piece(media_id=str(uuid.uuid4()), seconds=3.0)])
+
+    assert layout_of(conn, gone) == []
+
+
 def click_track(path, gap=1.6):
     """Thirty seconds of metronome: one click every 1.6 seconds. The tempo is known because it was
     put there, and it is deliberately slow — under a track like this the pieces stretch visibly, and
