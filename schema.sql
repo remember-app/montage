@@ -1,7 +1,7 @@
 -- The montage worker's own tables: the shared job queue, the journal of what was asked of the cloud
 -- model, and what the model said about each frame. The API only inserts rows into `jobs` and never
 -- touches the other two.
--- Idempotent on purpose: `python worker.py init` applies it on every start-up of a new database.
+-- Idempotent on purpose: `python -m montage init` applies it on every start-up of a new database.
 
 CREATE TABLE IF NOT EXISTS jobs (
     id          bigserial   PRIMARY KEY,

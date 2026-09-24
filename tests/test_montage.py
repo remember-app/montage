@@ -506,3 +506,36 @@ def test_a_montage_whose_memory_was_deleted_leaves_the_queue_quietly(conn):
         "SELECT status, last_error FROM jobs WHERE id = %s", (job_id,)
     ).fetchone()
     assert (status, last_error) == ("done", None)
+
+
+def test_a_memory_deleted_mid_assembly_takes_the_video_back_out_of_the_bucket(
+    conn, s3, memory, tmp_path, monkeypatch
+):
+    """И вторая половина того же обещания: удаление застало сборку уже идущей.
+
+    Задачу, взятую в работу, снять некому — она дописывает ролик и заливает его, и только потом
+    видит, что записать результат некуда. Ключи в бакете к этому моменту уже есть, а назвать их
+    больше нечему: строки, которая на них ссылалась, нет. Значит, убирает их сама задача, иначе
+    удалённое воспоминание оставляет за собой оплачиваемый мусор навсегда.
+    """
+    montage_id = order(conn, memory, {"target_seconds": 30, "music_track_id": "warm"})
+    ready_material(conn, s3, memory, tmp_path)
+    worker.enqueue(conn, "montage", montage_id)
+
+    # Организатор удаляет воспоминание ровно тогда, когда собранный файл лёг в хранилище.
+    uploaded = []
+    lands = storage.upload
+
+    def land_and_delete(client, path, key, content_type):
+        lands(client, path, key, content_type)
+        uploaded.append(key)
+        conn.execute("DELETE FROM montages WHERE id = %s", (montage_id,))
+
+    monkeypatch.setattr(storage, "upload", land_and_delete)
+
+    assert worker.run_once(conn) is True, "задача закончилась, а не упала"
+
+    assert uploaded, "ролик вообще дошёл до хранилища — иначе тест проверяет пустоту"
+    for key in uploaded:
+        with pytest.raises(s3.exceptions.ClientError):
+            s3.head_object(Bucket=storage.bucket(), Key=key)

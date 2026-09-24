@@ -32,8 +32,6 @@ PHOTO_PREVIEW_SCALE = (
     ":force_original_aspect_ratio=decrease:force_divisible_by=2"
 )
 
-log = logging.getLogger("montage.media")
-
 log = logging.getLogger("montage.media.preview")
 
 
