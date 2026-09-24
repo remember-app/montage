@@ -1033,6 +1033,37 @@ def test_the_floor_counts_the_pieces_the_organizer_asked_for_too(conn, s3, memor
     assert about(duration, 6.5), "all three went in: three stills, less half a second for each join"
 
 
+def test_no_montage_runs_past_the_ceiling_whatever_the_organizer_asked_for_and_the_beats_did(
+    conn, s3, memory, tmp_path, monkeypatch
+):
+    """The ten-minute edge on a real file, at a ceiling lowered to eight seconds: what is asked is
+    whether the edge holds, not whether ten minutes can be encoded. Five stills, every one marked
+    «включить», come to 10.5 seconds, and a fast metronome pulls their joins about on top of that.
+    The video is cut from its tail to the ceiling — the stills that stay are the first ones, in
+    their order — and the file ffprobe reads runs no longer than it."""
+    monkeypatch.setattr(selection, "MAX_SECONDS", 8.0)
+    track_key = f"music/{uuid.uuid4()}.wav"
+    s3.upload_file(str(click_track(tmp_path / "click.wav", gap=0.43)), media.bucket(), track_key)
+    ids = []
+    for index in range(5):
+        item_id, key = add_item(conn, memory, "photo", status="ready", age_hours=5 - index)
+        s3.upload_file(str(photo(tmp_path / f"photo-{index}.jpg")), media.bucket(), key)
+        ids.append(item_id)
+    montage_id = order(conn, memory, {"target_seconds": 30, "music_track_key": track_key,
+                                      "include_media_ids": ids})
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    status, video_key, duration, error_text = read_montage(conn, montage_id)
+    assert (status, error_text) == ("ready", None)
+    seconds = float(probe(fetch(s3, video_key, tmp_path / "m.mp4"))["format"]["duration"])
+    assert duration <= 8.0 and seconds <= 8.0, f"the file runs {seconds}s past the ceiling"
+    assert seconds == pytest.approx(8.0, abs=0.1), "cut short of the ceiling rather than to it"
+    layout = [media_id for media_id, _, _ in layout_of(conn, montage_id)]
+    assert layout == ids[:len(layout)] and len(layout) < len(ids), "not cut from the tail"
+
+
 def test_a_photo_the_organizer_marked_exclude_stays_out_of_the_video(conn, s3, memory, tmp_path):
     """The other half of the same word from the organizer, on material the algorithm is perfectly
     happy with: a photo named in «исключить» is not in the video, and the rest of the material
@@ -1213,6 +1244,25 @@ def test_a_montage_of_hundreds_of_pieces_is_assembled_without_ffmpeg_running_out
     assert len(clips) == len(pieces)
     assembled = probe(out)
     assert float(assembled["format"]["duration"]) == pytest.approx(assembly.length_of(clips), abs=0.5)
+    assert {stream["codec_type"] for stream in assembled["streams"]} == {"video", "audio"}
+
+
+def test_a_plan_that_ends_on_the_ceiling_does_not_come_out_frames_past_it(tmp_path, monkeypatch):
+    """Every clip is encoded to the nearest frame of what it was asked for, and the beats ask for
+    lengths that are no whole number of frames: 2.52 seconds is 75.6 of them and comes out as 76.
+    Five such stills planned to end on a ceiling of 10.6 seconds come out two frames past it, and
+    those frames are cut off the file rather than left in it. The canvas is a stamp, as above."""
+    monkeypatch.setitem(assembly.CANVASES, "landscape", (128, 72))
+    still = photo(tmp_path / "still.jpg")
+    pieces = [selection.Piece(kind="photo", seconds=2.52, path=still) for _ in range(5)]
+    out = tmp_path / "capped.mp4"
+
+    clips = assembly.assemble(pieces, "landscape", tone(tmp_path / "track.wav", seconds=20),
+                              tmp_path, out, max_seconds=10.6)
+
+    assert assembly.length_of(clips) > 10.6, "the frames did not add up past the ceiling"
+    assembled = probe(out)
+    assert float(assembled["format"]["duration"]) <= 10.6
     assert {stream["codec_type"] for stream in assembled["streams"]} == {"video", "audio"}
 
 

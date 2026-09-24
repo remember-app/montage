@@ -402,6 +402,54 @@ def test_nothing_that_was_left_out_comes_back_to_fill_the_length():
     }
 
 
+# --- ten minutes, the edge of any video --------------------------------------
+# «Включить», the director and the beats can each carry a video past the ceiling; `cap` is the one
+# place it is held, after all of them (`montage.py`). That the beats do is `test_rhythm.py`'s, and
+# that the file itself comes out no longer is `test_montage.py`'s.
+
+
+def test_everything_the_organizer_asked_for_goes_in_up_to_ten_minutes_and_no_further():
+    """Four hundred photographs, every one marked «включить»: spent before anything else and weighed
+    against nothing, they come to 800.5 seconds. Ten minutes is the edge of any video all the same —
+    the first three hundred stay in their own order, the three-hundredth is held two seconds so the
+    video ends on the ceiling, and the hundred after it come off the end."""
+    material = [at(number * 10, 50, media_id=f"p{number}") for number in range(400)]
+
+    chosen, _ = selection.choose(material, 600, include=[piece.media_id for piece in material])
+    video = selection.cap(chosen)
+
+    assert assembly.length_of(chosen) == 800.5, "«включить» did not take the video past the ceiling"
+    assert assembly.length_of(video) == selection.MAX_SECONDS
+    assert video[:-1] == chosen[:299]
+    assert video[-1] == dataclasses.replace(chosen[299], seconds=2.0)
+
+
+def test_a_clip_that_crosses_ten_minutes_is_cut_around_its_best_moment_and_what_is_past_it_goes():
+    """The piece that crosses the ceiling is held shorter whatever it is — a clip the way `cut_to`
+    cuts any clip, around the moment it was chosen for — and a piece that would only begin past the
+    ceiling is not in the video at all."""
+    stills = [at(number * 10, 50, media_id=f"p{number}") for number in range(299)]  # 598.5 s
+    tail = clip(3000, 50, media_id="v")  # four seconds out of the middle of a minute-long file
+    late = at(3010, 50, media_id="late")
+
+    video = selection.cap([*stills, tail, late])
+
+    assert [piece.media_id for piece in video] == [*(piece.media_id for piece in stills), "v"]
+    assert (video[-1].seconds, video[-1].start) == (2.0, 29.0)
+    assert assembly.length_of(video) == selection.MAX_SECONDS
+
+
+@pytest.mark.parametrize("photos", [3, 300])
+def test_a_video_inside_ten_minutes_is_left_exactly_as_it_was(photos):
+    """Short of the ceiling, or ending on it exactly — three hundred stills ordered for ten minutes
+    (above) — nothing comes off and nothing is held any shorter."""
+    material = [at(number * 10, 50, media_id=f"p{number}") for number in range(photos)]
+    chosen, _ = selection.choose(material, ceiling(material))
+    video = selection.stretch(chosen, ceiling(material))
+
+    assert selection.cap(video) == video
+
+
 # --- judging a frame ---------------------------------------------------------
 # `choose`'s own tests hand it a sharpness directly and never touch the arithmetic that produces
 # one. These do: tiny grey frames built by hand, the same size ffmpeg hands `_sharpness`/`_exposed`

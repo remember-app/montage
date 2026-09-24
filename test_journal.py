@@ -189,12 +189,12 @@ def test_the_journal_is_read_from_another_connection_while_the_montage_is_still_
     before, after = [], []
     assembling = assembly.assemble
 
-    def watched(pieces, orientation, track, workdir, out, on_clip=None):
+    def watched(pieces, orientation, track, workdir, out, on_clip=None, **kwargs):
         def watching(done):
             on_clip(done)
             after.append(from_another_connection(montage_id))
         before.append(from_another_connection(montage_id))
-        return assembling(pieces, orientation, track, workdir, out, on_clip=watching)
+        return assembling(pieces, orientation, track, workdir, out, on_clip=watching, **kwargs)
 
     monkeypatch.setattr(assembly, "assemble", watched)
     worker.enqueue(conn, "montage", montage_id)

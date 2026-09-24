@@ -221,3 +221,24 @@ def test_a_ten_minute_order_keeps_the_length_it_was_stretched_to_under_a_beat_gr
     assert assembly.length_of(fitted) == pytest.approx(600, abs=600 * 0.05)
     for cut in joins(fitted):
         assert min(abs(cut - moment) for moment in moments) < 1e-6, f"the join at {cut} misses"
+
+
+def test_a_ten_minute_order_under_a_fast_track_still_ends_on_ten_minutes():
+    """Three hundred stills ordered for the ceiling come to 600 seconds exactly, and under a hundred
+    and forty beats a minute the grid pulls their joins the same way, one after another, until the
+    video runs some forty seconds long. Ten minutes is the edge of any video: `selection.cap` takes
+    off the tail what the beats put on, and every join left in the video is still on a beat."""
+    material = [at(number * 10, 50, media_id=f"p{number}") for number in range(300)]
+    chosen, _ = selection.choose(material, 600)
+    gap = 60 / 140
+    moments = tuple(gap * beat for beat in range(1, int(rhythm.HORIZON_SECONDS / gap)))
+
+    fitted = rhythm.fit(selection.stretch(chosen, 600), moments)
+    video = selection.cap(fitted)
+
+    assert assembly.length_of(fitted) > selection.MAX_SECONDS, "the beats did not take it past"
+    assert assembly.length_of(video) <= selection.MAX_SECONDS
+    assert assembly.length_of(video) == pytest.approx(selection.MAX_SECONDS)
+    assert video[:-1] == fitted[:len(video) - 1], "something ahead of the cut moved"
+    for cut in joins(video):
+        assert min(abs(cut - moment) for moment in moments) < 1e-6, f"the join at {cut} misses"

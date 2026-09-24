@@ -294,8 +294,9 @@ def choose(pieces, target_seconds, include=(), exclude=()):
 
     `include` and `exclude` are the organizer's own two lists of media ids, from the order, and they
     beat the algorithm in both directions. An excluded file is never in the video, however sharp it
-    is. An included one is always in it, blurred or dark or both — the only thing that word cannot
-    overrule is a file with no frame in it at all, which is not a judgement but an absence. What the
+    is. An included one is always in it, blurred or dark or both — the only things that word cannot
+    overrule are a file with no frame in it at all, which is not a judgement but an absence, and the
+    ten minutes no video runs past, which `cap` holds after every step that could cross it. What the
     included pieces take is spent before anything else is chosen, so the rest of the material fits
     into the time left rather than crowding them out.
     """
@@ -394,6 +395,32 @@ def stretch(pieces, target_seconds):
         missing -= grown
     return [cut_to(piece, seconds) if seconds > piece.seconds else piece
             for piece, seconds in zip(pieces, lengths)]
+
+
+def cap(pieces):
+    """The same pieces in the same order, cut from the tail to the ten minutes no video runs past.
+
+    Every step before this one can carry a video over `MAX_SECONDS`: «включить» is spent whatever
+    it costs (`choose`), the director puts back what its plan left out, and under a fast track the
+    beats pull every join of a ten-minute video the same way (`rhythm.fit`). Ten minutes is a hard
+    edge and not a wish, so it is held once, after all of them: whole pieces come off the end while
+    the ones before them already reach the ceiling, and the piece that crosses it is held shorter —
+    a clip cut around its best moment like any other, a still for less than its 2.5 seconds.
+    Everything ahead of that is left exactly as it was.
+    """
+    before = assembly.length_of(pieces)
+    if before <= MAX_SECONDS:
+        return list(pieces)
+    kept = list(pieces)
+    while assembly.length_of(kept[:-1]) >= MAX_SECONDS:
+        kept.pop()
+    last = kept[-1]
+    kept[-1] = cut_to(last, last.seconds - (assembly.length_of(kept) - MAX_SECONDS))
+    log.warning("the video runs %.1fs, past the %.0fs no video may run: cutting it to %.1fs — "
+                "%s piece(s) off the tail, the last held %.2fs instead of %.2fs", before,
+                MAX_SECONDS, assembly.length_of(kept), len(pieces) - len(kept), kept[-1].seconds,
+                last.seconds)
+    return kept
 
 
 def _room(piece):
