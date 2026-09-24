@@ -505,6 +505,18 @@ def test_the_parts_of_the_story_are_the_parts_the_video_has():
     assert montage._story_parts(thoughts) == {"parts": 2, "part_titles": ["Сборы", "Торт"]}
 
 
+def test_the_titles_in_the_directors_outcome_are_cleaned_like_the_entries():
+    """Названия частей — слова модели, а итог этапа видят все участники, как и реплики: в итог они
+    идут той же чисткой и тем же потолком, иначе служебный символ и простыня текста, отсечённые
+    у реплики, въехали бы на экран «Ролик готов» через итог."""
+    thoughts = [{"media_id": "a", "decision": "take", "story_part": 1,
+                 "story_part_title": "Сборы‮\nи\u0007 " + "я" * 200}]
+
+    (title,) = montage._story_parts(thoughts)["part_titles"]
+
+    assert title.startswith("Сборы и я") and len(title) == journal.TITLE_CHARACTERS
+
+
 def test_service_characters_in_the_models_words_do_not_reach_the_journal(conn, memory):
     """Мысль модели увидят все участники воспоминания, а сказана она недоверенным ртом: перевод
     строки, управляющий символ, невидимая метка, разворачивающая текст, — всё это в рассказе о

@@ -495,11 +495,14 @@ def _story_parts(thoughts):
     первым разошёлся бы с ним. И только по взятым: «3 части, 61 кадр» — про ролик, и часть, ни один
     кадр которой не влез в заказанную длину, в нём не стоит. Частей нет вовсе — ролик резал отсев,
     или в плане их не было, — и итог о них молчит: отсутствующий ключ экран просто не рисует.
+
+    Названия — слова модели, и в итог они идут той же чисткой и тем же потолком, что в реплику
+    (`journal._fit`): итог — `jsonb` без `CHECK`, и держать их там больше некому.
     """
     parts = {}
     for thought in thoughts:
         if thought.get("story_part") and thought.get("decision") == "take":
-            parts.setdefault(thought["story_part"], thought.get("story_part_title"))
+            parts.setdefault(thought["story_part"], journal._fit(thought).get("story_part_title"))
     if not parts:
         return {}
     return {"parts": len(parts),
