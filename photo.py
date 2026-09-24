@@ -4,8 +4,8 @@ Both are C code and the bytes they are handed came off somebody's phone — or o
 the worker to fall over. A HEIC with a few bytes flipped, one ffmpeg still cuts a thumbnail out of,
 segfaults libheif inside `Image.open` (three of a thousand flipped fixtures did), and a segfault in
 the worker's own process is the worker gone with the job it held. So the asking is a child that may
-die: whatever it printed is the answer, and a child that crashed, hung or ran out of memory is a
-file with nothing to read. That contains a crash, it is not a sandbox: the child runs as the worker.
+die: whatever it printed is the answer, and a child that crashed or hung is a file with nothing to
+read. That contains a crash, it is not a sandbox: the child runs as the worker.
 
 Run as a script this file is the child. The parent side is `read` and `stand_up`, and it imports
 nothing but the standard library, so the worker never loads libheif into itself.
