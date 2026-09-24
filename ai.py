@@ -518,6 +518,15 @@ def _as_json(answer):
 # `jsonb` nor a `text` column takes either. A pair that belongs together is one character by then.
 _UNHOLDABLE = re.compile(r"[\x00\ud800-\udfff]")
 
+# An envelope or a director's plan nests four or five levels deep. Parsing gives out an order of
+# magnitude further in: `_holdable` at Python's recursion limit (1000), `json.loads` at its own
+# (about 10000 on 3.12, the C stack on 3.14) — and a model can nest past both in one answer.
+DEPTH_LIMIT = 64
+
+# One string, whole — the brackets in it are words — or one bracket. The closing quote is optional
+# so that a string left open runs to the end once, not again from every quote inside it.
+_NESTING = re.compile(r'"(?:[^"\\]|\\.)*"?|[\[\]{}]', re.DOTALL)
+
 
 def _loaded(text):
     """JSON off the wire — the provider's envelope, and the model's own JSON inside it — with
@@ -531,8 +540,30 @@ def _loaded(text):
     `null`, a character nothing can hold is dropped. An integer too long for a double goes the same
     way: every reader here takes a number as a float, and `float()` raises on it rather than
     answering `inf`.
+
+    Nesting past `DEPTH_LIMIT` goes the same way, and before anything parses it: an array or an
+    object opened deeper is `null`, unread — so neither `json.loads` nor `_holdable` ever recurses
+    further than that.
     """
-    return _holdable(json.loads(text))
+    if isinstance(text, bytes):
+        text = text.decode(json.detect_encoding(text), "surrogatepass")  # as `json.loads` would
+    return _holdable(json.loads(_shallow(text)))
+
+
+def _shallow(text):
+    depth, kept, start = 0, [], 0
+    for mark in _NESTING.finditer(text):
+        if mark.group() in ("[", "{"):
+            depth += 1
+            if depth == DEPTH_LIMIT + 1:
+                kept += (text[start:mark.start()], "null")
+        elif mark.group() in ("]", "}"):
+            depth -= 1
+            if depth == DEPTH_LIMIT:
+                start = mark.end()
+    if depth <= DEPTH_LIMIT:
+        kept.append(text[start:])
+    return "".join(kept)
 
 
 def _holdable(value):

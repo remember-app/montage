@@ -19,6 +19,7 @@ import http.server
 import json
 import logging
 import pathlib
+import sys
 import threading
 import urllib.error
 import urllib.request
@@ -345,6 +346,33 @@ def test_a_character_the_journal_cannot_hold_is_dropped_and_the_answer_kept(conn
     described = gateway.describe_media([PHOTO])
 
     assert described == {"description": "Торт со свечами", "cast": ["человек-1", "животное-1"]}
+    (*_, status, _, response, error, _), = journal(conn)
+    assert (status, response, error) == ("answered", described, None)
+
+
+def nested(depth, inside=""):
+    return "[" * depth + inside + "]" * depth
+
+
+@pytest.mark.parametrize("depth", [ai.DEPTH_LIMIT, sys.getrecursionlimit(), 100_000])
+def test_nesting_past_the_limit_is_dropped_and_the_answer_kept(conn, depth):
+    """A model can answer brackets a thousand deep, prompt-injected or not. Past Python's recursion
+    limit `_holdable` gave out, past its own `json.loads` did — both after the answer was paid for,
+    and the retry paid for it again. What is nested past `DEPTH_LIMIT` becomes `null`; everything
+    up to it stays whole, and brackets inside a string are words, not nesting."""
+    words = 'Торт "с короной" ' + "[" * (ai.DEPTH_LIMIT + 1)
+    said = (f'{{"description": {json.dumps(words, ensure_ascii=False)}, "cast": ["человек-1"], '
+            f'"whole": {nested(ai.DEPTH_LIMIT - 1)}, "cut": {nested(depth)}}}')
+    gateway = ai.AI(conn, ai.Gemini("test-key", transport=saying(said)))
+
+    described = gateway.describe_media([PHOTO])
+
+    assert described == {
+        "description": words,
+        "cast": ["человек-1"],
+        "whole": json.loads(nested(ai.DEPTH_LIMIT - 1)),
+        "cut": json.loads(nested(ai.DEPTH_LIMIT - 1, "null")),
+    }
     (*_, status, _, response, error, _), = journal(conn)
     assert (status, response, error) == ("answered", described, None)
 
