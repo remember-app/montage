@@ -28,9 +28,10 @@ import media
 DEFAULT_TARGET_SECONDS = 60.0  # what the api fills `params.target_seconds` with when nobody says
 
 # A still held on screen; a plain frame, no Ken Burns. The same 2.5 seconds the api counts the
-# longest orderable video by — «сумма всех видео плюс 2,5 секунды на фото» (doc-03) — so this number
-# is not this module's alone to move: changed here and nowhere else, the app would offer a length
-# the worker cannot reach.
+# longest orderable video by — every video whole and 2.5 seconds a photo, less a crossfade a join,
+# down to the whole second (`materialLeft`, api src/montages/montages.ts) — so this number is not
+# this module's alone to move: changed here and nowhere else, the app would offer a length the
+# worker cannot reach.
 PHOTO_SECONDS = 2.5
 CLIP_SECONDS = 4.0  # «3–5 сек вокруг лучшего момента»
 DEDUP_SECONDS = 2.0  # two shots this close together are one moment, not two
@@ -284,9 +285,10 @@ def choose(pieces, target_seconds, include=(), exclude=()):
     """The cuts that make the video, in the order they are shown — and everything left out of it,
     each piece carrying the reason it was.
 
-    Dedup, then the best of what is left up to the asked-for length, then back into chronological
-    order — «отбор по оценке, порядок в ролике — хронологический» (architecture.md). The first piece
-    is taken whatever it costs: a montage shorter than asked for is a montage, an empty one is not.
+    Dedup, then the best of what is left up to the asked-for length — or a still past it, by less
+    than a second, when that is nearer to it (below) — then back into chronological order: «отбор
+    по оценке, порядок в ролике — хронологический» (architecture.md). The first piece is taken
+    whatever it costs: a montage shorter than asked for is a montage, an empty one is not.
 
     `include` and `exclude` are the organizer's own two lists of media ids, from the order, and they
     beat the algorithm in both directions. An excluded file is never in the video, however sharp it
@@ -316,13 +318,26 @@ def choose(pieces, target_seconds, include=(), exclude=()):
     kept, duplicates = _dedup(candidates + wanted, always=include)
     rejected += duplicates
 
-    chosen = [piece for piece in kept if piece.media_id in include]
+    chosen, no_room = [piece for piece in kept if piece.media_id in include], []
     for piece in sorted((p for p in kept if p.media_id not in include), key=lambda p: -p.sharpness):
         if chosen and assembly.length_of(chosen + [piece]) > target_seconds:
             # Too long for what is left, but a shorter cut behind it may still fit.
-            rejected.append(dataclasses.replace(piece, rejected=NO_ROOM))
+            no_room.append(piece)
             continue
         chosen.append(piece)
+
+    # An order is whole seconds, and a still cannot be cut to fit one: it adds two seconds to the
+    # video or none. So when no clip can be held longer to make up what is left (`stretch`), the
+    # sharpest still left out goes in after all if the video lands nearer the order with it than
+    # without — which, the two misses adding up to at most those two seconds, is always less than a
+    # second past it. It is what gets every frame into an order for the api's ceiling: that is the
+    # length of everything, rounded down to the second.
+    still = next((piece for piece in no_room if piece.kind != "video"), None)
+    short = target_seconds - assembly.length_of(chosen) - sum(map(_room, chosen))
+    if still and assembly.length_of(chosen + [still]) - target_seconds < short:
+        chosen.append(still)
+        no_room.remove(still)
+    rejected += (dataclasses.replace(piece, rejected=NO_ROOM) for piece in no_room)
     return sorted(chosen, key=lambda piece: piece.when), rejected
 
 
@@ -335,10 +350,11 @@ def stretch(pieces, target_seconds):
 
     Whoever directed the montage — the отбор above or the режиссёр beside it — picked these out of
     what the memory holds, and both stop at the first piece that would not fit the ordered length.
-    So what comes back from them is never longer than the order and is usually shorter than it, by
-    however much the piece that did not fit would have taken. When nothing else can be *added*, the
-    length is kept by holding what is already in the video for longer, and that is this step: the
-    ordered length is a promise and not a wish (doc-03, «Длина ролика — число секунд»).
+    So what comes back from them is usually shorter than the order, by however much the piece that
+    did not fit would have taken — and past it only by the one still `choose` lets run over when
+    nothing here could make up the rest. When nothing else can be *added*, the length is kept by
+    holding what is already in the video for longer, and that is this step: the ordered length is a
+    promise and not a wish (doc-03, «Длина ролика — число секунд»).
 
     Only clips grow. A photograph is held for the `PHOTO_SECONDS` the screen promises — a still
     stretched to a minute is not a longer video, it is a stopped one — and a clip only while its
@@ -359,11 +375,7 @@ def stretch(pieces, target_seconds):
     if missing <= 0:
         return list(pieces)
     lengths = [piece.seconds for piece in pieces]
-    # A photograph has nowhere to grow to, and neither has a clip whose length ffmpeg would not
-    # tell: asked past what is really in the file, ffmpeg hands back a shorter piece than it was
-    # told to, and every join after it lands wrong.
-    room = [piece.duration - piece.seconds if piece.kind == "video" and piece.duration else 0.0
-            for piece in pieces]
+    room = [_room(piece) for piece in pieces]
     growing = sorted((index for index, free in enumerate(room) if free > 0), key=room.__getitem__)
     log.info("%.1fs short of the %.0fs ordered, %s clip(s) can be held longer",
              missing, target_seconds, len(growing))
@@ -376,3 +388,11 @@ def stretch(pieces, target_seconds):
         missing -= grown
     return [cut_to(piece, seconds) if seconds > piece.seconds else piece
             for piece, seconds in zip(pieces, lengths)]
+
+
+def _room(piece):
+    """How much longer `stretch` can hold a piece than it is cut. A photograph has nowhere to grow
+    to, and neither has a clip whose length ffmpeg would not tell: asked past what is really in the
+    file, ffmpeg hands back a shorter piece than it was told to, and every join after it lands
+    wrong."""
+    return piece.duration - piece.seconds if piece.kind == "video" and piece.duration else 0.0

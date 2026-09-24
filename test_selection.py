@@ -9,6 +9,7 @@ montages in `test_montage.py`.
 
 import dataclasses
 import datetime
+import math
 import random
 
 import pytest
@@ -71,10 +72,10 @@ def test_a_file_with_no_capture_date_is_never_deduped():
 def test_only_what_fits_the_asked_for_length_gets_in_and_it_gets_in_in_order():
     pieces = [at(second * 10, sharpness) for second, sharpness in enumerate([10, 90, 20, 80, 30])]
 
-    chosen, rejected = selection.choose(pieces, target_seconds=8)
+    chosen, rejected = selection.choose(pieces, target_seconds=7)
 
     # Two and a half seconds each, half a second eaten by every crossfade: 2.5, 4.5, 6.5 — a fourth
-    # would be 8.5.
+    # would be 8.5, further past seven than 6.5 is short of it.
     assert assembly.length_of(chosen) == 6.5
     assert chosen == [pieces[1], pieces[3], pieces[4]], "the sharpest three, back in date order"
     assert [piece.rejected for piece in rejected] == [selection.NO_ROOM] * 2
@@ -159,7 +160,7 @@ def test_what_the_organizer_asked_for_is_paid_for_out_of_everyone_elses_time():
     what is left. Here the dullest shot of the five is in the video and two sharper ones are not."""
     pieces = [at(second * 10, 10 * (second + 1), media_id=f"m{second}") for second in range(5)]
 
-    chosen, rejected = selection.choose(pieces, target_seconds=8, include=["m0"])
+    chosen, rejected = selection.choose(pieces, target_seconds=7, include=["m0"])
 
     # Two and a half seconds each and half a second off every join: m0 asked for, then the two
     # sharpest that still fit — 2.5, 4.5, 6.5 — and the fourth would be 8.5.
@@ -197,8 +198,9 @@ def test_ids_from_the_order_are_matched_as_text():
 
 
 # --- the length that was ordered ---------------------------------------------
-# What `choose` picks is never longer than the order and is usually shorter than it; `stretch` is
-# what turns the ordered length from a wish into a promise. Both are arithmetic over pieces, so a
+# What `choose` picks is usually shorter than the order, and past it only by a still that nothing
+# else could make up for; `stretch` is what turns the ordered length from a wish into a promise.
+# Both are arithmetic over pieces, so a
 # ten-minute montage is checked here in milliseconds instead of being encoded — that a real video
 # comes out that long is `test_montage.py`'s.
 
@@ -235,34 +237,92 @@ def test_a_video_ordered_out_of_material_to_spare_comes_out_the_length_it_was_or
 
 def test_a_ten_minute_order_out_of_stills_alone_takes_every_one_it_can_hold_at_2_5_seconds():
     """Stills never stretch, so an order they alone must fill is filled by how many of them go in,
-    and 2.5 seconds each is the arithmetic the api counts the ceiling by. Three hundred photographs
-    of material against ten minutes: two hundred and ninety-nine go in, every one at its 2.5, and
-    the video is short of the order by less than one more still — the 300th would not fit."""
-    material = [at(number * 10, 50, media_id=f"p{number}") for number in range(300)]
+    and 2.5 seconds each is the arithmetic the api counts the ceiling by. Four hundred photographs
+    of material against ten minutes: three hundred go in, every one at its 2.5, and the video is
+    half a second past the order — 299 would fall a second and a half short of it, and the 301st
+    would run two and a half past."""
+    material = [at(number * 10, 50, media_id=f"p{number}") for number in range(400)]
 
     chosen, rejected = selection.choose(material, 600)
     video = selection.stretch(chosen, 600)
 
     assert {piece.seconds for piece in video} == {selection.PHOTO_SECONDS}
-    assert len(video) == 299 and len(rejected) == 1
-    assert 600 - selection.PHOTO_SECONDS < assembly.length_of(video) <= 600
+    assert len(video) == 300 and len(rejected) == 100
+    assert assembly.length_of(video) == 600.5
+
+
+def ceiling(material):
+    """The longest video the app lets anyone order out of this material — the api's number
+    (`materialLeft`, api src/montages/montages.ts): every clip whole and every still its 2.5
+    seconds, less half a second for every join, down to the whole second, ten minutes at most."""
+    whole = sum(piece.duration or piece.seconds for piece in material)
+    return math.floor(min(600, whole - assembly.CROSSFADE_SECONDS * (len(material) - 1)))
+
+
+@pytest.mark.parametrize("photos", [3, 40, 300])
+def test_an_order_for_every_still_there_is_gets_every_still(photos):
+    """k photographs make a video of 2k and a half seconds — 2.5 each, half a second of every join
+    shared by two — and only whole seconds can be ordered, so the most the app offers is 2k. The
+    last still cannot be cut to fit that and nothing else can be held longer to make up for it, so
+    it goes in half a second past the order rather than leaving the video a second and a half short
+    of it: three photographs ordered at six seconds are a video of 6.5 out of all three, not of 4.5
+    out of two. At three hundred the ceiling is ten minutes, and the same half second."""
+    material = [at(number * 10, 50 + number, media_id=f"p{number}") for number in range(photos)]
+    target = ceiling(material)
+
+    chosen, rejected = selection.choose(material, target)
+    video = selection.stretch(chosen, target)
+
+    assert target == 2 * photos
+    assert rejected == [] and len(video) == photos
+    assert assembly.length_of(video) == target + 0.5
+
+
+def test_a_clip_held_whole_cannot_make_up_for_the_last_still_either():
+    """A clip already running from its first frame to its last has nothing left to be held longer
+    by, so against it the last still goes in past the order just as among stills alone."""
+    material = [clip(0, 90, duration=3.3, media_id="v"),
+                *(at(60 * minute, 50 - minute, media_id=f"p{minute}") for minute in (1, 2, 3))]
+    target = ceiling(material)  # 3.3 + 3 × 2.5 less three joins is 9.3, and 9 can be ordered
+
+    chosen, rejected = selection.choose(material, target)
+    video = selection.stretch(chosen, target)
+
+    assert rejected == [] and [piece.media_id for piece in video] == ["v", "p1", "p2", "p3"]
+    assert assembly.length_of(video) == pytest.approx(9.3)
+
+
+def test_a_still_does_not_run_past_the_order_while_a_clip_can_still_be_held_longer():
+    """Two clips and two stills against eleven seconds: the clips and one still come to 9.5, and
+    the other still would make 11.5. Both clips have most of a minute left in their files, which
+    brings the video to the eleven seconds exactly — so that still stays out and they are held
+    longer instead: running past the order is only for when nothing else can reach it."""
+    material = [clip(0, 90, media_id="v0"), clip(60, 80, media_id="v1"),
+                at(120, 70, media_id="p0"), at(180, 60, media_id="p1")]
+
+    chosen, rejected = selection.choose(material, 11)
+    video = selection.stretch(chosen, 11)
+
+    assert [piece.media_id for piece in video] == ["v0", "v1", "p0"]
+    assert [(piece.media_id, piece.rejected) for piece in rejected] == [("p1", selection.NO_ROOM)]
+    assert assembly.length_of(video) == 11.0
 
 
 def test_an_order_for_everything_there_is_takes_every_piece_whole():
-    """The longest video the app offers — «сумма всех видео плюс 2,5 секунды на фото» (doc-03) —
-    and it means exactly what it says: every clip runs from its first frame to its last and every
-    photograph is held its 2.5 seconds. The finished file is shorter than that sum by its
-    crossfades, which is the one thing the number cannot include: a join is half a second of two
-    pieces at once."""
+    """The longest video the app offers, and it means exactly what it says: every clip runs from its
+    first frame to its last and every photograph is held its 2.5 seconds. The joins are counted into
+    that number — a join is half a second of two pieces at once — so the finished file runs it to
+    the frame."""
     videos = [clip(minute * 60, 10, duration=length, media_id=f"v{minute}")
               for minute, length in enumerate((12.0, 30.0, 7.0))]
     photos = [at(minute * 60 + 30, 10, media_id=f"p{minute}") for minute in range(3)]
-    everything = sum(piece.duration for piece in videos) + selection.PHOTO_SECONDS * len(photos)
+    everything = ceiling(videos + photos)
 
     chosen, rejected = selection.choose(videos + photos, everything)
     video = selection.stretch(chosen, everything)
 
     assert rejected == [], "nothing was left out of an order for everything"
+    assert assembly.length_of(video) == everything == 54
     assert {piece.media_id: piece.seconds for piece in video} == {
         "v0": 12.0, "v1": 30.0, "v2": 7.0, "p0": 2.5, "p1": 2.5, "p2": 2.5
     }
