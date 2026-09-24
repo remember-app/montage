@@ -62,7 +62,8 @@ def direct(conn, pieces, target_seconds, include=(), exclude=(), story="", ref=N
     the tests; the worker takes the gateway the environment gives it.
 
     Слова режиссёра — вторым, готовыми полями журнала (`journal.COLUMNS`), порядком плана: первой
-    мысль о плане в целом, за ней по записи на каждый показанный модели кадр.
+    мысль о плане в целом, за ней по записи на каждый показанный модели кадр и «мимо» на каждом
+    вычеркнутом организатором.
     """
     brain = brain or ai.AI(conn)
     if brain.provider is None:
@@ -133,12 +134,16 @@ def direct(conn, pieces, target_seconds, include=(), exclude=(), story="", ref=N
             thoughts.append({"media_id": media_id})
 
     # Остальное, что модели показали: «мимо» её же словами, если она их дала, и кодом, если нет.
-    # Кадр, которого она не видела — отсеянный, вычеркнутый, съеденный дедупом, — здесь не
-    # появляется: рассказывать о нём режиссёрскому этапу нечего.
+    # Отсеянного и съеденного дедупом модель не видела, и здесь их нет: о первом рассказал отсев,
+    # второй — в «взял 1 из N» оставшегося от серии.
     for media_id in candidates:
         if media_id not in taken:
             thoughts.append({"media_id": media_id,
                              "reason": planned.get("left_out", {}).get(media_id) or LEFT_OUT})
+    # Вычеркнутого модель тоже не видела, но «мимо» у него есть — слово организатора, как на пути
+    # отсева (`selection.choose`): кроме этой записи, о нём в журнале не рассказал бы никто.
+    thoughts += ({"media_id": piece.media_id, "reason": selection.EXCLUDED}
+                 for piece in pieces if piece.media_id in exclude and not piece.rejected)
 
     fitted = []
     for piece in chosen:

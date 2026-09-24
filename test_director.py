@@ -347,10 +347,17 @@ def test_a_struck_out_piece_is_never_even_shown_to_the_director(described):
     """«Исключить» is not a filter over the answer — the piece does not go into the question, so
     there is nothing for the model to name. Named here anyway (the recorded plan has all three),
     which is exactly the case this rule has to survive: a model that says otherwise."""
-    film, _, net = directed(described, exclude=["m-3"])
+    blurred = dataclasses.replace(shot("m-4", 15), rejected=selection.BLUR)
+    film, thoughts, net = directed(described, pieces=[*MATERIAL, blurred], exclude=["m-3", "m-4"])
 
     assert [piece.media_id for piece in film] == ["m-1", "m-2"]
     assert "m-3" not in asked(net) and "собака" not in asked(net)
+    # Слово организатора видно и на этом пути — «мимо, вычеркнут», как у отсева; а смазанному
+    # второго «мимо» нет: о нём рассказал отсев.
+    assert (about(thoughts, "m-3")["decision"], about(thoughts, "m-3")["reason"]) == (
+        "skip", selection.EXCLUDED
+    )
+    assert not [one for one in thoughts if one.get("media_id") == "m-4"]
 
 
 def test_told_both_at_once_the_piece_stays_out_of_the_film_too(described):
