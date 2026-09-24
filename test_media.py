@@ -8,19 +8,26 @@ R2_ENDPOINT points at.
 """
 
 import json
+import logging
 import pathlib
+import struct
 import subprocess
 import uuid
 
 import pytest
-from PIL import ExifTags, Image
+from PIL import ExifTags, Image, ImageChops, ImageDraw, ImageOps, ImageStat, TiffImagePlugin
 
 import media
 import worker
 
-# The two photographs with EXIF in them are the one thing here ffmpeg cannot draw: it writes no
-# EXIF, and a HEIC it does not write at all. See README.md, «Тесты».
+# The photographs with EXIF in them are the one thing here ffmpeg cannot draw: it writes no EXIF,
+# and a HEIC it does not write at all. See README.md, «Тесты».
 FIXTURES = pathlib.Path(__file__).with_name("fixtures")
+
+# Eight bytes of `exif-photo.heic` overwritten so that ffmpeg still cuts a thumbnail out of it and
+# libheif segfaults inside `Image.open` — found by flipping bytes, libheif 1.23. Should a newer libheif
+# stop falling over, what the tests below hold to stays true: the worker outlives the file.
+CRASHING_HEIC = {153: 163, 179: 220, 228: 183, 450: 174, 484: 87, 606: 93, 616: 114, 619: 181}
 
 
 def ffmpeg(*args):
@@ -75,17 +82,74 @@ def sound(path):
     return path
 
 
-def phone_video(path):
+def phone_video(path, place="+55.5180+037.5300+158.000/"):
     """A clip with the tags a phone puts beside the picture: which camera took it, and where.
     `use_metadata_tags` so they are written under those names and not dropped as unknown."""
     ffmpeg(
         "-f", "lavfi", "-i", "testsrc=size=320x240:rate=24:duration=1",
         "-c:v", "libx264", "-pix_fmt", "yuv420p",
         "-metadata", "com.apple.quicktime.model=iPhone 15 Pro",
-        "-metadata", "com.apple.quicktime.location.ISO6709=+55.5180+037.5300+158.000/",
+        "-metadata", f"com.apple.quicktime.location.ISO6709={place}",
         "-movflags", "use_metadata_tags", str(path),
     )
     return path
+
+
+def marked_photo(path, orientation):
+    """A photograph with something to tell its corners apart, and the EXIF note that says how the
+    phone was held: what the sensor wrote is 200×120, and the note turns it (or flips it) as the
+    person saw it. Drawn by Pillow — `ffmpeg` writes no EXIF."""
+    picture = Image.new("RGB", (200, 120), (128, 128, 128))
+    paint = ImageDraw.Draw(picture)
+    paint.rectangle([0, 0, 59, 39], fill=(255, 0, 0))
+    paint.rectangle([160, 0, 199, 19], fill=(0, 255, 0))
+    paint.rectangle([0, 90, 29, 119], fill=(0, 0, 255))
+    exif = Image.Exif()
+    exif[ExifTags.Base.Orientation] = orientation
+    picture.save(path, exif=exif, quality=95)
+    return path
+
+
+def crashing_heic(path):
+    """`exif-photo.heic` damaged so that opening it with libheif crashes the process."""
+    data = bytearray((FIXTURES / "exif-photo.heic").read_bytes())
+    for offset, value in CRASHING_HEIC.items():
+        data[offset] = value
+    path.write_bytes(data)
+    return path
+
+
+def photo_with_odd_numbers(path):
+    """What some cameras write when they have nothing to say: an f-number over zero, a focal length
+    of nothing, and a latitude of two hundred degrees."""
+    def rational(number):
+        return TiffImagePlugin.IFDRational(number, 1)
+
+    exif = Image.Exif()
+    optics = exif.get_ifd(ExifTags.IFD.Exif)
+    optics[ExifTags.Base.FNumber] = TiffImagePlugin.IFDRational(1, 0)
+    optics[ExifTags.Base.FocalLength] = rational(0)
+    place = exif.get_ifd(ExifTags.IFD.GPSInfo)
+    place[ExifTags.GPS.GPSLatitudeRef] = "N"
+    place[ExifTags.GPS.GPSLatitude] = (rational(200), rational(0), rational(0))
+    place[ExifTags.GPS.GPSLongitudeRef] = "E"
+    place[ExifTags.GPS.GPSLongitude] = (rational(37), rational(0), rational(0))
+    Image.new("RGB", (64, 48), "gray").save(path, exif=exif)
+    return path
+
+
+def gigantic_photo(path):
+    """`exif-photo.jpg` whose header claims 30000×30000 — 900 megapixels in 900 bytes. Pillow
+    refuses that as a decompression bomb, and ffprobe reports it as a size of nothing."""
+    data = bytearray((FIXTURES / "exif-photo.jpg").read_bytes())
+    sof = data.index(b"\xff\xc0")  # start of frame: marker, length, precision, height, width
+    data[sof + 5:sof + 9] = struct.pack(">HH", 30000, 30000)
+    path.write_bytes(data)
+    return path
+
+
+def near(pixel, colour):
+    return all(abs(a - b) < 40 for a, b in zip(pixel, colour))
 
 
 @pytest.fixture
@@ -509,15 +573,257 @@ def test_the_sweep_stops_asking_about_a_file_that_carries_nothing(conn, s3, memo
 
 def test_the_sweep_measures_a_frame_that_was_read_before_sizes(conn, s3, memory, tmp_path):
     """A frame the worker had already read back when it took the camera and nothing else: the job
-    stands `done` on it, and the size is missing all the same. It is measured on the next pass, and
+    stands `done` on it — days ago, as it must, or it would be a read that has just failed to find
+    a size (below) — and the size is missing all the same. It is measured on the next pass, and
     nobody uploads anything again."""
     item_id, key = add_item(conn, memory, "photo", status="ready")
     s3.upload_file(str(photo(tmp_path / "original.jpg")), media.bucket(), key)
     already_read = worker.enqueue(conn, "media_frame_info", item_id)
-    conn.execute("UPDATE jobs SET status = 'done' WHERE id = %s", (already_read,))
+    conn.execute("UPDATE jobs SET status = 'done', updated_at = now() - interval '2 days' "
+                 "WHERE id = %s", (already_read,))
 
     worker.sweep_media_without_frame_info(conn)
     assert only_jobs_for(conn, item_id, "media_frame_info") == 2, "it is asked for once more"
     assert worker.run_once(conn) is True
 
     assert read_size(conn, item_id) == (1200, 800)
+
+
+def test_the_sweep_does_not_go_on_asking_about_a_file_it_cannot_measure(conn, s3, memory, tmp_path):
+    """A file with no picture in it ends `done` with the width still null, which is what the sweep
+    looks for. Left at that it would queue the job again every hour, and fetch and probe the same
+    file until the worker was stopped; a read that finished within the day is a read that has
+    been made."""
+    item_id, key = add_item(conn, memory, "photo", status="ready")
+    s3.upload_file(str(sound(tmp_path / "original.m4a")), media.bucket(), key)
+
+    worker.sweep_media_without_frame_info(conn)
+    assert worker.run_once(conn) is True
+    assert read_size(conn, item_id) == (None, None)
+
+    assert worker.sweep_media_without_frame_info(conn) == 0
+    assert only_jobs_for(conn, item_id, "media_frame_info") == 1, "an hour later, not asked again"
+
+    # A day on, the same file gets its one more go — the sweep is not blind to it for good.
+    conn.execute("UPDATE jobs SET updated_at = now() - interval '25 hours'")
+    assert worker.sweep_media_without_frame_info(conn) == 1
+
+
+def test_the_log_says_what_was_read_and_not_where_it_was(conn, s3, memory, caplog):
+    """The place is where somebody was. The sheet shows it to the members of one memory; the log
+    is read by whoever runs the worker and kept by whatever collects it."""
+    item_id, key = add_item(conn, memory, "photo")
+    s3.upload_file(str(FIXTURES / "exif-photo.jpg"), media.bucket(), key)
+    worker.enqueue(conn, "media_frame_info", item_id)
+
+    with caplog.at_level(logging.INFO):
+        assert worker.run_once(conn) is True
+
+    said = caplog.text
+    assert item_id in said and "latitude" in said and "longitude" in said
+    assert "55.5" not in said and "37.5" not in said
+
+
+@pytest.mark.parametrize("place", [
+    "+5531.08+03731.80/",  # degrees and minutes, which reads as decimal degrees far off the globe
+    "+" + "9" * 400 + "+037.5300/",  # a run of digits that is infinity as a float
+], ids=["degrees-and-minutes", "infinity"])
+def test_a_place_no_globe_can_hold_is_no_place(conn, s3, memory, tmp_path, place):
+    """A clip's place tag comes off somebody's phone. What is not a place on the globe is left out
+    like any other thing the file does not say — the camera beside it is still read."""
+    item_id, key = add_item(conn, memory, "video")
+    s3.upload_file(str(phone_video(tmp_path / "original.mp4", place)), media.bucket(), key)
+    worker.enqueue(conn, "media_frame_info", item_id)
+
+    assert worker.run_once(conn) is True
+
+    camera, _, _, latitude, longitude = read_frame_info(conn, item_id)
+    assert (camera, latitude, longitude) == ("iPhone 15 Pro", None, None)
+
+
+def test_numbers_a_camera_wrote_that_nothing_can_use_are_left_out(conn, s3, memory, tmp_path):
+    """An f-number over zero is NaN, and NaN goes into a double column and out to the sheet as if
+    it were a reading. The same file's latitude is two hundred degrees."""
+    item_id, key = add_item(conn, memory, "photo")
+    s3.upload_file(str(photo_with_odd_numbers(tmp_path / "original.jpg")), media.bucket(), key)
+    job_id = worker.enqueue(conn, "media_frame_info", item_id)
+
+    assert worker.run_once(conn) is True
+
+    assert read_frame_info(conn, item_id) == (None, None, None, None, None)
+    assert read_size(conn, item_id) == (64, 48)
+    status, = conn.execute("SELECT status FROM jobs WHERE id = %s", (job_id,)).fetchone()
+    assert status == "done"
+
+
+def test_south_and_west_are_minus(tmp_path):
+    """The hemisphere is a tag of its own next to the degrees, and the one place a sign is lost —
+    the fixtures are all north and east."""
+    def degrees(whole, minutes):
+        return tuple(TiffImagePlugin.IFDRational(number, 1) for number in (whole, minutes, 0))
+
+    exif = Image.Exif()
+    place = exif.get_ifd(ExifTags.IFD.GPSInfo)
+    place[ExifTags.GPS.GPSLatitudeRef], place[ExifTags.GPS.GPSLatitude] = "S", degrees(33, 52)
+    place[ExifTags.GPS.GPSLongitudeRef], place[ExifTags.GPS.GPSLongitude] = "W", degrees(70, 40)
+    Image.new("RGB", (32, 32), "gray").save(tmp_path / "original.jpg", exif=exif)
+
+    found = media.photo.read(tmp_path / "original.jpg")
+
+    assert found["latitude"] == pytest.approx(-33.8667, abs=1e-4)
+    assert found["longitude"] == pytest.approx(-70.6667, abs=1e-4)
+
+
+def test_a_photo_that_claims_to_be_a_gigapixel_is_left_unmeasured(conn, s3, memory, tmp_path):
+    """The header of a decompression bomb says what nobody will ever decode. Nothing is decoded
+    for it — and the size that comes back is none, not a size of zero."""
+    item_id, key = add_item(conn, memory, "photo")
+    s3.upload_file(str(gigantic_photo(tmp_path / "original.jpg")), media.bucket(), key)
+    job_id = worker.enqueue(conn, "media_frame_info", item_id)
+
+    assert worker.run_once(conn) is True
+
+    assert read_size(conn, item_id) == (None, None)
+    assert read_frame_info(conn, item_id) == (None, None, None, None, None)
+    status, = conn.execute("SELECT status FROM jobs WHERE id = %s", (job_id,)).fetchone()
+    assert status == "done"
+
+
+@pytest.mark.parametrize("model, kept", [
+    ("abc\x00def", "abcdef"),  # a NUL, which the `text` column refuses
+    ("iPhone\n15\x07 Pro", "iPhone15 Pro"),  # a line break and a bell
+    ("M" * 60000, "M" * media.MODEL_LENGTH),  # a paragraph, where a camera's name goes
+])
+def test_a_camera_name_is_made_a_short_line_of_text(conn, s3, memory, tmp_path, model, kept):
+    """The model is the file's own text and every member of the memory is shown it. A NUL in it
+    would fail the job three times over and be tried again every day."""
+    exif = Image.Exif()
+    exif[ExifTags.Base.Model] = model
+    Image.new("RGB", (64, 48), "gray").save(tmp_path / "original.jpg", exif=exif)
+    item_id, key = add_item(conn, memory, "photo")
+    s3.upload_file(str(tmp_path / "original.jpg"), media.bucket(), key)
+    job_id = worker.enqueue(conn, "media_frame_info", item_id)
+
+    assert worker.run_once(conn) is True
+
+    status, = conn.execute("SELECT status FROM jobs WHERE id = %s", (job_id,)).fetchone()
+    assert status == "done"
+    assert read_frame_info(conn, item_id)[0] == kept
+
+
+def test_a_png_is_measured_by_ffprobe_and_carries_no_camera(conn, s3, memory, tmp_path):
+    """PNG is left to ffprobe: Pillow decodes the whole picture to answer `getexif()` on one, and a
+    camera does not write PNG in any case."""
+    item_id, key = add_item(conn, memory, "photo")
+    s3.upload_file(str(photo(tmp_path / "original.png")), media.bucket(), key)
+    worker.enqueue(conn, "media_frame_info", item_id)
+
+    assert worker.run_once(conn) is True
+
+    assert read_size(conn, item_id) == (1200, 800)
+    assert read_frame_info(conn, item_id) == (None, None, None, None, None)
+
+
+def test_a_photo_that_crashes_libheif_does_not_take_the_worker_with_it(conn, s3, memory, tmp_path):
+    """Opening this HEIC segfaults the library. It is read in a process of its own, so the job ends
+    — `done`, with nothing read — instead of the worker ending with it."""
+    item_id, key = add_item(conn, memory, "photo")
+    s3.upload_file(str(crashing_heic(tmp_path / "original.heic")), media.bucket(), key)
+    job_id = worker.enqueue(conn, "media_frame_info", item_id)
+
+    assert worker.run_once(conn) is True
+
+    status, = conn.execute("SELECT status FROM jobs WHERE id = %s", (job_id,)).fetchone()
+    assert status == "done"
+
+
+@pytest.fixture
+def reader_script(tmp_path, monkeypatch):
+    """Stands in for `photo.py` as the child: whatever the test writes is what runs."""
+    script = tmp_path / "reader.py"
+    monkeypatch.setattr(media.photo, "__file__", str(script))
+    return script
+
+
+def test_a_reader_that_dies_is_a_photo_with_nothing_to_read(reader_script):
+    reader_script.write_text("import os, signal\nos.kill(os.getpid(), signal.SIGSEGV)\n")
+
+    assert media.photo.read(FIXTURES / "exif-photo.jpg") is None
+
+
+def test_a_reader_that_hangs_is_given_up_on(reader_script, monkeypatch):
+    reader_script.write_text("import time\ntime.sleep(60)\n")
+    monkeypatch.setattr(media.photo, "TIMEOUT_SECONDS", 1)
+
+    assert media.photo.read(FIXTURES / "exif-photo.jpg") is None
+
+
+def test_a_preview_is_made_all_the_same_when_the_reader_dies(conn, s3, memory, reader_script):
+    """Standing a HEIC up is a nicety of the copies, not a condition of having them: with the reader
+    gone, ffmpeg gets the original as it did before there was one."""
+    reader_script.write_text("import os, signal\nos.kill(os.getpid(), signal.SIGSEGV)\n")
+    item_id, key = add_item(conn, memory, "photo")
+    s3.upload_file(str(FIXTURES / "portrait-photo.heic"), media.bucket(), key)
+    worker.enqueue(conn, "media_preview", item_id)
+
+    assert worker.run_once(conn) is True
+
+    assert read_item(conn, item_id)[0] == "ready"
+
+
+def test_the_reader_leaves_alone_what_is_not_a_heic(tmp_path):
+    out = tmp_path / "upright.jpg"
+
+    assert media.photo.stand_up(FIXTURES / "exif-photo.jpg", out) is False
+    assert not out.exists()
+
+
+# --- a photograph turned by its own metadata, previewed ---------------------------
+
+
+def previewed(conn, s3, memory, tmp_path, original):
+    """The thumbnail and the large copy `media_preview` makes of `original`, as Pillow images."""
+    item_id, key = add_item(conn, memory, "photo")
+    s3.upload_file(str(original), media.bucket(), key)
+    worker.enqueue(conn, "media_preview", item_id)
+    assert worker.run_once(conn) is True
+    _, thumbnail_key, preview_key, _ = read_item(conn, item_id)
+    return [Image.open(fetch(s3, k, tmp_path / f"copy-{n}.jpg")).convert("RGB")
+            for n, k in enumerate((thumbnail_key, preview_key))]
+
+
+@pytest.mark.parametrize("orientation", range(1, 9))
+def test_a_jpeg_turned_by_its_exif_is_previewed_standing_up(conn, s3, memory, tmp_path,
+                                                            orientation):
+    """The gallery shows these copies, and the model that describes a frame is sent one. Pillow's
+    own reading of the note is the truth — the picture as the person saw it — and both copies are
+    held to it, for every one of the eight ways a phone can be held. ffmpeg does the turning itself
+    (7.1.5 in the image); the day a base image brings one that does not, this is what says so."""
+    original = marked_photo(tmp_path / "original.jpg", orientation)
+    seen = ImageOps.exif_transpose(Image.open(original)).convert("RGB")
+
+    for copy in previewed(conn, s3, memory, tmp_path, original):
+        assert copy.size == seen.size
+        assert sum(ImageStat.Stat(ImageChops.difference(copy, seen)).mean) / 3 < 8
+
+
+def test_a_portrait_heic_is_previewed_standing_up(conn, s3, memory, tmp_path):
+    """What an iPhone holds upright is stored as its sensor's frame with an `irot` box saying to turn
+    it, and ffmpeg 7.1 does not: the thumbnail and the large copy of every portrait photo lay on
+    their side. The fixture is 96×64 on the sensor — red in its top-left corner, blue in the
+    bottom-right — and to be seen it is 64×96, red at the top-right and blue at the bottom-left."""
+    for copy in previewed(conn, s3, memory, tmp_path, FIXTURES / "portrait-photo.heic"):
+        assert copy.size == (64, 96)
+        assert near(copy.getpixel((60, 4)), (255, 0, 0))
+        assert near(copy.getpixel((3, 92)), (0, 0, 255))
+
+
+def test_a_portrait_heic_is_measured_the_way_it_is_seen(conn, s3, memory):
+    item_id, key = add_item(conn, memory, "photo")
+    s3.upload_file(str(FIXTURES / "portrait-photo.heic"), media.bucket(), key)
+    worker.enqueue(conn, "media_frame_info", item_id)
+
+    assert worker.run_once(conn) is True
+
+    assert read_size(conn, item_id) == (64, 96)
+    assert read_frame_info(conn, item_id)[0] == "iPhone 15 Pro"
