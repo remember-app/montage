@@ -200,9 +200,8 @@ def test_ids_from_the_order_are_matched_as_text():
 # --- the length that was ordered ---------------------------------------------
 # What `choose` picks is usually shorter than the order, and past it only by a still that nothing
 # else could make up for; `stretch` is what turns the ordered length from a wish into a promise.
-# Both are arithmetic over pieces, so a
-# ten-minute montage is checked here in milliseconds instead of being encoded — that a real video
-# comes out that long is `test_montage.py`'s.
+# Both are arithmetic over pieces, so a ten-minute montage is checked here in milliseconds instead
+# of being encoded — that a real video comes out that long is `test_montage.py`'s.
 
 
 def clip(second, sharpness, *, duration=60.0, media_id=""):
@@ -235,20 +234,20 @@ def test_a_video_ordered_out_of_material_to_spare_comes_out_the_length_it_was_or
     )
 
 
-def test_a_ten_minute_order_out_of_stills_alone_takes_every_one_it_can_hold_at_2_5_seconds():
+def test_a_ten_minute_order_out_of_stills_alone_takes_every_one_it_can_hold_and_ends_on_it():
     """Stills never stretch, so an order they alone must fill is filled by how many of them go in,
     and 2.5 seconds each is the arithmetic the api counts the ceiling by. Four hundred photographs
-    of material against ten minutes: three hundred go in, every one at its 2.5, and the video is
-    half a second past the order — 299 would fall a second and a half short of it, and the 301st
-    would run two and a half past."""
+    of material against ten minutes: 299 fall a second and a half short, and the 300th would run
+    half a second past — the edge of any video, so that one is held half a second shorter and the
+    video ends on ten minutes exactly."""
     material = [at(number * 10, 50, media_id=f"p{number}") for number in range(400)]
 
     chosen, rejected = selection.choose(material, 600)
     video = selection.stretch(chosen, 600)
 
-    assert {piece.seconds for piece in video} == {selection.PHOTO_SECONDS}
-    assert len(video) == 300 and len(rejected) == 100
-    assert assembly.length_of(video) == 600.5
+    assert sorted(piece.seconds for piece in video) == [2.0] + [selection.PHOTO_SECONDS] * 299
+    assert len(rejected) == 100
+    assert assembly.length_of(video) == selection.MAX_SECONDS
 
 
 def ceiling(material):
@@ -266,7 +265,8 @@ def test_an_order_for_every_still_there_is_gets_every_still(photos):
     last still cannot be cut to fit that and nothing else can be held longer to make up for it, so
     it goes in half a second past the order rather than leaving the video a second and a half short
     of it: three photographs ordered at six seconds are a video of 6.5 out of all three, not of 4.5
-    out of two. At three hundred the ceiling is ten minutes, and the same half second."""
+    out of two. At three hundred the ceiling is ten minutes, which no video runs past: that half
+    second comes off the last still instead."""
     material = [at(number * 10, 50 + number, media_id=f"p{number}") for number in range(photos)]
     target = ceiling(material)
 
@@ -275,7 +275,28 @@ def test_an_order_for_every_still_there_is_gets_every_still(photos):
 
     assert target == 2 * photos
     assert rejected == [] and len(video) == photos
-    assert assembly.length_of(video) == target + 0.5
+    assert assembly.length_of(video) == min(target + 0.5, selection.MAX_SECONDS)
+
+
+@pytest.mark.parametrize("material", [
+    [clip(60 * n, 50 + n, duration=4.0, media_id=f"v{n}") for n in range(4)],
+    [clip(0, 10, duration=4.0), clip(60, 20, duration=4.0), at(120, 90)],
+    [clip(60 * n, 50 + n, duration=3.4, media_id=f"v{n}") for n in range(250)],
+    [*(clip(60 * n, 50 + n, duration=10.0, media_id=f"v{n}") for n in range(100)),
+     *(at(60 * n + 30, 40, media_id=f"p{n}") for n in range(100))],
+], ids=["четыре целых клипа: 14", "два целых клипа и фото: 9", "250 клипов по 3,4 с: 600",
+        "100 клипов по 10 с и 100 фото: 600"])
+def test_an_order_for_the_ceiling_out_of_clips_comes_out_the_ceiling(material):
+    """A clip that has run whole cannot be held longer, and one left out adds its whole length or
+    nothing — so four whole four-second clips ordered at their ceiling of fourteen seconds were a
+    video of eleven. Unlike a still, a clip can be cut: the last one goes in cut to end the video on
+    the order, whether that is the length of everything or ten minutes of more than that."""
+    target = ceiling(material)
+
+    chosen, _ = selection.choose(material, target)
+    video = selection.stretch(chosen, target)
+
+    assert assembly.length_of(video) == pytest.approx(target)
 
 
 def test_a_clip_held_whole_cannot_make_up_for_the_last_still_either():
@@ -292,7 +313,7 @@ def test_a_clip_held_whole_cannot_make_up_for_the_last_still_either():
     assert assembly.length_of(video) == pytest.approx(9.3)
 
 
-def test_a_still_does_not_run_past_the_order_while_a_clip_can_still_be_held_longer():
+def test_a_still_does_not_run_past_the_order_while_the_clips_can_make_up_the_rest():
     """Two clips and two stills against eleven seconds: the clips and one still come to 9.5, and
     the other still would make 11.5. Both clips have most of a minute left in their files, which
     brings the video to the eleven seconds exactly — so that still stays out and they are held

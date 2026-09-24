@@ -26,6 +26,7 @@ import assembly
 import media
 
 DEFAULT_TARGET_SECONDS = 60.0  # what the api fills `params.target_seconds` with when nobody says
+MAX_SECONDS = 600.0  # the api's `maxSeconds`: ten minutes, as long as a video may ever run
 
 # A still held on screen; a plain frame, no Ken Burns. The same 2.5 seconds the api counts the
 # longest orderable video by — every video whole and 2.5 seconds a photo, less a crossfade a join,
@@ -285,10 +286,11 @@ def choose(pieces, target_seconds, include=(), exclude=()):
     """The cuts that make the video, in the order they are shown — and everything left out of it,
     each piece carrying the reason it was.
 
-    Dedup, then the best of what is left up to the asked-for length — or a still past it, by less
-    than a second, when that is nearer to it (below) — then back into chronological order: «отбор
-    по оценке, порядок в ролике — хронологический» (architecture.md). The first piece is taken
-    whatever it costs: a montage shorter than asked for is a montage, an empty one is not.
+    Dedup, then the best of what is left up to the asked-for length — and one piece more, a clip cut
+    to fit or a still past it by less than a second, when that is nearer to it (below) — then back
+    into chronological order: «отбор по оценке, порядок в ролике — хронологический»
+    (architecture.md). The first piece is taken whatever it costs: a montage shorter than asked for
+    is a montage, an empty one is not.
 
     `include` and `exclude` are the organizer's own two lists of media ids, from the order, and they
     beat the algorithm in both directions. An excluded file is never in the video, however sharp it
@@ -326,17 +328,21 @@ def choose(pieces, target_seconds, include=(), exclude=()):
             continue
         chosen.append(piece)
 
-    # An order is whole seconds, and a still cannot be cut to fit one: it adds two seconds to the
-    # video or none. So when no clip can be held longer to make up what is left (`stretch`), the
-    # sharpest still left out goes in after all if the video lands nearer the order with it than
-    # without — which, the two misses adding up to at most those two seconds, is always less than a
-    # second past it. It is what gets every frame into an order for the api's ceiling: that is the
-    # length of everything, rounded down to the second.
-    still = next((piece for piece in no_room if piece.kind != "video"), None)
+    # An order is whole seconds, and a piece left out adds its whole length or nothing. So when the
+    # clips in the video cannot be held long enough to make up what is left (`stretch`), the
+    # sharpest piece left out that lands the video nearer the order than it is without goes in
+    # after all. A clip is then cut to end the video on the order. A still is held its 2.5 seconds,
+    # which runs past the order by less than one — the two misses add up to its two — and is cut
+    # only at ten minutes, the edge of any video. It is what makes an order for the api's ceiling
+    # come out that long: the ceiling is the length of everything, rounded down to the second.
     short = target_seconds - assembly.length_of(chosen) - sum(map(_room, chosen))
-    if still and assembly.length_of(chosen + [still]) - target_seconds < short:
-        chosen.append(still)
-        no_room.remove(still)
+    extra = next((piece for piece in no_room
+                  if assembly.length_of(chosen + [piece]) - target_seconds < short), None)
+    if extra:
+        no_room.remove(extra)
+        past = assembly.length_of(chosen + [extra]) - (
+            target_seconds if extra.kind == "video" else MAX_SECONDS)
+        chosen.append(cut_to(extra, extra.seconds - max(past, 0.0)))
     rejected += (dataclasses.replace(piece, rejected=NO_ROOM) for piece in no_room)
     return sorted(chosen, key=lambda piece: piece.when), rejected
 
