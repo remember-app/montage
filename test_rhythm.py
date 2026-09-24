@@ -53,6 +53,11 @@ def joins(pieces):
     return cuts
 
 
+def every_join_on_a_beat(pieces, moments):
+    for cut in joins(pieces):
+        assert min(abs(cut - moment) for moment in moments) <= ON_THE_BEAT, f"{cut} misses a beat"
+
+
 # --- what the track says -----------------------------------------------------
 
 
@@ -129,10 +134,7 @@ def test_every_join_lands_on_a_beat():
     fitted = rhythm.fit(pieces, moments)
 
     assert [piece.seconds for piece in pieces] == [3.0] * 4, "the pieces handed in are untouched"
-    for cut in joins(fitted):
-        assert min(abs(cut - moment) for moment in moments) <= ON_THE_BEAT, (
-            f"the join at {cut} misses"
-        )
+    every_join_on_a_beat(fitted, moments)
     # And the fitting does not run away with the montage: every piece stayed near its own length.
     assert all(2.5 <= piece.seconds <= 3.5 for piece in fitted)
 
@@ -259,10 +261,7 @@ def test_a_ten_minute_order_keeps_the_length_it_was_stretched_to_under_a_beat_gr
     for before, after in zip(stretched[:-1], fitted[:-1]):
         assert after.seconds == pytest.approx(before.seconds, abs=GAP), "a stretched piece was cut back"
     assert assembly.length_of(fitted) == pytest.approx(600, abs=1.0)
-    for cut in joins(fitted):
-        assert min(abs(cut - moment) for moment in moments) <= ON_THE_BEAT, (
-            f"the join at {cut} misses"
-        )
+    every_join_on_a_beat(fitted, moments)
 
 
 def test_a_ten_minute_order_under_a_fast_track_still_ends_on_ten_minutes():
@@ -281,10 +280,7 @@ def test_a_ten_minute_order_under_a_fast_track_still_ends_on_ten_minutes():
     assert len(video) == 300, "a still came off the tail"
     assert assembly.length_of(video) <= selection.MAX_SECONDS
     assert assembly.length_of(video) == pytest.approx(selection.MAX_SECONDS)
-    for cut in joins(video):
-        assert min(abs(cut - moment) for moment in moments) <= ON_THE_BEAT, (
-            f"the join at {cut} misses"
-        )
+    every_join_on_a_beat(video, moments)
 
 
 @pytest.fixture(scope="module")
