@@ -524,8 +524,9 @@ _UNHOLDABLE = re.compile(r"[\x00\ud800-\udfff]")
 DEPTH_LIMIT = 64
 
 # One string, whole — the brackets in it are words — or one bracket. The closing quote is optional
-# so that a string left open runs to the end once, not again from every quote inside it.
-_NESTING = re.compile(r'"(?:[^"\\]|\\.)*"?|[\[\]{}]', re.DOTALL)
+# so that a string left open runs to the end once, not again from every quote inside it. The repeat
+# is possessive: a greedy one keeps a backtracking frame per character, a gigabyte for 10 MB.
+_NESTING = re.compile(r'"(?:[^"\\]|\\.)*+"?|[\[\]{}]', re.DOTALL)
 
 
 def _loaded(text):

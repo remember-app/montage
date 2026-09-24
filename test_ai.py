@@ -21,6 +21,7 @@ import logging
 import pathlib
 import sys
 import threading
+import tracemalloc
 import urllib.error
 import urllib.request
 
@@ -375,6 +376,18 @@ def test_nesting_past_the_limit_is_dropped_and_the_answer_kept(conn, depth):
     }
     (*_, status, _, response, error, _), = journal(conn)
     assert (status, response, error) == ("answered", described, None)
+
+
+def test_a_long_string_costs_the_depth_scan_no_memory_per_character():
+    """The depth scan reads every string of an answer through. Free to backtrack into it, the regex
+    would keep a frame per character — a hundred bytes each, a gigabyte for ten megabytes."""
+    text = json.dumps("слово " * 20_000)
+    tracemalloc.start()
+    ai._shallow(text)
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+
+    assert peak < 10 * len(text)
 
 
 def test_prose_carrying_such_a_character_still_fails_into_the_journal(conn):
