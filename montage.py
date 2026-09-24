@@ -461,12 +461,8 @@ def _write_choices(conn, ref, chosen, turned_down, include, judged):
     """
     told = {piece.media_id for piece in judged if piece.rejected}
     for piece in chosen:
-        journal.entry(
-            conn, ref, "directing", media_id=piece.media_id, decision="take",
-            reason=ORGANIZER_ASKED if piece.media_id in include else None,
-            series_size=piece.series_size if piece.series_size > 1 else None,
-            **_source_cut(piece),
-        )
+        journal.entry(conn, ref, "directing", media_id=piece.media_id, decision="take",
+                      **_taken(piece, include))
     for piece in turned_down:
         if piece.rejected == selection.DUPLICATE or piece.media_id in told:
             continue  # серия рассказана одной записью выше, отсеянный — на своём этапе
@@ -488,15 +484,7 @@ def _write_thoughts(conn, ref, chosen, thoughts, include):
         fields = dict(thought)
         piece = laid.get(fields.get("media_id"))
         if piece is not None:
-            # «Включить» — слово организатора, и в журнале оно его: тот же `included`, что у отсева,
-            # поверх любой мысли модели об этом кадре.
-            if piece.media_id in include:
-                fields["reason"] = ORGANIZER_ASKED
-            # И серия — та же одна запись «взял 1 из 4», что у отсева: модели показали один кадр из
-            # неё, а размер серии приехал на нём самом (`director.direct`).
-            if piece.series_size > 1:
-                fields["series_size"] = piece.series_size
-            fields.update(_source_cut(piece))
+            fields.update(_taken(piece, include))
         journal.entry(conn, ref, "directing", **fields)
 
 
@@ -518,16 +506,18 @@ def _story_parts(thoughts):
             "part_titles": [parts[number] for number in sorted(parts) if parts[number]] or None}
 
 
-def _source_cut(piece):
-    """Какой кусок исходника пойдёт в ролик, секундами от начала файла.
-
-    Фотографию держат целиком, и куска исходника у неё нет — в ролик идёт вся, а колонки остаются
-    пустыми.
+def _taken(piece, include):
+    """Что о взятом куске знаем мы, а не режиссёр, — одинаково на обоих путях: по чьему слову он в
+    ролике (`included`, поверх любой мысли модели), из какой серии остался («взял 1 из 4», размер
+    едет на самом куске) и какой кусок исходника пойдёт в ролик, секундами от начала файла. У
+    фотографии куска исходника нет — в ролик идёт вся.
     """
-    if piece.kind != "video":
-        return {}
-    return {"source_from_seconds": round(piece.start, 2),
-            "source_to_seconds": round(piece.start + piece.seconds, 2)}
+    fields = {"reason": ORGANIZER_ASKED if piece.media_id in include else None,
+              "series_size": piece.series_size if piece.series_size > 1 else None}
+    if piece.kind == "video":
+        fields.update(source_from_seconds=round(piece.start, 2),
+                      source_to_seconds=round(piece.start + piece.seconds, 2))
+    return fields
 
 
 def _back_to_originals(chosen, originals, orientation):
