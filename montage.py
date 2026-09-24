@@ -123,6 +123,10 @@ def montage(conn, ref):
     # первой секунды, а рассказ о каждом дописывается по ходу (`journal.py`). Повтор того же ролика
     # начинает журнал с чистого листа.
     journal.begin(conn, ref, len(items), target_seconds)
+    # Раскладка прошлой попытки уходит вместе с её журналом: API присоединяет места кадров к записям
+    # по одному `montage_id`, и до новой раскладки (после ритма) новая попытка показывала бы кадры
+    # там, где их поставила прошлая.
+    _write_layout(conn, ref, ())
 
     video_key = f"montages/{ref}.mp4"
     s3 = media.storage()
@@ -562,8 +566,8 @@ def _write_layout(conn, ref, pieces):
 
     The table is the api's (its migration `100.do.frame-info.sql`) and this is the only thing that
     writes it: the api reads it to answer «в каких роликах стоит этот кадр и на какой секунде» on
-    the frame sheet (doc-02), and it asks only about montages that are already `ready` — so rows
-    under a video that then failed to assemble are seen by nobody until it is made again. One row
+    the frame sheet (doc-02), for `ready` montages only, and to place frames in the montage journal,
+    for a montage in any state — which is why an attempt starts by writing it empty. One row
     per *appearance* rather than per frame, which is why the key carries the second: a file may
     legitimately stand in a video twice — a clip cut in two, a photograph that comes back at the
     end. The whole of m-24 and its neighbours read this one table; a montage's layout written down

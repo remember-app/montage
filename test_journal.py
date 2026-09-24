@@ -244,6 +244,54 @@ def test_a_montage_assembled_again_starts_its_journal_from_a_clean_sheet(conn, m
     )
 
 
+def layout_of(conn, montage_id):
+    return conn.execute(
+        """SELECT media_id::text, start_seconds FROM montage_frames
+            WHERE montage_id = %s ORDER BY start_seconds""",
+        (montage_id,),
+    ).fetchall()
+
+
+def test_a_montage_assembled_again_does_not_show_the_last_attempts_layout(
+    conn, s3, memory, tmp_path, monkeypatch
+):
+    """Раскладка живёт и умирает вместе с журналом попытки. API присоединяет места кадров к записям
+    журнала по одному `montage_id`, без статуса ролика, — и повтор, оставивший прошлую раскладку до
+    своей, показывал бы на отсеве кадр там, где его поставил ролик, которого уже нет."""
+    journal_ready(conn)
+    ids = material(conn, s3, memory, tmp_path)
+    montage_id = order(conn, memory, {"target_seconds": 30, "music_tracks": []})
+    # Прошлая попытка дошла до склейки и упала: её журнал и её раскладка лежат в базе.
+    journal.begin(conn, montage_id, len(ids), 30)
+    journal.entry(conn, montage_id, "screening", media_id=ids[0], decision="skip",
+                  reason=selection.BLUR)
+    conn.execute(
+        """INSERT INTO montage_frames (montage_id, media_id, start_seconds, duration_seconds)
+           VALUES (%s, %s, 42, 3)""",
+        (montage_id, ids[0]),
+    )
+
+    before_the_new_one = []
+    writing = montage._write_layout
+
+    def watched(connection, ref, pieces):
+        if pieces:
+            with worker.connect() as watcher:
+                before_the_new_one.append(layout_of(watcher, montage_id))
+        return writing(connection, ref, pieces)
+
+    monkeypatch.setattr(montage, "_write_layout", watched)
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+    assert read_montage(conn, montage_id)[0] == "ready"
+
+    assert before_the_new_one[0] == [], "до новой раскладки прошлой нет"
+    layout = layout_of(conn, montage_id)
+    assert {media_id for media_id, _ in layout} == set(ids), "а после сборки — новая"
+    assert layout[0][1] == 0 and all(start != 42 for _, start in layout)
+
+
 def test_a_montage_that_fell_leaves_the_stage_it_fell_on_marked_failed(conn, memory):
     """Упавший ролик оставляет журнал как есть — до какого места дошёл, видно, — а этап, который
     шёл в этот момент, помечен упавшим. Сделанное до него остаётся сделанным."""
