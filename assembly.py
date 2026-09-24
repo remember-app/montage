@@ -274,16 +274,19 @@ def _assemble(clips, track, out):
                  f"afade=t=out:st={total - fade:.3f}:d={fade:.3f}[a]")
 
     # `-protocol_whitelist` is an *input* option: ffmpeg scopes it to the group it precedes, so the
-    # one `media._ffmpeg` puts at the front guards input 0 and nothing else. This is the worker's
-    # only multi-input call, so it is the only place that has to repeat it — every clip and the
-    # track get their own, and the whitelist means the same thing on all of them.
+    # one `media._ffmpeg` puts at the front guards input 0 and nothing else — every clip and the
+    # track get their own. So does `-threads 1`, and the filter graph runs on one thread as well: a
+    # ten-minute montage is some three hundred clips open at once, and a thread pool on each of
+    # them took ffmpeg past its process's thread limit at about two hundred pieces on a ten-core
+    # machine. Only a clip or two is being decoded at any moment, and the encoder keeps its threads.
     inputs = [
         argument
         for clip in clips
-        for argument in ("-protocol_whitelist", "file", "-i", str(clip.path))
+        for argument in ("-protocol_whitelist", "file", "-threads", "1", "-i", str(clip.path))
     ]
     media._ffmpeg(
-        *inputs, *music, "-filter_complex", ";".join(chain), "-map", video, "-map", "[a]",
+        "-filter_complex_threads", "1", *inputs, *music,
+        "-filter_complex", ";".join(chain), "-map", video, "-map", "[a]",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-shortest", str(out),
     )
