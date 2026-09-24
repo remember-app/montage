@@ -244,6 +244,54 @@ def test_a_montage_assembled_again_starts_its_journal_from_a_clean_sheet(conn, m
     )
 
 
+def layout_of(conn, montage_id):
+    return conn.execute(
+        """SELECT media_id::text, start_seconds FROM montage_frames
+            WHERE montage_id = %s ORDER BY start_seconds""",
+        (montage_id,),
+    ).fetchall()
+
+
+def test_a_montage_assembled_again_does_not_show_the_last_attempts_layout(
+    conn, s3, memory, tmp_path, monkeypatch
+):
+    """Раскладка живёт и умирает вместе с журналом попытки. API присоединяет места кадров к записям
+    журнала по одному `montage_id`, без статуса ролика, — и повтор, оставивший прошлую раскладку до
+    своей, показывал бы на отсеве кадр там, где его поставил ролик, которого уже нет."""
+    journal_ready(conn)
+    ids = material(conn, s3, memory, tmp_path)
+    montage_id = order(conn, memory, {"target_seconds": 30, "music_tracks": []})
+    # Прошлая попытка дошла до склейки и упала: её журнал и её раскладка лежат в базе.
+    journal.begin(conn, montage_id, len(ids), 30)
+    journal.entry(conn, montage_id, "screening", media_id=ids[0], decision="skip",
+                  reason=selection.BLUR)
+    conn.execute(
+        """INSERT INTO montage_frames (montage_id, media_id, start_seconds, duration_seconds)
+           VALUES (%s, %s, 42, 3)""",
+        (montage_id, ids[0]),
+    )
+
+    before_the_new_one = []
+    writing = montage._write_layout
+
+    def watched(connection, ref, pieces):
+        if pieces:
+            with worker.connect() as watcher:
+                before_the_new_one.append(layout_of(watcher, montage_id))
+        return writing(connection, ref, pieces)
+
+    monkeypatch.setattr(montage, "_write_layout", watched)
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+    assert read_montage(conn, montage_id)[0] == "ready"
+
+    assert before_the_new_one[0] == [], "до новой раскладки прошлой нет"
+    layout = layout_of(conn, montage_id)
+    assert {media_id for media_id, _ in layout} == set(ids), "а после сборки — новая"
+    assert layout[0][1] == 0 and all(start != 42 for _, start in layout)
+
+
 def test_a_montage_that_fell_leaves_the_stage_it_fell_on_marked_failed(conn, memory):
     """Упавший ролик оставляет журнал как есть — до какого места дошёл, видно, — а этап, который
     шёл в этот момент, помечен упавшим. Сделанное до него остаётся сделанным."""
@@ -427,8 +475,11 @@ def test_the_director_tells_the_journal_the_plan_it_built(
     assert directing[0].thought.startswith("План на две части")
     assert [(one.media_id, one.decision, one.reason) for one in directing[1:]] == [
         (ids[0], "take", None), (ids[1], "take", None),
-        (ids[2], "skip", "собака не про этот вечер"), (ids[3], "skip", director.LEFT_OUT),
-    ], "порядком плана, а причина — словами модели там, где она их сказала"
+        (ids[2], "skip", director.LEFT_OUT), (ids[3], "skip", director.LEFT_OUT),
+    ], "порядком плана, а причина — кодом, который приложение называет своими словами"
+    assert (directing[3].thought, directing[4].thought) == ("собака не про этот вечер", None), (
+        "а слова модели о ней — мыслью там, где она их сказала"
+    )
 
     tort = directing[2]
     assert tort.thought.startswith("Вносят торт")
@@ -438,6 +489,32 @@ def test_the_director_tells_the_journal_the_plan_it_built(
     assert stages_of(conn, montage_id)["directing"]["outcome"] == {
         "frames": 2, "of": 4, "parts": 2, "part_titles": ["Сборы", "Торт"]
     }
+
+
+def test_the_parts_of_the_story_are_the_parts_the_video_has():
+    """«3 части, 61 кадр» — про ролик: часть, ни один кадр которой не влез в заказанную длину, в
+    итоге не считается, как не считаются в `frames` её кадры."""
+    thoughts = [
+        {"thought": "Три части: сборы, торт, прощание."},
+        {"media_id": "a", "decision": "take", "story_part": 1, "story_part_title": "Сборы"},
+        {"media_id": "b", "decision": "take", "story_part": 2, "story_part_title": "Торт"},
+        {"media_id": "c", "decision": "skip", "reason": selection.NO_ROOM, "story_part": 3,
+         "story_part_title": "Прощание"},
+    ]
+
+    assert montage._story_parts(thoughts) == {"parts": 2, "part_titles": ["Сборы", "Торт"]}
+
+
+def test_the_titles_in_the_directors_outcome_are_cleaned_like_the_entries():
+    """Названия частей — слова модели, а итог этапа видят все участники, как и реплики: в итог они
+    идут той же чисткой и тем же потолком, иначе служебный символ и простыня текста, отсечённые
+    у реплики, въехали бы на экран «Ролик готов» через итог."""
+    thoughts = [{"media_id": "a", "decision": "take", "story_part": 1,
+                 "story_part_title": "Сборы‮\nи\u0007 " + "я" * 200}]
+
+    (title,) = montage._story_parts(thoughts)["part_titles"]
+
+    assert title.startswith("Сборы и я") and len(title) == journal.TITLE_CHARACTERS
 
 
 def test_service_characters_in_the_models_words_do_not_reach_the_journal(conn, memory):
