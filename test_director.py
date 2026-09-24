@@ -208,7 +208,7 @@ def test_the_director_says_what_it_sees_which_part_it_is_and_where_to_look(descr
     """Рассказ режиссёра целиком, порядком плана: мысль о плане в целом первой и без кадра, за ней
     по реплике на каждый показанный кадр — мысль его словами, часть истории номером и названием,
     рамка «куда смотрит» долями, — а кадр, который он в план не взял, идёт «мимо» с его же
-    причиной, а не с кодом.
+    словами о причине.
     """
     film, thoughts, _ = directed(described, "gemini_plan_thoughts.json", story=STORY)
 
@@ -231,8 +231,9 @@ def test_the_director_says_what_it_sees_which_part_it_is_and_where_to_look(descr
         "focus_x": 0.3, "focus_y": 0.05, "focus_w": 0.25, "focus_h": 0.5,
     }
     assert about(thoughts, "m-3") == {
-        "media_id": "m-3", "decision": "skip", "reason": "собака не про этот вечер"
-    }
+        "media_id": "m-3", "decision": "skip", "reason": director.LEFT_OUT,
+        "thought": "собака не про этот вечер",
+    }, "причина — кодом, как везде в журнале, а слова модели о ней — мыслью: их и покажут людям"
 
 
 def test_a_plan_written_before_the_director_spoke_is_still_a_plan(described):

@@ -133,13 +133,14 @@ def direct(conn, pieces, target_seconds, include=(), exclude=(), story="", ref=N
             # журналом оркестратор.
             thoughts.append({"media_id": media_id})
 
-    # Остальное, что модели показали: «мимо» её же словами, если она их дала, и кодом, если нет.
+    # Остальное, что модели показали: «мимо» с кодом `left_out` и её словами о том, почему, — мыслью:
+    # причину журнал держит кодом, и слова в ней приложение показало бы как «не подошёл».
     # Отсеянного и съеденного дедупом модель не видела, и здесь их нет: о первом рассказал отсев,
     # второй — в «взял 1 из N» оставшегося от серии.
     for media_id in candidates:
         if media_id not in taken:
-            thoughts.append({"media_id": media_id,
-                             "reason": planned.get("left_out", {}).get(media_id) or LEFT_OUT})
+            thoughts.append({"media_id": media_id, "reason": LEFT_OUT,
+                             "thought": planned.get("left_out", {}).get(media_id)})
     # Вычеркнутого модель тоже не видела, но «мимо» у него есть — слово организатора, как на пути
     # отсева (`selection.choose`): кроме этой записи, о нём в журнале не рассказал бы никто.
     thoughts += ({"media_id": piece.media_id, "reason": selection.EXCLUDED}

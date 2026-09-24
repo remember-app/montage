@@ -475,8 +475,11 @@ def test_the_director_tells_the_journal_the_plan_it_built(
     assert directing[0].thought.startswith("План на две части")
     assert [(one.media_id, one.decision, one.reason) for one in directing[1:]] == [
         (ids[0], "take", None), (ids[1], "take", None),
-        (ids[2], "skip", "собака не про этот вечер"), (ids[3], "skip", director.LEFT_OUT),
-    ], "порядком плана, а причина — словами модели там, где она их сказала"
+        (ids[2], "skip", director.LEFT_OUT), (ids[3], "skip", director.LEFT_OUT),
+    ], "порядком плана, а причина — кодом, который приложение называет своими словами"
+    assert (directing[3].thought, directing[4].thought) == ("собака не про этот вечер", None), (
+        "а слова модели о ней — мыслью там, где она их сказала"
+    )
 
     tort = directing[2]
     assert tort.thought.startswith("Вносят торт")
