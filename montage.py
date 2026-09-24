@@ -81,7 +81,8 @@ def montage(conn, ref):
     params = params or {}
     conn.execute("UPDATE montages SET status = 'processing', updated_at = now() WHERE id = %s", (ref,))
 
-    target_seconds = float(params.get("target_seconds") or selection.DEFAULT_TARGET_SECONDS)
+    target_seconds = min(float(params.get("target_seconds") or selection.DEFAULT_TARGET_SECONDS),
+                         selection.MAX_SECONDS)
     # Под что собирать: названия треков по порядку, ещё не файлы — качать их незачем, пока не
     # известно, есть ли из чего собирать ролик. Пустой список — заказ «без музыки», и тогда звучит
     # сам материал (ниже).

@@ -26,6 +26,7 @@ import assembly
 import media
 
 DEFAULT_TARGET_SECONDS = 60.0  # what the api fills `params.target_seconds` with when nobody says
+MAX_SECONDS = 600.0  # the api's `maxSeconds`: ten minutes, as long as a video may ever run
 
 # A still held on screen; a plain frame, no Ken Burns. The same 2.5 seconds the api counts the
 # longest orderable video by — every video whole and 2.5 seconds a photo, less a crossfade a join,
@@ -335,8 +336,10 @@ def choose(pieces, target_seconds, include=(), exclude=()):
     still = next((piece for piece in no_room if piece.kind != "video"), None)
     short = target_seconds - assembly.length_of(chosen) - sum(map(_room, chosen))
     if still and assembly.length_of(chosen + [still]) - target_seconds < short:
-        chosen.append(still)
         no_room.remove(still)
+        # Past ten minutes the still is held that much shorter, and the video ends on them.
+        past = assembly.length_of(chosen + [still]) - MAX_SECONDS
+        chosen.append(cut_to(still, still.seconds - max(past, 0.0)))
     rejected += (dataclasses.replace(piece, rejected=NO_ROOM) for piece in no_room)
     return sorted(chosen, key=lambda piece: piece.when), rejected
 

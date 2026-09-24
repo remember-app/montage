@@ -234,20 +234,20 @@ def test_a_video_ordered_out_of_material_to_spare_comes_out_the_length_it_was_or
     )
 
 
-def test_a_ten_minute_order_out_of_stills_alone_takes_every_one_it_can_hold_at_2_5_seconds():
+def test_a_ten_minute_order_out_of_stills_alone_takes_every_one_it_can_hold_and_ends_on_it():
     """Stills never stretch, so an order they alone must fill is filled by how many of them go in,
     and 2.5 seconds each is the arithmetic the api counts the ceiling by. Four hundred photographs
-    of material against ten minutes: three hundred go in, every one at its 2.5, and the video is
-    half a second past the order — 299 would fall a second and a half short of it, and the 301st
-    would run two and a half past."""
+    of material against ten minutes: 299 fall a second and a half short, and the 300th would run
+    half a second past — the edge of any video, so that one is held half a second shorter and the
+    video ends on ten minutes exactly."""
     material = [at(number * 10, 50, media_id=f"p{number}") for number in range(400)]
 
     chosen, rejected = selection.choose(material, 600)
     video = selection.stretch(chosen, 600)
 
-    assert {piece.seconds for piece in video} == {selection.PHOTO_SECONDS}
-    assert len(video) == 300 and len(rejected) == 100
-    assert assembly.length_of(video) == 600.5
+    assert sorted(piece.seconds for piece in video) == [2.0] + [selection.PHOTO_SECONDS] * 299
+    assert len(rejected) == 100
+    assert assembly.length_of(video) == selection.MAX_SECONDS
 
 
 def ceiling(material):
@@ -265,7 +265,8 @@ def test_an_order_for_every_still_there_is_gets_every_still(photos):
     last still cannot be cut to fit that and nothing else can be held longer to make up for it, so
     it goes in half a second past the order rather than leaving the video a second and a half short
     of it: three photographs ordered at six seconds are a video of 6.5 out of all three, not of 4.5
-    out of two. At three hundred the ceiling is ten minutes, and the same half second."""
+    out of two. At three hundred the ceiling is ten minutes, which no video runs past: that half
+    second comes off the last still instead."""
     material = [at(number * 10, 50 + number, media_id=f"p{number}") for number in range(photos)]
     target = ceiling(material)
 
@@ -274,7 +275,7 @@ def test_an_order_for_every_still_there_is_gets_every_still(photos):
 
     assert target == 2 * photos
     assert rejected == [] and len(video) == photos
-    assert assembly.length_of(video) == target + 0.5
+    assert assembly.length_of(video) == min(target + 0.5, selection.MAX_SECONDS)
 
 
 def test_a_clip_held_whole_cannot_make_up_for_the_last_still_either():
