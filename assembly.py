@@ -137,7 +137,7 @@ def length_of(pieces):
     return sum(piece.seconds for piece in pieces) - CROSSFADE_SECONDS * (len(pieces) - 1)
 
 
-def assemble(pieces, orientation, track, workdir, out, on_clip=None):
+def assemble(pieces, orientation, track, workdir, out, on_clip=None, max_seconds=None):
     """The chosen pieces as one video at `out`, and the normalised clips it was made of.
 
     `track` is a file — the montage's whole soundtrack, however many tracks of whose it was built
@@ -154,6 +154,11 @@ def assemble(pieces, orientation, track, workdir, out, on_clip=None):
     thing this module tells anybody while it works, and the montage takes minutes: «склеено 12 из
     61» on the live screen is that number and nothing else. Nothing is asked of it and nothing is
     read back, so a caller with nothing to show simply does not pass one.
+
+    `max_seconds` is the longest the file may run. The pieces are already planned inside it
+    (`selection.cap`), but every clip is encoded to the nearest frame of what it was asked for, and
+    over a few hundred pieces those roundings add up to a fraction of a second either way — so a
+    plan that ends on the ceiling can come out a few frames past it, and those frames are cut off.
     """
     clips = []
     for index, piece in enumerate(pieces):
@@ -169,7 +174,7 @@ def assemble(pieces, orientation, track, workdir, out, on_clip=None):
         clips.append(dataclasses.replace(
             piece, path=clip, seconds=media._duration(clip) or piece.seconds
         ))
-    _assemble(clips, track, out)
+    _assemble(clips, track, out, max_seconds)
     return clips
 
 
@@ -233,10 +238,13 @@ def _normalise(piece, orientation, out, live_sound=False):
     )
 
 
-def _assemble(clips, track, out):
+def _assemble(clips, track, out, max_seconds=None):
     """The normalised clips into one file: crossfaded end to end, and the sound with them — the
     track faded over the top, or the clips' own sound when the order asked for no music."""
-    total = length_of(clips)
+    total, cut = length_of(clips), ()
+    if max_seconds is not None and total > max_seconds:
+        # The picture is cut at the ceiling and the sound fades out on it rather than past it.
+        total, cut = max_seconds, ("-t", f"{max_seconds:.3f}")
 
     # Each xfade joins everything built so far to the next clip, starting half a second before the
     # chain ends — so the chain grows by the clip's length minus the overlap, which is `length_of`.
@@ -288,5 +296,5 @@ def _assemble(clips, track, out):
         "-filter_complex_threads", "1", *inputs, *music,
         "-filter_complex", ";".join(chain), "-map", video, "-map", "[a]",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-shortest", str(out),
+        "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-shortest", *cut, str(out),
     )

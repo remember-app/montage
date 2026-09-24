@@ -260,6 +260,10 @@ def montage(conn, ref):
         journal.finish(conn, ref, "rhythm", track=ordered_music, bpm=rhythm.tempo(moments),
                        cuts=moved)
 
+        # Десять минут — предел любого ролика, а за него могут вывести и «включить», и режиссёр, и
+        # биты. Держится он один раз, после всех них: лишнее срезается с хвоста (`selection.cap`).
+        chosen = selection.cap(chosen)
+
         # Which piece stands where in the video is settled by this line and nothing below moves it:
         # `_back_to_originals` swaps a file and `assembly` encodes what it is given. So the layout
         # is written here rather than at the end — assembling a montage takes minutes, and the
@@ -277,6 +281,7 @@ def montage(conn, ref):
             # По готовому куску, а не по каждому движению ffmpeg: «склеено 12 из 61» — это всё, что
             # сборка может рассказать о себе, пока идёт, и этого хватает.
             on_clip=lambda done: journal.progress(conn, ref, "assembly", done),
+            max_seconds=selection.MAX_SECONDS,
         )
         # The same layout again, off the clips as they were really encoded. `assemble` measures
         # every normalised piece instead of believing the length it asked for, and a clip whose
