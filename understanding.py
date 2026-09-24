@@ -71,7 +71,7 @@ def media_understanding(conn, ref):
         frames = _frames(preview, workdir) if kind == "video" else [_blob(preview)]
         described = brain.describe_media(frames, cast=_cast(conn, memory_id), ref=ref)
 
-    description = (described.get("description") or "").strip()
+    description = ai._said(described.get("description"))
     if not description:
         # An answer without the one thing that was asked for. Raising retries the job like any other
         # failure; storing it would mark the frame described for good and hand the director a blank.
@@ -103,8 +103,10 @@ def _cast(conn, memory_id):
 
 
 def _labels(cast):
-    """The labels out of the model's answer: text, trimmed, in the order given, without repeats."""
-    named = (str(name).strip() for name in cast or [])
+    """The labels out of the model's answer: strings out of a list, trimmed, in the order given,
+    without repeats. Nothing else is a label — a string in place of the list would otherwise be kept
+    on the frame for good, one letter per label."""
+    named = (ai._said(name) for name in ai._listed(cast))
     return list(dict.fromkeys(name for name in named if name))
 
 

@@ -369,7 +369,8 @@ class AI:
         same person keeps one label across a whole memory without a face database of our own
         (doc-03, decision-9).
 
-        Returns {"description": ..., "cast": [...]} or None when no model is configured.
+        Returns the model's answer — asked for as {"description": ..., "cast": [...]}, and read as
+        the untrusted thing it is (`understanding`) — or None when no model is configured.
         """
         known = ", ".join(cast) if cast else "пока никого"
         prompt = f"Уже известные действующие лица этого воспоминания: {known}."
