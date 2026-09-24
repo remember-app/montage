@@ -13,6 +13,7 @@ is left `ready` with the derivative keys on it.
 import collections
 import json
 import logging
+import math
 import os
 import pathlib
 import re
@@ -20,12 +21,9 @@ import subprocess
 import tempfile
 
 import boto3
-import pi_heif
 from botocore.config import Config
-from PIL import ExifTags, Image
 
-# HEIC is what an iPhone uploads, and Pillow opens it only once this is said (`_photo_info`).
-pi_heif.register_heif_opener()
+import photo
 
 STALE_UPLOAD_HOURS = 24  # a day in `pending_upload` means the phone is not coming back
 
@@ -38,6 +36,7 @@ STALE_UPLOAD_HOURS = 24  # a day in `pending_upload` means the phone is not comi
 # A denylist and not an allowlist on purpose: format names vary by build and by camera, and being
 # wrong here must mean «one exotic container slips through», never «every photo is refused».
 PLAYLIST_FORMATS = {"hls", "applehttp", "concat", "ffconcat", "dash", "sdp", "rtsp", "rtp"}
+PROBE_SECONDS = 60  # ffprobe reads a header; one still at it a minute on is not coming back
 THUMBNAIL_WIDTH = 640  # the gallery grid
 PREVIEW_HEIGHT = 720  # «версия 720p H.264» (architecture.md)
 PREVIEW_LONG_SIDE = 2048  # a photo opened full screen on a phone, retina included
@@ -84,10 +83,10 @@ def bucket():
 # --- ffmpeg -----------------------------------------------------------------
 
 
-def _run(*args):
+def _run(*args, timeout=None):
     """A tool, its output, and its stderr in the exception when it fails — that text is what ends
     up in `jobs.last_error`, so it is the only account of what went wrong."""
-    done = subprocess.run(args, capture_output=True, text=True)
+    done = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
     if done.returncode != 0:
         raise RuntimeError(f"{args[0]} failed: {done.stderr.strip()[-500:]}")
     return done.stdout
@@ -106,6 +105,7 @@ def _ffprobe(entry, path):
         "ffprobe", "-v", "error", "-protocol_whitelist", "file",
         "-show_entries", f"format={entry}",
         "-of", "default=noprint_wrappers=1:nokey=1", str(path),
+        timeout=PROBE_SECONDS,
     ).strip()
 
 
@@ -124,12 +124,13 @@ def _dimensions(path):
     saying to stand it up, and answers here the way it plays — taller than wide. Everything that
     decodes it sees the same picture: ffmpeg turns it on the way out unless told not to.
 
-    A photograph's turn is written in EXIF instead, which ffmpeg reads only from version 8 and out
-    of HEIC not even there — those are measured by Pillow in `_photo_info`.
+    A photograph's turn is written in EXIF instead, which ffprobe does not hand over as a
+    rotation — those are measured by Pillow (`photo.read`).
     """
     probed = _run(
         "ffprobe", "-v", "error", "-protocol_whitelist", "file", "-select_streams", "v:0",
         "-show_entries", "stream=width,height:stream_side_data=rotation", "-of", "json", str(path),
+        timeout=PROBE_SECONDS,
     )
     try:
         stream, = json.loads(probed)["streams"]
@@ -137,6 +138,10 @@ def _dimensions(path):
     except (ValueError, KeyError):
         # Nothing to read the size off: no picture in the file at all, or more than one answer.
         # Callers treat that as «cannot say» and fall back on what they had.
+        return None
+    if width < 1 or height < 1:
+        # A header ffmpeg will not believe — a size it would refuse to allocate — comes back as
+        # zeros, and «0 × 0» on the sheet is no better an answer than none.
         return None
     # A quarter turn either way swaps the sides; half a turn and none leave them as they are.
     upended = any(abs(side.get("rotation", 0)) % 180 == 90
@@ -210,11 +215,15 @@ def media_preview(conn, ref):
             preview_key = f"previews/{ref}.mp4"
             _upload(s3, preview, preview_key, "video/mp4")
         else:
-            _ffmpeg("-i", str(original), "-frames:v", "1", "-vf", THUMBNAIL_SCALE, str(thumbnail))
+            # A HEIC goes to ffmpeg already stood up: it does not apply the file's own turn
+            # (`photo.stand_up`), and JPEG's EXIF orientation it does.
+            upright = workdir / "upright.jpg"
+            seen = upright if photo.stand_up(original, upright) else original
+            _ffmpeg("-i", str(seen), "-frames:v", "1", "-vf", THUMBNAIL_SCALE, str(thumbnail))
             # The full-screen copy. The original stays where it is — it is what the montage is cut
             # from — but a phone must not have to pull forty megapixels down to look at one frame.
             # `-q:v 3` because the whole point of this file is that it is sharp.
-            _ffmpeg("-i", str(original), "-frames:v", "1", "-vf", PHOTO_PREVIEW_SCALE,
+            _ffmpeg("-i", str(seen), "-frames:v", "1", "-vf", PHOTO_PREVIEW_SCALE,
                     "-q:v", "3", str(preview))
             preview_key = f"previews/{ref}.jpg"
             _upload(s3, preview, preview_key, "image/jpeg")
@@ -314,74 +323,29 @@ FrameInfo = collections.namedtuple(
     "FrameInfo", "width height camera_model focal_length_mm aperture latitude longitude"
 )
 NOTHING = FrameInfo(None, None, None, None, None, None, None)  # a file that says nothing at all
-
-# The EXIF orientations that lay the picture on its side: the sensor wrote its frame one way round
-# and the person sees it the other. «6» is the sideways phone photograph every gallery is full of.
-UPENDED = {5, 6, 7, 8}
+MODEL_LENGTH = 100  # «iPhone 15 Pro», «SM-S918B» — a camera's name, not a paragraph
 
 # ±DD.DDDD±DDD.DDDD±AAA.AAA/ — how a phone writes down where a clip was shot (ISO 6709). The third
 # number is the altitude, which nobody asks for.
-# ponytail: decimal degrees only. The standard also allows ±DDMM.MM, and a camera that writes it
-# that way would land here as no place at all — add it when one turns up.
+# ponytail: decimal degrees only. The standard also allows ±DDMM.MM, which reads here as degrees far
+# off the globe and is dropped by `_plausible` — a camera that writes it lands as no place at all;
+# add the minutes when one turns up.
 ISO6709 = re.compile(r"([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)")
-
-
-def _number(value):
-    """A number as EXIF holds it — a rational, as a rule. None when the tag is not there at all,
-    and when what is in it will not become a number."""
-    try:
-        return float(value)
-    except (TypeError, ValueError, ZeroDivisionError):
-        return None
-
-
-def _degrees(value, hemisphere):
-    """One EXIF coordinate: degrees, minutes and seconds in one tag, north or south in another."""
-    parts = [_number(part) for part in value] if isinstance(value, tuple) else []
-    if len(parts) != 3 or None in parts:
-        return None
-    degrees = parts[0] + parts[1] / 60 + parts[2] / 3600
-    return -degrees if str(hemisphere or "").strip().upper() in ("S", "W") else degrees
 
 
 def _photo_info(path):
     """A photograph's size and its own EXIF — HEIC off an iPhone as readily as JPEG.
 
     Read by a library and not by ffprobe, which is otherwise this module's every answer about a
-    file: ffmpeg hands EXIF over from version 8 onward, and out of HEIC not at all before it, so
-    whether the sheet had a camera line would depend on which ffmpeg the host happens to carry.
+    file: ffprobe hands EXIF over only as frame tags of a JPEG and out of HEIC not at all, so
+    whether the sheet had a camera line would depend on the file's format and the host's ffmpeg.
+    The library runs in a process of its own (`photo.py`): a corrupt HEIC can crash it.
     """
-    try:
-        with Image.open(path) as photo:
-            width, height = photo.size
-            exif = photo.getexif()
-            model = exif.get(ExifTags.Base.Model)
-            if exif.get(ExifTags.Base.Orientation) in UPENDED:
-                # The sideways phone: the file holds the sensor's frame and a note saying which way
-                # up it goes, and the size a person sees is that note applied. HEIC comes out of
-                # `pi_heif` already turned, with the note reset to «1», so this is JPEG's case.
-                width, height = height, width
-            optics = exif.get_ifd(ExifTags.IFD.Exif)
-            place = exif.get_ifd(ExifTags.IFD.GPSInfo)
-    except (OSError, ValueError, SyntaxError, Image.DecompressionBombError) as exc:
-        # Not a picture this library knows — and `kind` is only the phone's word for the file.
-        # Nothing to read is not a failure: the frame keeps its empty columns like any other, and
-        # the size is asked of ffprobe instead (`frame_info`).
-        log.info("nothing to read a camera off: %s", exc)
-        return NOTHING
-    return FrameInfo(
-        width=width,
-        height=height,
-        # EXIF keeps the make («Apple») in a tag of its own — «iPhone 15 Pro» is the model alone.
-        camera_model=str(model or "").strip() or None,
-        focal_length_mm=_number(optics.get(ExifTags.Base.FocalLength)),
-        # The f-number, so that 1.8 is what the app puts on screen as «f/1.8».
-        aperture=_number(optics.get(ExifTags.Base.FNumber)),
-        latitude=_degrees(place.get(ExifTags.GPS.GPSLatitude),
-                          place.get(ExifTags.GPS.GPSLatitudeRef)),
-        longitude=_degrees(place.get(ExifTags.GPS.GPSLongitude),
-                           place.get(ExifTags.GPS.GPSLongitudeRef)),
-    )
+    found = photo.read(path)
+    # Not a picture the library knows, or the reader died — `kind` is only the phone's word for the
+    # file. Nothing to read is not a failure: the frame keeps its empty columns like any other, and
+    # the size is asked of ffprobe instead (`frame_info`).
+    return FrameInfo(**found) if found else NOTHING
 
 
 def _clip_info(path):
@@ -389,7 +353,7 @@ def _clip_info(path):
     and nothing about the optics, which it writes nowhere. Nothing is decoded for these."""
     tags = json.loads(_run(
         "ffprobe", "-v", "error", "-protocol_whitelist", "file",
-        "-show_entries", "format_tags", "-of", "json", str(path),
+        "-show_entries", "format_tags", "-of", "json", str(path), timeout=PROBE_SECONDS,
     )).get("format", {}).get("tags", {})
     # An iPhone keeps both under its own names; ffmpeg gives Android's place as a plain `location`.
     place = tags.get("com.apple.quicktime.location.ISO6709") or tags.get("location")
@@ -399,6 +363,29 @@ def _clip_info(path):
                      or None,
         latitude=float(where[1]) if where else None,
         longitude=float(where[2]) if where else None,
+    )
+
+
+def _plausible(info):
+    """What the camera wrote, minus what no column and no map can use. Numbers: NaN and infinity (an
+    EXIF rational over zero, a run of digits in a clip's place tag), an optic that is not a positive
+    length, a place off the globe — a tag in degrees-and-minutes read as decimal degrees — and the
+    point (0, 0) itself, which is where a camera with no satellite fix writes its place. And the
+    model, which is the file's own text served to every member of the memory: one short line, since
+    a NUL in it is refused by the `text` column, which fails the job three times over for good."""
+    def positive(value):
+        return value if value is not None and math.isfinite(value) and value > 0 else None
+
+    model = "".join(char for char in info.camera_model or "" if char.isprintable())
+    a_place = (info.latitude is not None and info.longitude is not None
+               and abs(info.latitude) <= 90 and abs(info.longitude) <= 180
+               and (info.latitude, info.longitude) != (0, 0))
+    return info._replace(
+        camera_model=model.strip()[:MODEL_LENGTH] or None,
+        focal_length_mm=positive(info.focal_length_mm),
+        aperture=positive(info.aperture),
+        latitude=info.latitude if a_place else None,
+        longitude=info.longitude if a_place else None,
     )
 
 
@@ -423,7 +410,7 @@ def frame_info(path, kind):
         # gallery at all has a size here.
         width, height = _dimensions(path) or (None, None)
         info = info._replace(width=width, height=height)
-    return info
+    return _plausible(info)
 
 
 def media_frame_info(conn, ref):
@@ -459,8 +446,10 @@ def media_frame_info(conn, ref):
            WHERE id = %s""",
         (*info, ref),
     )
-    found = {name: value for name, value in info._asdict().items() if value is not None}
-    log.info("media item %s: %s", ref, found or "the file says nothing about size, camera or place")
+    # Which of them, not what: the place is where somebody was, and a log is read by more people
+    # (and kept longer) than the sheet is shown to.
+    found = [name for name, value in info._asdict().items() if value is not None]
+    log.info("media item %s: read %s", ref, ", ".join(found) or "nothing about size, camera or place")
 
 
 # --- the sweep --------------------------------------------------------------

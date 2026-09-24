@@ -62,7 +62,8 @@ def direct(conn, pieces, target_seconds, include=(), exclude=(), story="", ref=N
     the tests; the worker takes the gateway the environment gives it.
 
     Слова режиссёра — вторым, готовыми полями журнала (`journal.COLUMNS`), порядком плана: первой
-    мысль о плане в целом, за ней по записи на каждый показанный модели кадр.
+    мысль о плане в целом, за ней по записи на каждый показанный модели кадр и «мимо» на каждом
+    вычеркнутом организатором.
     """
     brain = brain or ai.AI(conn)
     if brain.provider is None:
@@ -76,17 +77,13 @@ def direct(conn, pieces, target_seconds, include=(), exclude=(), story="", ref=N
     # One shot per moment, by the отбор's own дедуп: a director shown a whole burst can put two
     # frames of the same second next to each other in the plan, and every duplicate in the question
     # is paid for as well. «Включить» wins its burst here exactly as it does in `selection.choose`.
-    kept, duplicates = selection._dedup(material, always=include)
-    swallowed = {piece.media_id for piece in duplicates}
-    # Размер серии — с оставшегося от неё кадра, и дальше он едет с куском до журнала: «взял 1 из 4»
-    # на режиссёрском этапе — та же одна запись, что и на пути отсева. Порядок вопроса при этом
-    # наш, а не дедупа: спрашивается тот же материал и в том же порядке, в каком читается
+    kept = {piece.media_id: piece for piece in selection._dedup(material, always=include)[0]}
+    # Оставшийся от серии кадр несёт её размер (`_dedup`), и дальше он едет с куском до журнала:
+    # «взял 1 из 4» на режиссёрском этапе — та же одна запись, что и на пути отсева. Порядок вопроса
+    # при этом наш, а не дедупа: спрашивается тот же материал и в том же порядке, в каком читается
     # воспоминание, — дедуп возвращает кадры своим (кто без даты съёмки, тот первым).
-    series = {piece.media_id: piece.series_size for piece in kept}
-    candidates = {
-        piece.media_id: dataclasses.replace(piece, series_size=series[piece.media_id])
-        for piece in material if piece.media_id not in swallowed
-    }
+    candidates = {piece.media_id: kept[piece.media_id]
+                  for piece in material if piece.media_id in kept}
     known = _known(conn, candidates)
     if not any(what.get("description") for what in known.values()):
         # Nothing has been described yet — the memory became ready before there was a key, and the
@@ -132,13 +129,18 @@ def direct(conn, pieces, target_seconds, include=(), exclude=(), story="", ref=N
             # журналом оркестратор.
             thoughts.append({"media_id": media_id})
 
-    # Остальное, что модели показали: «мимо» её же словами, если она их дала, и кодом, если нет.
-    # Кадр, которого она не видела — отсеянный, вычеркнутый, съеденный дедупом, — здесь не
-    # появляется: рассказывать о нём режиссёрскому этапу нечего.
+    # Остальное, что модели показали: «мимо» с кодом `left_out` и её словами о том, почему, — мыслью:
+    # причину журнал держит кодом, и слова в ней приложение показало бы как «не подошёл».
+    # Отсеянного и съеденного дедупом модель не видела, и здесь их нет: о первом рассказал отсев,
+    # второй — в «взял 1 из N» оставшегося от серии.
     for media_id in candidates:
         if media_id not in taken:
-            thoughts.append({"media_id": media_id,
-                             "reason": planned.get("left_out", {}).get(media_id) or LEFT_OUT})
+            thoughts.append({"media_id": media_id, "reason": LEFT_OUT,
+                             "thought": planned.get("left_out", {}).get(media_id)})
+    # Вычеркнутого модель тоже не видела, но «мимо» у него есть — слово организатора, как на пути
+    # отсева (`selection.choose`): кроме этой записи, о нём в журнале не рассказал бы никто.
+    thoughts += ({"media_id": piece.media_id, "reason": selection.EXCLUDED}
+                 for piece in pieces if piece.media_id in exclude and not piece.rejected)
 
     fitted = []
     for piece in chosen:

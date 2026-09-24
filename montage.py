@@ -44,6 +44,7 @@ import assembly
 import director
 import journal
 import media
+import photo
 import rhythm
 import selection
 
@@ -123,6 +124,10 @@ def montage(conn, ref):
     # первой секунды, а рассказ о каждом дописывается по ходу (`journal.py`). Повтор того же ролика
     # начинает журнал с чистого листа.
     journal.begin(conn, ref, len(items), target_seconds)
+    # Раскладка прошлой попытки уходит вместе с её журналом: API присоединяет места кадров к записям
+    # по одному `montage_id`, и до новой раскладки (после ритма) новая попытка показывала бы кадры
+    # там, где их поставила прошлая.
+    _write_layout(conn, ref, ())
 
     video_key = f"montages/{ref}.mp4"
     s3 = media.storage()
@@ -262,7 +267,7 @@ def montage(conn, ref):
 
         # And only now, for the photographs that actually made the cut, whether the copy they were
         # judged on is also the file the piece is cut from.
-        chosen = _back_to_originals(chosen, originals, orientation)
+        chosen = _back_to_originals(chosen, originals, orientation, workdir)
 
         assembled = workdir / "montage.mp4"
         journal.start(conn, ref, "assembly", total=len(chosen))
@@ -409,12 +414,11 @@ def _what_was_seen(conn, ref, judged):
     этого не исчезает с экрана — он честно говорит «описано 0 из 14», и это сегодняшнее состояние
     продукта, пока ключа от модели нет (decision-10), а не пропущенный шаг.
 
-    Описание — единственное место в журнале, где стоят чужие слова, а не код: их сказала модель, и
-    приложению их только показать. Метки «что увидел» — `cast_labels` воспоминания, по ним же
-    считается и итог этапа: «37 лиц, 5 людей в главных» (контракт api, `faces`, `people`,
-    `animals`). Лица — сколько раз человек попал в кадр, то есть сумма меток людей по всем
-    разобранным кадрам; люди и животные — сколько их всего, по разным меткам: один и тот же
-    «человек-1» на двадцати кадрах — двадцать лиц и один человек.
+    Описание — слова модели, а не код: приложению их только показать. Метки «что увидел» —
+    `cast_labels` воспоминания, по ним же считается и итог этапа: «37 лиц, 5 людей в главных»
+    (контракт api, `faces`, `people`, `animals`). Лица — сколько раз человек попал в кадр, то есть
+    сумма меток людей по всем разобранным кадрам; люди и животные — сколько их всего, по разным
+    меткам: один и тот же «человек-1» на двадцати кадрах — двадцать лиц и один человек.
     """
     journal.start(conn, ref, "understanding", total=len(judged))
     seen = conn.execute(
@@ -454,12 +458,8 @@ def _write_choices(conn, ref, chosen, turned_down, include, judged):
     """
     told = {piece.media_id for piece in judged if piece.rejected}
     for piece in chosen:
-        journal.entry(
-            conn, ref, "directing", media_id=piece.media_id, decision="take",
-            reason=ORGANIZER_ASKED if piece.media_id in include else None,
-            series_size=piece.series_size if piece.series_size > 1 else None,
-            **_source_cut(piece),
-        )
+        journal.entry(conn, ref, "directing", media_id=piece.media_id, decision="take",
+                      **_taken(piece, include))
     for piece in turned_down:
         if piece.rejected == selection.DUPLICATE or piece.media_id in told:
             continue  # серия рассказана одной записью выше, отсеянный — на своём этапе
@@ -481,15 +481,7 @@ def _write_thoughts(conn, ref, chosen, thoughts, include):
         fields = dict(thought)
         piece = laid.get(fields.get("media_id"))
         if piece is not None:
-            # «Включить» — слово организатора, и в журнале оно его: тот же `included`, что у отсева,
-            # поверх любой мысли модели об этом кадре.
-            if piece.media_id in include:
-                fields["reason"] = ORGANIZER_ASKED
-            # И серия — та же одна запись «взял 1 из 4», что у отсева: модели показали один кадр из
-            # неё, а размер серии приехал на нём самом (`director.direct`).
-            if piece.series_size > 1:
-                fields["series_size"] = piece.series_size
-            fields.update(_source_cut(piece))
+            fields.update(_taken(piece, include))
         journal.entry(conn, ref, "directing", **fields)
 
 
@@ -497,32 +489,38 @@ def _story_parts(thoughts):
     """На какие части режиссёр разложил историю — итогом этапа: сколько их и как они называются.
 
     По самим репликам, а не отдельным полем плана: часть у кадра уже названа, и второй счёт рядом с
-    первым разошёлся бы с ним. Частей нет вовсе — ролик резал отсев, или в плане их не было, — и
-    итог о них молчит: отсутствующий ключ экран просто не рисует.
+    первым разошёлся бы с ним. И только по взятым: «3 части, 61 кадр» — про ролик, и часть, ни один
+    кадр которой не влез в заказанную длину, в нём не стоит. Частей нет вовсе — ролик резал отсев,
+    или в плане их не было, — и итог о них молчит: отсутствующий ключ экран просто не рисует.
+
+    Названия — слова модели, и в итог они идут той же чисткой и тем же потолком, что в реплику
+    (`journal._fit`): итог — `jsonb` без `CHECK`, и держать их там больше некому.
     """
     parts = {}
     for thought in thoughts:
-        if thought.get("story_part"):
-            parts.setdefault(thought["story_part"], thought.get("story_part_title"))
+        if thought.get("story_part") and thought.get("decision") == "take":
+            parts.setdefault(thought["story_part"], journal._fit(thought).get("story_part_title"))
     if not parts:
         return {}
     return {"parts": len(parts),
             "part_titles": [parts[number] for number in sorted(parts) if parts[number]] or None}
 
 
-def _source_cut(piece):
-    """Какой кусок исходника пойдёт в ролик, секундами от начала файла.
-
-    Фотографию держат целиком, и куска исходника у неё нет — в ролик идёт вся, а колонки остаются
-    пустыми.
+def _taken(piece, include):
+    """Что о взятом куске знаем мы, а не режиссёр, — одинаково на обоих путях: по чьему слову он в
+    ролике (`included`, поверх любой мысли модели), из какой серии остался («взял 1 из 4», размер
+    едет на самом куске) и какой кусок исходника пойдёт в ролик, секундами от начала файла. У
+    фотографии куска исходника нет — в ролик идёт вся.
     """
-    if piece.kind != "video":
-        return {}
-    return {"source_from_seconds": round(piece.start, 2),
-            "source_to_seconds": round(piece.start + piece.seconds, 2)}
+    fields = {"reason": ORGANIZER_ASKED if piece.media_id in include else None,
+              "series_size": piece.series_size if piece.series_size > 1 else None}
+    if piece.kind == "video":
+        fields.update(source_from_seconds=round(piece.start, 2),
+                      source_to_seconds=round(piece.start + piece.seconds, 2))
+    return fields
 
 
-def _back_to_originals(chosen, originals, orientation):
+def _back_to_originals(chosen, originals, orientation, workdir):
     """The chosen pieces again, each photograph put back on its original where the large copy it
     was judged on is too small for the canvas.
 
@@ -538,11 +536,22 @@ def _back_to_originals(chosen, originals, orientation):
 
     Videos are never on a copy to begin with: their preview is a 720p re-encode, which is half the
     height the montage is assembled at and smoothed over exactly where sharpness is measured.
+
+    A HEIC is the exception to all of it: ffmpeg does not apply its `irot` turn, so a portrait photo
+    off an iPhone cut from the original — or from a copy made before previews stood it up — lies on
+    its side in the video. It is cut from the file libheif has turned instead (`photo.stand_up`),
+    whatever copy it was judged on: a copy of unknown orientation is the one thing that cannot be
+    told from here.
     """
     width, height = assembly.CANVASES[orientation]
     pieces = []
     for piece in chosen:
         original = originals[piece.media_id]
+        if piece.kind == "photo":
+            upright = workdir / f"upright-{piece.media_id}.jpg"
+            if photo.stand_up(original, upright):
+                pieces.append(dataclasses.replace(piece, path=upright))
+                continue
         if piece.path != original:
             size = media._dimensions(piece.path)
             if not (size and size[0] >= width and size[1] >= height):
@@ -559,8 +568,8 @@ def _write_layout(conn, ref, pieces):
 
     The table is the api's (its migration `100.do.frame-info.sql`) and this is the only thing that
     writes it: the api reads it to answer «в каких роликах стоит этот кадр и на какой секунде» on
-    the frame sheet (doc-02), and it asks only about montages that are already `ready` — so rows
-    under a video that then failed to assemble are seen by nobody until it is made again. One row
+    the frame sheet (doc-02), for `ready` montages only, and to place frames in the montage journal,
+    for a montage in any state — which is why an attempt starts by writing it empty. One row
     per *appearance* rather than per frame, which is why the key carries the second: a file may
     legitimately stand in a video twice — a clip cut in two, a photograph that comes back at the
     end. The whole of m-24 and its neighbours read this one table; a montage's layout written down

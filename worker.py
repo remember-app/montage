@@ -136,8 +136,17 @@ def sweep_media_without_frame_info(conn):
     made its thumbnail out of one. So the original is fetched once and the item is left alone
     after, and a catch-up that failed all three times gets its one more go a day later, like every
     other catch-up here.
+
+    A file the size cannot be had of (the job ends `done`, the width stays null) would be the one
+    that never stops: `_catch_up` lets a `done` job through, so it would be fetched and probed every
+    hour for as long as the worker runs. A read that finished within the day is left alone like a
+    failed one, and the same file costs one fetch a day.
     """
-    queued = _catch_up(conn, "media_frame_info", "item.width IS NULL")
+    queued = _catch_up(conn, "media_frame_info", f"""item.width IS NULL AND NOT EXISTS (
+        SELECT 1 FROM jobs finished
+        WHERE finished.type = 'media_frame_info' AND finished.ref = item.id::text
+          AND finished.status = 'done'
+          AND finished.updated_at > now() - make_interval(hours => {CATCH_UP_AFTER_HOURS}))""")
     if queued:
         log.info("queued a size, a camera and a place for %s ready item(s) that had none", queued)
     return queued
