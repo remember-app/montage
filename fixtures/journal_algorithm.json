@@ -1,0 +1,514 @@
+{
+  "format": 1,
+  "scenario": "algorithm",
+  "montage": {
+    "status": "ready",
+    "duration_seconds": 10.4,
+    "params": {
+      "target_seconds": 10,
+      "music_tracks": [
+        "warm"
+      ],
+      "exclude_media_ids": [
+        "f8"
+      ],
+      "include_media_ids": [
+        "f9"
+      ]
+    }
+  },
+  "files": [
+    {
+      "label": "f1",
+      "kind": "photo",
+      "position": 1,
+      "captured_after_seconds": 0,
+      "duration_seconds": null
+    },
+    {
+      "label": "f2",
+      "kind": "photo",
+      "position": 2,
+      "captured_after_seconds": 1,
+      "duration_seconds": null
+    },
+    {
+      "label": "f3",
+      "kind": "photo",
+      "position": 3,
+      "captured_after_seconds": 2,
+      "duration_seconds": null
+    },
+    {
+      "label": "f4",
+      "kind": "photo",
+      "position": 4,
+      "captured_after_seconds": 60,
+      "duration_seconds": null
+    },
+    {
+      "label": "f5",
+      "kind": "video",
+      "position": 5,
+      "captured_after_seconds": 120,
+      "duration_seconds": 8.0
+    },
+    {
+      "label": "f6",
+      "kind": "photo",
+      "position": 6,
+      "captured_after_seconds": 180,
+      "duration_seconds": null
+    },
+    {
+      "label": "f7",
+      "kind": "photo",
+      "position": 7,
+      "captured_after_seconds": 240,
+      "duration_seconds": null
+    },
+    {
+      "label": "f8",
+      "kind": "photo",
+      "position": 8,
+      "captured_after_seconds": 300,
+      "duration_seconds": null
+    },
+    {
+      "label": "f9",
+      "kind": "photo",
+      "position": 9,
+      "captured_after_seconds": 360,
+      "duration_seconds": null
+    },
+    {
+      "label": "f10",
+      "kind": "photo",
+      "position": 10,
+      "captured_after_seconds": 420,
+      "duration_seconds": null
+    },
+    {
+      "label": "f11",
+      "kind": "photo",
+      "position": 11,
+      "captured_after_seconds": 480,
+      "duration_seconds": null
+    },
+    {
+      "label": "f12",
+      "kind": "photo",
+      "position": 12,
+      "captured_after_seconds": 540,
+      "duration_seconds": null
+    }
+  ],
+  "stages": [
+    {
+      "stage": "screening",
+      "state": "done",
+      "started_at": "2026-01-01T00:00:00Z",
+      "finished_at": "2026-01-01T00:00:05Z",
+      "eta_seconds": 0,
+      "done_count": 12,
+      "total_count": 12,
+      "outcome": {
+        "of": 12,
+        "kept": 8,
+        "reasons": {
+          "blur": 1,
+          "exposure": 2,
+          "unreadable": 1
+        }
+      },
+      "updated_at": "2026-01-01T00:00:05Z"
+    },
+    {
+      "stage": "understanding",
+      "state": "done",
+      "started_at": "2026-01-01T00:00:06Z",
+      "finished_at": "2026-01-01T00:00:14Z",
+      "eta_seconds": 0,
+      "done_count": 12,
+      "total_count": 12,
+      "outcome": {
+        "of": 12,
+        "faces": 7,
+        "people": 3,
+        "animals": 1,
+        "described": 7
+      },
+      "updated_at": "2026-01-01T00:00:14Z"
+    },
+    {
+      "stage": "directing",
+      "state": "done",
+      "started_at": "2026-01-01T00:00:15Z",
+      "finished_at": "2026-01-01T00:00:23Z",
+      "eta_seconds": 0,
+      "done_count": 12,
+      "total_count": 12,
+      "outcome": {
+        "of": 12,
+        "frames": 4
+      },
+      "updated_at": "2026-01-01T00:00:23Z"
+    },
+    {
+      "stage": "rhythm",
+      "state": "done",
+      "started_at": "2026-01-01T00:00:24Z",
+      "finished_at": "2026-01-01T00:00:25Z",
+      "eta_seconds": 0,
+      "done_count": 4,
+      "total_count": 4,
+      "outcome": {
+        "bpm": 81,
+        "cuts": 3,
+        "track": [
+          "warm"
+        ]
+      },
+      "updated_at": "2026-01-01T00:00:25Z"
+    },
+    {
+      "stage": "assembly",
+      "state": "done",
+      "started_at": "2026-01-01T00:00:26Z",
+      "finished_at": "2026-01-01T00:00:27Z",
+      "eta_seconds": 0,
+      "done_count": 4,
+      "total_count": 4,
+      "outcome": {
+        "cuts": 3,
+        "seconds": 10.4
+      },
+      "updated_at": "2026-01-01T00:00:27Z"
+    }
+  ],
+  "entries": [
+    {
+      "n": 1,
+      "stage": "screening",
+      "media": "f9",
+      "thought": null,
+      "decision": "skip",
+      "reason": "exposure",
+      "series_size": null,
+      "story_part": null,
+      "story_part_title": null,
+      "source_from_seconds": null,
+      "source_to_seconds": null,
+      "labels": null,
+      "focus": null,
+      "created_at": "2026-01-01T00:00:01Z"
+    },
+    {
+      "n": 2,
+      "stage": "screening",
+      "media": "f10",
+      "thought": null,
+      "decision": "skip",
+      "reason": "exposure",
+      "series_size": null,
+      "story_part": null,
+      "story_part_title": null,
+      "source_from_seconds": null,
+      "source_to_seconds": null,
+      "labels": null,
+      "focus": null,
+      "created_at": "2026-01-01T00:00:02Z"
+    },
+    {
+      "n": 3,
+      "stage": "screening",
+      "media": "f11",
+      "thought": null,
+      "decision": "skip",
+      "reason": "unreadable",
+      "series_size": null,
+      "story_part": null,
+      "story_part_title": null,
+      "source_from_seconds": null,
+      "source_to_seconds": null,
+      "labels": null,
+      "focus": null,
+      "created_at": "2026-01-01T00:00:03Z"
+    },
+    {
+      "n": 4,
+      "stage": "screening",
+      "media": "f12",
+      "thought": null,
+      "decision": "skip",
+      "reason": "blur",
+      "series_size": null,
+      "story_part": null,
+      "story_part_title": null,
+      "source_from_seconds": null,
+      "source_to_seconds": null,
+      "labels": null,
+      "focus": null,
+      "created_at": "2026-01-01T00:00:04Z"
+    },
+    {
+      "n": 5,
+      "stage": "understanding",
+      "media": "f1",
+      "thought": "Бабушка смеётся",
+      "decision": null,
+      "reason": null,
+      "series_size": null,
+      "story_part": null,
+      "story_part_title": null,
+      "source_from_seconds": null,
+      "source_to_seconds": null,
+      "labels": [
+        "человек-1"
+      ],
+      "focus": null,
+      "created_at": "2026-01-01T00:00:07Z"
+    },
+    {
+      "n": 6,
+      "stage": "understanding",
+      "media": "f2",
+      "thought": "Бабушка смеётся, Лиза рядом",
+      "decision": null,
+      "reason": null,
+      "series_size": null,
+      "story_part": null,
+      "story_part_title": null,
+      "source_from_seconds": null,
+      "source_to_seconds": null,
+      "labels": [
+        "человек-1",
+        "человек-2"
+      ],
+      "focus": null,
+      "created_at": "2026-01-01T00:00:08Z"
+    },
+    {
+      "n": 7,
+      "stage": "understanding",
+      "media": "f3",
+      "thought": "Лиза обнимает бабушку",
+      "decision": null,
+      "reason": null,
+      "series_size": null,
+      "story_part": null,
+      "story_part_title": null,
+      "source_from_seconds": null,
+      "source_to_seconds": null,
+      "labels": [
+        "человек-1",
+        "человек-2"
+      ],
+      "focus": null,
+      "created_at": "2026-01-01T00:00:09Z"
+    },
+    {
+      "n": 8,
+      "stage": "understanding",
+      "media": "f4",
+      "thought": "стол",
+      "decision": null,
+      "reason": null,
+      "series_size": null,
+      "story_part": null,
+      "story_part_title": null,
+      "source_from_seconds": null,
+      "source_to_seconds": null,
+      "labels": null,
+      "focus": null,
+      "created_at": "2026-01-01T00:00:10Z"
+    },
+    {
+      "n": 9,
+      "stage": "understanding",
+      "media": "f5",
+      "thought": "тост",
+      "decision": null,
+      "reason": null,
+      "series_size": null,
+      "story_part": null,
+      "story_part_title": null,
+      "source_from_seconds": null,
+      "source_to_seconds": null,
+      "labels": [
+        "человек-2",
+        "животное-1"
+      ],
+      "focus": null,
+      "created_at": "2026-01-01T00:00:11Z"
+    },
+    {
+      "n": 10,
+      "stage": "understanding",
+      "media": "f8",
+      "thought": "чужой человек в кадре",
+      "decision": null,
+      "reason": null,
+      "series_size": null,
+      "story_part": null,
+      "story_part_title": null,
+      "source_from_seconds": null,
+      "source_to_seconds": null,
+      "labels": [
+        "человек-3"
+      ],
+      "focus": null,
+      "created_at": "2026-01-01T00:00:12Z"
+    },
+    {
+      "n": 11,
+      "stage": "understanding",
+      "media": "f9",
+      "thought": "тёмный кадр",
+      "decision": null,
+      "reason": null,
+      "series_size": null,
+      "story_part": null,
+      "story_part_title": null,
+      "source_from_seconds": null,
+      "source_to_seconds": null,
+      "labels": null,
+      "focus": null,
+      "created_at": "2026-01-01T00:00:13Z"
+    },
+    {
+      "n": 12,
+      "stage": "directing",
+      "media": "f1",
+      "thought": null,
+      "decision": "take",
+      "reason": null,
+      "series_size": 3,
+      "story_part": null,
+      "story_part_title": null,
+      "source_from_seconds": null,
+      "source_to_seconds": null,
+      "labels": null,
+      "focus": null,
+      "created_at": "2026-01-01T00:00:16Z"
+    },
+    {
+      "n": 13,
+      "stage": "directing",
+      "media": "f4",
+      "thought": null,
+      "decision": "take",
+      "reason": null,
+      "series_size": null,
+      "story_part": null,
+      "story_part_title": null,
+      "source_from_seconds": null,
+      "source_to_seconds": null,
+      "labels": null,
+      "focus": null,
+      "created_at": "2026-01-01T00:00:17Z"
+    },
+    {
+      "n": 14,
+      "stage": "directing",
+      "media": "f5",
+      "thought": null,
+      "decision": "take",
+      "reason": null,
+      "series_size": null,
+      "story_part": null,
+      "story_part_title": null,
+      "source_from_seconds": 2.0,
+      "source_to_seconds": 6.0,
+      "labels": null,
+      "focus": null,
+      "created_at": "2026-01-01T00:00:18Z"
+    },
+    {
+      "n": 15,
+      "stage": "directing",
+      "media": "f9",
+      "thought": null,
+      "decision": "take",
+      "reason": "included",
+      "series_size": null,
+      "story_part": null,
+      "story_part_title": null,
+      "source_from_seconds": null,
+      "source_to_seconds": null,
+      "labels": null,
+      "focus": null,
+      "created_at": "2026-01-01T00:00:19Z"
+    },
+    {
+      "n": 16,
+      "stage": "directing",
+      "media": "f8",
+      "thought": null,
+      "decision": "skip",
+      "reason": "excluded",
+      "series_size": null,
+      "story_part": null,
+      "story_part_title": null,
+      "source_from_seconds": null,
+      "source_to_seconds": null,
+      "labels": null,
+      "focus": null,
+      "created_at": "2026-01-01T00:00:20Z"
+    },
+    {
+      "n": 17,
+      "stage": "directing",
+      "media": "f6",
+      "thought": null,
+      "decision": "skip",
+      "reason": "no_room",
+      "series_size": null,
+      "story_part": null,
+      "story_part_title": null,
+      "source_from_seconds": null,
+      "source_to_seconds": null,
+      "labels": null,
+      "focus": null,
+      "created_at": "2026-01-01T00:00:21Z"
+    },
+    {
+      "n": 18,
+      "stage": "directing",
+      "media": "f7",
+      "thought": null,
+      "decision": "skip",
+      "reason": "no_room",
+      "series_size": null,
+      "story_part": null,
+      "story_part_title": null,
+      "source_from_seconds": null,
+      "source_to_seconds": null,
+      "labels": null,
+      "focus": null,
+      "created_at": "2026-01-01T00:00:22Z"
+    }
+  ],
+  "layout": [
+    {
+      "media": "f1",
+      "start_seconds": 0.0,
+      "duration_seconds": 2.53
+    },
+    {
+      "media": "f4",
+      "start_seconds": 2.03,
+      "duration_seconds": 2.7
+    },
+    {
+      "media": "f5",
+      "start_seconds": 4.23,
+      "duration_seconds": 4.17
+    },
+    {
+      "media": "f9",
+      "start_seconds": 7.9,
+      "duration_seconds": 2.5
+    }
+  ]
+}
