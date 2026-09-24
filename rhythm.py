@@ -16,6 +16,7 @@ a second of CPU per track, and no signal processing of our own in the worker bec
 
 import bisect
 import logging
+import math
 import pathlib
 import statistics
 import tempfile
@@ -96,8 +97,14 @@ def tempo(moments):
     остальные. Число идёт в журнал монтажа и больше никуда — на сборку темп не влияет, склейки
     попадают в сами биты.
     """
+    beat = _beat(moments)
+    return round(60 / beat) if beat else None
+
+
+def _beat(moments):
+    """How long one beat of the track lasts, in seconds, or None when there are no beats."""
     steps = [after - before for before, after in zip(moments, moments[1:]) if after > before]
-    return round(60 / statistics.median(steps)) if steps else None
+    return statistics.median(steps) if steps else None
 
 
 def fit(pieces, moments):
@@ -112,12 +119,12 @@ def fit(pieces, moments):
     Each join goes to the beat nearest the place it had before the music, not to the one nearest its
     piece's own length. Measured from wherever the join before it landed, every piece under a steady
     tempo would be pulled the same way and the pulls would add up — to a minute on a ten-minute
-    video. Measured from its own place, a join is never much more than half a beat off it.
+    video. Measured from its own place, a join is never more than a beat off it (`_snap`).
 
     The last piece has no join after it — there is the end of the video and the music fading out —
     so it takes up what the joins moved: held that much longer or shorter, it ends the video on the
     length it was handed. What it cannot take up — a clip with nothing left in its file, a piece
-    already down to a glance — is a fraction of a beat, and the log says how much.
+    already down to a glance — is less than a beat, and the log says how much.
 
     ponytail: beats, not bars. A join on a strong beat would read better still, but `beat_track`
     does not mark the first beat of a bar — that is a separate analysis. Should it ever be needed,
@@ -127,13 +134,13 @@ def fit(pieces, moments):
         return list(pieces)
 
     # Where the piece begins in the assembled montage, and where it began before the beats moved it.
-    fitted, at, planned = [], 0.0, 0.0
+    fitted, at, planned, beat = [], 0.0, 0.0, _beat(moments)
     for piece in pieces[:-1]:
         # Through `cut_to` and not a bare length swap: a beat moves how long a piece is held, and
         # `cut_to` is what keeps it cut *around* its best moment at that new length. Without it a
         # piece shrunk here would keep the `start` centred for its old length and could show
         # nothing of what `selection` cut it around in the first place.
-        fitted.append(selection.cut_to(piece, _snap(moments, piece, at, planned)))
+        fitted.append(selection.cut_to(piece, _snap(moments, piece, at, planned, beat)))
         at += fitted[-1].seconds - assembly.CROSSFADE_SECONDS
         planned += piece.seconds - assembly.CROSSFADE_SECONDS
     last = pieces[-1]
@@ -151,7 +158,7 @@ def fit(pieces, moments):
     return fitted
 
 
-def _snap(moments, piece, at, planned):
+def _snap(moments, piece, at, planned, beat):
     """The length at which the join after this piece falls on a beat — or the piece's own length,
     when no beat fits inside what the piece may be.
 
@@ -159,6 +166,10 @@ def _snap(moments, piece, at, planned):
     montage, among those that leave the piece a length it is allowed to have: the bounds choose a
     beat rather than trim the answer to a beat already chosen. Trimming is what would make the mess
     — piece after piece of a second and a half wherever the grid has run ahead of the previous join.
+
+    And no further from that place than one `beat`: past it is not this join's beat but the far
+    side of a stretch with none — a fade, the seam of a looped track — and a join pulled seconds
+    across it takes more than the last piece can give back, and the video runs long.
     """
     # A join is heard at the middle of the crossfade rather than at the end of the piece: for half
     # of that dissolve the next piece is already on screen. That middle is what lands on the beat,
@@ -167,13 +178,13 @@ def _snap(moments, piece, at, planned):
     least, most = MIN_PIECE_SECONDS, _room(piece)
     if most < least:
         return piece.seconds  # a clip shorter than the minimum: its length is its file's to decide
+    wanted = planned + piece.seconds - half_fade  # where the join would be if there were no music
     # The beats that leave a length between `least` and `most`. `moments` is sorted — librosa
     # hands it over that way and `beats` keeps it so.
-    inside = moments[bisect.bisect_left(moments, at + least - half_fade):
-                     bisect.bisect_right(moments, at + most - half_fade)]
+    inside = moments[bisect.bisect_left(moments, max(at + least - half_fade, wanted - beat)):
+                     bisect.bisect_right(moments, min(at + most - half_fade, wanted + beat))]
     if not inside:
         return piece.seconds
-    wanted = planned + piece.seconds - half_fade  # where the join would be if there were no music
     return _whole_frames(min(inside, key=lambda moment: abs(moment - wanted)) - at + half_fade)
 
 
@@ -199,9 +210,10 @@ def _room(piece):
     arrived with was given to it to make the video as long as it was ordered
     (`selection.stretch`), and a ceiling for the sake of the music would quietly take those seconds
     out of the montage again. The window bounds what the *beats* may do to a piece, not how long a
-    piece may be.
+    piece may be. Nor is it frozen at that length: held only shorter, every such piece in a row
+    could only reach back for its beat, and in a video of stretched clips most joins missed theirs.
     """
-    ceiling = max(MAX_PIECE_SECONDS, piece.seconds)
+    ceiling = MAX_PIECE_SECONDS if piece.seconds <= MAX_PIECE_SECONDS else math.inf
     if piece.kind == "video" and piece.duration:
         return min(ceiling, piece.duration - piece.start)
     return ceiling
