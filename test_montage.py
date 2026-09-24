@@ -15,6 +15,7 @@ import subprocess
 import uuid
 
 import pytest
+from botocore.exceptions import ClientError, EndpointConnectionError, ReadTimeoutError
 
 import ai
 import assembly
@@ -373,6 +374,75 @@ def test_an_uploaded_track_with_no_music_in_it_fails_the_montage_at_once_and_say
     assert conn.execute("SELECT status FROM jobs WHERE id = %s", (job_id,)).fetchone()[0] == "done"
     assert read_montage(conn, montage_id) == ("failed", None, None, "загруженный трек не читается")
     assert encoded == [], "трек отвергнут после того, как начали собирать ролик"
+
+
+@pytest.mark.parametrize("form", ["в списке рядом с треком полки", "один, в заказе до списков"])
+def test_an_uploaded_track_gone_from_the_bucket_fails_the_montage_at_once_and_says_why(
+    conn, s3, memory, tmp_path, monkeypatch, form
+):
+    """Своего трека нет в бакете — файл пропал, и ко второй попытке он не появится. Отказ с первой
+    же, с причиной и без сборки, как у трека, который не читается: три повтора и «не удалось
+    собрать ролик» сказали бы организатору только то, что ролика нет."""
+    track_key = f"music/{uuid.uuid4()}"
+    params = ({"music_tracks": ["warm", track_key]} if form.startswith("в списке")
+              else {"music_track_key": track_key})
+    montage_id = order(conn, memory, params)
+    material(conn, s3, memory, tmp_path)
+    job_id = worker.enqueue(conn, "montage", montage_id)
+    encoded = []
+    monkeypatch.setattr(assembly, "assemble", lambda *args, **kwargs: encoded.append(args))
+
+    assert worker.run_once(conn) is True
+
+    assert conn.execute(
+        "SELECT status, attempts FROM jobs WHERE id = %s", (job_id,)
+    ).fetchone() == ("done", 0)
+    assert read_montage(conn, montage_id) == ("failed", None, None, "загруженный трек не найден")
+    assert encoded == [], "трек отвергнут после того, как начали собирать ролик"
+
+
+@pytest.mark.parametrize("failure", [
+    ClientError({"Error": {"Code": "503", "Message": "Service Unavailable"},
+                 "ResponseMetadata": {"HTTPStatusCode": 503}}, "HeadObject"),
+    EndpointConnectionError(endpoint_url="http://storage"),
+    ReadTimeoutError(endpoint_url="http://storage"),
+], ids=["хранилище недоступно", "сеть", "таймаут"])
+def test_an_uploaded_track_the_bucket_did_not_hand_over_is_retried_like_any_other_failure(
+    conn, s3, memory, tmp_path, monkeypatch, failure
+):
+    """Трек в бакете есть, а хранилище его не отдало: такой сбой проходит сам, так что это не отказ,
+    а обычный повтор очереди — ролик ждёт следующей попытки, а не падает с причиной про трек."""
+    track_key = f"music/{uuid.uuid4()}"
+    s3.upload_file(str(tone(tmp_path / "own.wav")), media.bucket(), track_key)
+    montage_id = order(conn, memory, {"music_tracks": ["warm", track_key]})
+    material(conn, s3, memory, tmp_path)
+    job_id = worker.enqueue(conn, "montage", montage_id)
+    storage = media.storage
+
+    def flaky():
+        client = storage()
+        download = client.download_file
+
+        def download_file(bucket, key, *args, **kwargs):
+            if key == track_key:
+                raise failure
+            return download(bucket, key, *args, **kwargs)
+
+        client.download_file = download_file
+        return client
+
+    monkeypatch.setattr(media, "storage", flaky)
+    encoded = []
+    monkeypatch.setattr(assembly, "assemble", lambda *args, **kwargs: encoded.append(args))
+
+    assert worker.run_once(conn) is True
+
+    assert conn.execute(
+        "SELECT status, attempts FROM jobs WHERE id = %s", (job_id,)
+    ).fetchone() == ("queued", 1)
+    status, _, _, error_text = read_montage(conn, montage_id)
+    assert (status, error_text) == ("processing", None), "сбой хранилища принят за отказ"
+    assert encoded == []
 
 
 # --- список треков, и пустой список -----------------------------------------

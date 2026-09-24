@@ -364,7 +364,8 @@ def _ordered_music(params):
 
 
 def _music_files(named, s3, workdir):
-    """Те же треки файлами на диске, в том же порядке, — и отказ, если чей-то файл не читается.
+    """Те же треки файлами на диске, в том же порядке, — и отказ, если своего файла нет в бакете
+    или он не читается.
 
     Трек полки лежит рядом с воркером, свой качается из бакета и проходит ту же дверь, что и любая
     чужая медиа: «трек», внутри которого плейлист, отправил бы ffmpeg читать диски воркера. И в нём
@@ -377,7 +378,15 @@ def _music_files(named, s3, workdir):
             files.append(assembly.track_file(one))
             continue
         downloaded = workdir / f"track-{index}"
-        s3.download_file(media.bucket(), one, str(downloaded))
+        try:
+            s3.download_file(media.bucket(), one, str(downloaded))
+        except s3.exceptions.ClientError as exc:
+            # Пропавший файл между попытками сам не вернётся. Всё прочее — хранилище не ответило,
+            # сеть, таймаут — проходит само, и это обычные повторы очереди.
+            if exc.response.get("Error", {}).get("Code") not in ("404", "NoSuchKey"):
+                raise
+            log.info("the uploaded track %s is not in the bucket", one)
+            return None, "загруженный трек не найден"
         try:
             media._refuse_playlists(downloaded)
             if not media._has_sound(downloaded):
