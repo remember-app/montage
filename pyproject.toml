@@ -1,0 +1,30 @@
+# Настройки инструментов воркера. Пакета здесь нет: `montage` запускается из этой папки
+# (`python -m montage`), а не устанавливается.
+
+[tool.pytest.ini_options]
+# Тесты лежат отдельно от кода, и пакет `montage` им виден из корня репозитория.
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100  # по самой длинной строке, какая в этом коде уже была
+target-version = "py311"
+
+[tool.ruff.lint]
+# Ошибки и стиль pycodestyle, мёртвые имена pyflakes, порядок импортов и ловушки bugbear.
+select = ["E", "W", "F", "I", "B"]
+# zip() здесь местами намеренно идёт по спискам разной длины — «короче» и есть ответ
+# (склейки против кусков, треки против их файлов), так что strict= нечего требовать.
+ignore = ["B905"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["montage"]
+# Свои модули набора тестов — последними, после кода воркера.
+known-local-folder = ["checks", "material", "pieces", "recorded", "rows"]
+# Форматтер и так собирает импорты в строку, пока они влезают.
+split-on-trailing-comma = false
+
+[tool.ruff.format]
+# Висящая запятая не должна рвать список аргументов ffmpeg по одному в строку: команда
+# читается строкой, как её набирают руками.
+skip-magic-trailing-comma = true
