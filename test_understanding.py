@@ -17,7 +17,7 @@ import ai
 import media
 import understanding
 import worker
-from test_ai import FIXTURES
+from test_ai import FIXTURES, saying
 from test_media import add_item, memory, photo, s3, video  # noqa: F401 — fixtures and their helpers
 
 
@@ -155,6 +155,27 @@ def test_the_same_person_keeps_one_label_across_the_memory(conn, s3, memory, tmp
     assert "человек-1" in net.asked(1) and "животное-1" in net.asked(1)
     assert described(conn, first)[1] == ["человек-1", "животное-1"]
     assert described(conn, second)[1] == ["человек-1", "человек-2"]
+
+
+@pytest.mark.parametrize("cast, labels", [
+    ("человек-1", []),
+    (["человек-1", None, 2, {"label": "животное-1"}], ["человек-1"]),
+])
+def test_only_strings_out_of_a_list_become_labels(conn, s3, memory, tmp_path, monkeypatch,
+                                                   cast, labels):
+    """Метки лягут на кадр навсегда. Список строкой разобрался бы по буквам, а `null`, число и
+    объект в списке стали бы метками «None», «2» и словарём текстом. Описание при этом остаётся —
+    за него заплачено."""
+    said = json.dumps({"description": "Женщина вносит торт", "cast": cast}, ensure_ascii=False)
+    monkeypatch.setattr(
+        ai, "from_env", lambda *_, **__: ai.Gemini("test-key", transport=saying(said))
+    )
+    item_id = ready_media(conn, s3, memory, photo(tmp_path / "preview.jpg"))
+    worker.enqueue(conn, "media_understanding", item_id)
+
+    assert worker.run_once(conn) is True
+
+    assert described(conn, item_id) == ("Женщина вносит торт", labels)
 
 
 def test_a_clip_is_described_by_stills_cut_out_of_it(conn, s3, memory, tmp_path, model):

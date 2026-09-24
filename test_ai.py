@@ -314,19 +314,52 @@ def test_an_answer_that_parses_but_is_not_an_object_fails_the_call_too(conn):
     assert status == "failed" and "null" in error
 
 
-def test_a_number_the_journal_cannot_hold_never_gets_into_it(conn):
-    """`json.loads` takes `NaN` and `Infinity`; `jsonb` takes neither. Read loosely, an answer
-    carrying one would be paid for and would then break the journal's own UPDATE on the way back —
-    and the retry would pay for it again. Refused as the malformed answer it is instead."""
-    def not_a_number(request):
-        return json.dumps({"output_text": '{"description": "кадр", "seconds": NaN}'}).encode()
+def saying(text):
+    """A model that says `text` — its words as they come, inside Gemini's envelope."""
+    return lambda request: json.dumps({"output_text": text}).encode()
 
-    gateway = ai.AI(conn, ai.Gemini("test-key", transport=not_a_number))
-    with pytest.raises(RuntimeError, match="NaN"):
+
+@pytest.mark.parametrize("number", ["NaN", "Infinity", "-Infinity", "1e999", "-1e999"])
+def test_a_number_the_journal_cannot_hold_is_dropped_and_the_answer_kept(conn, number):
+    """`json.loads` reads each of these into a float `jsonb` does not take. The answer is paid for
+    by then: refused, or breaking the journal's UPDATE on the way back, it is paid for again on the
+    retry. The number goes, the rest of the answer stays."""
+    said = f'{{"description": "кадр", "cast": ["человек-1"], "seconds": {number}}}'
+    gateway = ai.AI(conn, ai.Gemini("test-key", transport=saying(said)))
+
+    described = gateway.describe_media([PHOTO])
+
+    assert described == {"description": "кадр", "cast": ["человек-1"], "seconds": None}
+    (*_, status, _, response, error, _), = journal(conn)
+    assert (status, response, error) == ("answered", described, None)
+
+
+def test_a_character_the_journal_cannot_hold_is_dropped_and_the_answer_kept(conn):
+    """A NUL, and half of a surrogate pair: neither `jsonb` nor `text` takes one. Escaped in the
+    model's JSON or already a character of the envelope around it, both are gone from what the
+    journal and the caller get — and nothing else of the answer is."""
+    said = ('{"description": "Торт\\ud800 со свечами\\u0000", '
+            '"cast": ["человек-1\udc00", "живот\x00ное-1"]}')
+    gateway = ai.AI(conn, ai.Gemini("test-key", transport=saying(said)))
+
+    described = gateway.describe_media([PHOTO])
+
+    assert described == {"description": "Торт со свечами", "cast": ["человек-1", "животное-1"]}
+    (*_, status, _, response, error, _), = journal(conn)
+    assert (status, response, error) == ("answered", described, None)
+
+
+def test_prose_carrying_such_a_character_still_fails_into_the_journal(conn):
+    """The failed call keeps the text that failed it in `error`, a `text` column: with half a
+    surrogate pair in it, the row itself would not close, and the journal would say «sent» for
+    good."""
+    gateway = ai.AI(conn, ai.Gemini("test-key", transport=saying("Конечно\ud800! Вот описание:")))
+
+    with pytest.raises(RuntimeError, match="Конечно! Вот описание"):
         gateway.describe_media([PHOTO])
 
-    (*_, status, _, response, error, _), = journal(conn)
-    assert (status, response) == ("failed", None) and "NaN" in error
+    (*_, status, _, _, error, _), = journal(conn)
+    assert status == "failed" and "Конечно! Вот описание" in error
 
 
 def test_the_story_reaches_the_director(conn):

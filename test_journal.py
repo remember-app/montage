@@ -491,6 +491,41 @@ def test_the_director_tells_the_journal_the_plan_it_built(
     }
 
 
+def test_a_plan_carrying_what_the_database_cannot_hold_is_still_a_video_and_a_journal(
+    conn, s3, memory, tmp_path, monkeypatch
+):
+    """Оплаченный план с `NaN`, `1e999`, целым длиннее double, NUL и половинкой суррогатной пары:
+    ни одно из них не роняет ни запись о запросе, ни ролик, ни реплику журнала — ролик собирается
+    из того, что в плане годно, а рассказ о нём — теми словами, что остались."""
+    journal_ready(conn)
+    ids = material(conn, s3, memory, tmp_path)
+    for media_id, description in zip(ids, ("накрывают на стол", "вносят торт", "собака")):
+        conn.execute(
+            """INSERT INTO media_understandings (media_id, memory_id, description, cast_labels)
+               VALUES (%s, %s, %s, %s)""",
+            (media_id, str(memory[0]), description, ["человек-1"]),
+        )
+    planning_over(monkeypatch, ids[:3], "gemini_plan_unholdable.json")
+    montage_id = order(conn, memory, {"target_seconds": 30, "music_tracks": [],
+                                      "story_text": "день рождения"})
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+    assert read_montage(conn, montage_id)[0] == "ready"
+
+    assert conn.execute(
+        "SELECT status FROM ai_requests WHERE operation = 'plan_montage' AND ref = %s",
+        (montage_id,),
+    ).fetchone() == ("answered",)
+    directing = entries_of(conn, montage_id, "directing")
+    assert directing[0].thought == "План на три части"
+    assert [(one.media_id, one.decision, one.thought, one.focus) for one in directing[1:4]] == [
+        (ids[0], "take", "Стол накрывают", None),
+        (ids[1], "take", "Вносят торт", None),
+        (ids[2], "take", "Собака под столом", (0.1, 0.2, 0.3, 0.4)),
+    ]
+
+
 def test_the_parts_of_the_story_are_the_parts_the_video_has():
     """«3 части, 61 кадр» — про ролик: часть, ни один кадр которой не влез в заказанную длину, в
     итоге не считается, как не считаются в `frames` её кадры."""

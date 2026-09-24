@@ -260,16 +260,14 @@ def _decided(thoughts, kept):
 def _cut(piece, seconds):
     """The piece at the length the plan gave it — within what the screen and the file allow.
 
-    A step that says nothing about its length, or says something that is not a number, gets the
-    length отбор cut it at: the plan is about the order of the film first, and a missing number is
-    not a reason to leave a piece out of it. `NaN` and `Infinity` need no guard of their own here:
-    they would walk straight through `min`/`max` — every comparison against them is false — but
-    `ai._as_json` refuses an answer carrying either, so no plan holding one ever gets this far.
+    `seconds` is a finite number or None (`ai._seconds`). None — a step that said nothing about its
+    length, or nothing that is a number — keeps the length отбор cut it at: the plan is about the
+    order of the film first, and a missing number is not a reason to leave a piece out of it.
     """
-    try:
-        seconds = min(max(float(seconds), MIN_PIECE_SECONDS), MAX_PIECE_SECONDS)
-    except (TypeError, ValueError):
+    if seconds is None:
         seconds = piece.seconds
+    else:
+        seconds = min(max(seconds, MIN_PIECE_SECONDS), MAX_PIECE_SECONDS)
     # `rejected` goes with it: the piece is in the film, so nothing about it is turned down — the
     # same thing `selection.choose` does to a piece the organizer overruled it on.
     return dataclasses.replace(selection.cut_to(piece, seconds), rejected=None)

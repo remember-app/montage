@@ -285,6 +285,27 @@ def test_what_the_director_made_up_does_not_reach_the_journal(described):
     assert [piece.seconds for piece in film] == [3.0, 4.0, selection.PHOTO_SECONDS]
 
 
+def test_what_the_database_cannot_hold_costs_the_plan_nothing_but_itself(described):
+    """За ответ заплачено, и значение, которого база не примет или которое не число, не стоит ни
+    ответа, ни ролика. `"NaN"` строкой и `1e999` — не длины: кусок идёт длиной отсева, а не
+    «не числом» сквозь все ограничения. Целое длиннее double — не доля кадра, и рамки нет. NUL и
+    половинка суррогатной пары выпадают из слов, а сами слова остаются."""
+    film, thoughts, _ = directed(described, "gemini_plan_unholdable.json", story=STORY)
+
+    assert [piece.media_id for piece in film] == ["m-1", "m-2", "m-3"]
+    assert [piece.seconds for piece in film] == [selection.PHOTO_SECONDS] * 2 + [3.0]
+    assert thoughts[0] == {"thought": "План на три части"}
+    assert about(thoughts, "m-2") == {
+        "media_id": "m-2", "decision": "take", "thought": "Вносят торт",
+        "story_part": None, "story_part_title": "Торт",
+    }
+    assert about(thoughts, "m-3")["focus_w"] == 0.3, "годная рамка рядом остаётся"
+    (status, overview), = described.execute(
+        "SELECT status, response->>'overview' FROM ai_requests WHERE operation = 'plan_montage'"
+    ).fetchall()
+    assert (status, overview) == ("answered", "План на три части")
+
+
 # --- one shot per moment ----------------------------------------------------
 
 

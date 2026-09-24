@@ -23,7 +23,9 @@ Its key and model then come from `<NAME>_API_KEY` and `<NAME>_MODEL` on their ow
 import base64
 import json
 import logging
+import math
 import os
+import re
 import time
 import urllib.request
 import uuid
@@ -112,7 +114,7 @@ class Provider:
         return f"{self.name} ({self.model})"
 
     def _answered(self, request):
-        return json.loads(self.transport(request))
+        return _loaded(self.transport(request))
 
     def generate(self, instruction, prompt, blobs=(), as_json=True):
         """The model's answer as text, with `blobs` attached to the prompt."""
@@ -367,7 +369,8 @@ class AI:
         same person keeps one label across a whole memory without a face database of our own
         (doc-03, decision-9).
 
-        Returns {"description": ..., "cast": [...]} or None when no model is configured.
+        Returns the model's answer — asked for as {"description": ..., "cast": [...]}, and read as
+        the untrusted thing it is (`understanding`) — or None when no model is configured.
         """
         known = ", ".join(cast) if cast else "пока никого"
         prompt = f"Уже известные действующие лица этого воспоминания: {known}."
@@ -499,38 +502,60 @@ def _as_json(answer):
     bare `null` or a list parses perfectly well and then fails three handlers down as an
     `AttributeError` about `NoneType`, with the answer that caused it nowhere to be seen.
 
-    `parse_constant` because `json.loads` accepts `NaN` and `Infinity` and `jsonb` accepts neither:
-    one of those in an answer would be paid for, then break the journal's own UPDATE two lines
-    later — and the retry would pay for it again. They are malformed here, like prose, and the row
-    keeps the text that caused it.
-
-    `\\u0000` is the same trap and gets the other answer: `jsonb` takes no NUL either, but a whole
-    answer is not worth losing over an invisible character somebody's model put in a word. It is
-    thrown out — written out and escaped alike, because either way it is a NUL by the time the text
-    has been parsed — and the rest of the answer lives.
+    Read by `_loaded`, the same as the provider's envelope the text came in.
     """
     try:
-        answer = answer.replace("\x00", "").replace("\\u0000", "")
-        parsed = json.loads(answer, parse_constant=_no_such_number)
-    except (AttributeError, ValueError, TypeError):
-        # A JSONDecodeError is a ValueError, and so is the one `parse_constant` raises below; an
-        # AttributeError is an answer that is no text at all and has nothing to replace.
+        parsed = _loaded(answer)
+    except (ValueError, TypeError):
+        # A JSONDecodeError is a ValueError; a TypeError is an answer that is no text at all.
         parsed = None
     if not isinstance(parsed, dict):
         raise RuntimeError(f"the model did not answer with a JSON object: {str(answer)[:500]}")
     return parsed
 
 
-def _no_such_number(constant):
-    raise ValueError(constant)
+# NUL, and half of a UTF-16 pair: `\u0000` and a lone `\ud800` both parse into a `str`, and neither
+# `jsonb` nor a `text` column takes either. A pair that belongs together is one character by then.
+_UNHOLDABLE = re.compile(r"[\x00\ud800-\udfff]")
+
+
+def _loaded(text):
+    """JSON off the wire — the provider's envelope, and the model's own JSON inside it — with
+    nothing left in it that Postgres refuses.
+
+    Every answer reaches the journal, the tables and the caller through here. `json.loads` hands
+    back what `jsonb` and `text` do not take: `NaN`, `Infinity` and a number past a double
+    (`1e999`), a NUL and a lone surrogate out of `\\u` escapes. Let through, any one of them breaks
+    a write after the answer is paid for, and the retry pays for it again; refusing the answer over
+    it costs the same. So the value goes and the answer stays: a number nothing can hold becomes
+    `null`, a character nothing can hold is dropped. An integer too long for a double goes the same
+    way: every reader here takes a number as a float, and `float()` raises on it rather than
+    answering `inf`.
+    """
+    return _holdable(json.loads(text))
+
+
+def _holdable(value):
+    if isinstance(value, str):
+        return _UNHOLDABLE.sub("", value)
+    if isinstance(value, list):
+        return [_holdable(one) for one in value]
+    if isinstance(value, dict):
+        return {_holdable(name): _holdable(one) for name, one in value.items()}
+    if value is None or isinstance(value, bool):
+        return value
+    try:
+        return value if math.isfinite(value) else None
+    except OverflowError:
+        return None
 
 
 # --- чтение плана режиссёра -------------------------------------------------
 # Ответ модели — недоверенный ввод, а слова режиссёра увидят все участники воспоминания и рамку
 # «куда смотрит» приложение нарисует поверх кадра. Поэтому план разбирается здесь, у самой двери, и
-# выше уходит только то, что выдержало чтение: шаг без куска — не шаг, часть не номером и рамка не
-# четырьмя долями внутри кадра — их просто нет. Чей кусок назван, здесь не проверить: что показали
-# модели, знает `director`, он и сверяет.
+# выше уходит только то, что выдержало чтение: шаг без куска — не шаг, длина не конечным числом,
+# часть не номером и рамка не четырьмя долями внутри кадра — их просто нет. Чей кусок назван, здесь
+# не проверить: что показали модели, знает `director`, он и сверяет.
 
 
 def _planned(answered):
@@ -562,7 +587,7 @@ def _step(step):
         return None
     return {
         "media_id": media_id,
-        "seconds": step.get("seconds"),
+        "seconds": _seconds(step.get("seconds")),
         "thought": _said(step.get("thought")) or _said(step.get("accent")),
         "part": _part(step.get("part")),
         "part_title": _said(step.get("part_title")),
@@ -588,6 +613,16 @@ def _said(words):
     if not isinstance(words, str):
         return None
     return words.strip() or None
+
+
+def _seconds(length):
+    """Длина куска в секундах — конечным числом, иначе никакой. Строку `"NaN"` `float` читает в
+    «не число», а оно проходит сквозь любые `min` и `max`, которыми длину потом держат."""
+    try:
+        length = float(length)
+    except (TypeError, ValueError):
+        return None
+    return length if math.isfinite(length) else None
 
 
 def _part(number):
