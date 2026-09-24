@@ -278,6 +278,27 @@ def test_an_order_for_every_still_there_is_gets_every_still(photos):
     assert assembly.length_of(video) == min(target + 0.5, selection.MAX_SECONDS)
 
 
+@pytest.mark.parametrize("material", [
+    [clip(60 * n, 50 + n, duration=4.0, media_id=f"v{n}") for n in range(4)],
+    [clip(0, 10, duration=4.0), clip(60, 20, duration=4.0), at(120, 90)],
+    [clip(60 * n, 50 + n, duration=3.4, media_id=f"v{n}") for n in range(250)],
+    [*(clip(60 * n, 50 + n, duration=10.0, media_id=f"v{n}") for n in range(100)),
+     *(at(60 * n + 30, 40, media_id=f"p{n}") for n in range(100))],
+], ids=["четыре целых клипа: 14", "два целых клипа и фото: 9", "250 клипов по 3,4 с: 600",
+        "100 клипов по 10 с и 100 фото: 600"])
+def test_an_order_for_the_ceiling_out_of_clips_comes_out_the_ceiling(material):
+    """A clip that has run whole cannot be held longer, and one left out adds its whole length or
+    nothing — so four whole four-second clips ordered at their ceiling of fourteen seconds were a
+    video of eleven. Unlike a still, a clip can be cut: the last one goes in cut to end the video on
+    the order, whether that is the length of everything or ten minutes of more than that."""
+    target = ceiling(material)
+
+    chosen, _ = selection.choose(material, target)
+    video = selection.stretch(chosen, target)
+
+    assert assembly.length_of(video) == pytest.approx(target)
+
+
 def test_a_clip_held_whole_cannot_make_up_for_the_last_still_either():
     """A clip already running from its first frame to its last has nothing left to be held longer
     by, so against it the last still goes in past the order just as among stills alone."""
