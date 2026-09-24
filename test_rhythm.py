@@ -16,6 +16,7 @@ import assembly
 import media
 import rhythm
 import selection
+from test_selection import at, clip
 
 GAP = 0.6  # seconds between the clicks of the drawn track: a hundred beats a minute
 SECONDS = 30  # and this is how long it runs
@@ -198,3 +199,25 @@ def test_a_piece_is_never_cut_shorter_than_a_glance():
     fitted = rhythm.fit(photos(0.3, 0.3, 3.0), moments)
 
     assert all(piece.seconds >= rhythm.MIN_PIECE_SECONDS for piece in fitted[:-1])
+
+
+def test_a_ten_minute_order_keeps_the_length_it_was_stretched_to_under_a_beat_grid():
+    """The ceiling order, past both of `selection`'s steps: twenty minute-long clips and ten stills
+    ordered for 600 seconds are stretched to it, and the beats then pull each join to its nearest
+    one. The window of a piece (`MAX_PIECE_SECONDS`) bounds what a beat may do to it, not how long
+    the stretch made it — a clip held for half a minute is not cut back to six seconds — and the
+    pulls do not add up to the seconds: the video stays within its five per cent of the order."""
+    material = [clip(minute * 60, 100 - minute, media_id=f"v{minute}") for minute in range(20)]
+    material += [at(minute * 60 + 30, 50 - minute, media_id=f"p{minute}") for minute in range(10)]
+    chosen, _ = selection.choose(material, 600)
+    stretched = selection.stretch(chosen, 600)
+    moments = tuple(GAP * beat for beat in range(1, 1500))
+
+    fitted = rhythm.fit(stretched, moments)
+
+    assert max(piece.seconds for piece in stretched) > rhythm.MAX_PIECE_SECONDS * 3
+    for before, after in zip(stretched[:-1], fitted[:-1]):
+        assert after.seconds == pytest.approx(before.seconds, abs=GAP), "a stretched piece was cut back"
+    assert assembly.length_of(fitted) == pytest.approx(600, abs=600 * 0.05)
+    for cut in joins(fitted):
+        assert min(abs(cut - moment) for moment in moments) < 1e-6, f"the join at {cut} misses"

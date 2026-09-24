@@ -170,15 +170,29 @@ def long_clip(path, seconds=12):
     return path
 
 
+@pytest.mark.parametrize("music", ["a track of the shelf, the way it was ordered before lists",
+                                   "an uploaded track and a shelf track in one list"])
 def test_a_montage_reaches_the_length_that_was_ordered_by_holding_its_clips_longer(
-    conn, s3, memory, tmp_path
+    conn, s3, memory, tmp_path, music
 ):
     """The ordered length as a promise, on a real file: two twelve-second clips and two stills come
     to eleven and a half seconds at the lengths the отбор cuts them at, and twenty seconds were
     ordered. The clips are held longer — equally, and well inside their own files — until the video
     is as long as it was asked to be. Before this, the same order came back at those eleven and a
-    half seconds without a word (TASK-193)."""
-    montage_id = order(conn, memory, {"target_seconds": 20, "music_track_id": "warm"})
+    half seconds without a word (TASK-193).
+
+    Under a list of the organizer's own track and one of the shelf's, with a note to the director
+    that no director is there to read, the file is the same: picture, and music that plays to the
+    very end. The uploaded track is three seconds of silence, so a shelf track that was not joined
+    on behind it would leave the rest of the video quiet."""
+    if music.startswith("a track"):
+        params = {"target_seconds": 20, "music_track_id": "warm"}
+    else:
+        own = f"music/{uuid.uuid4()}.wav"
+        s3.upload_file(str(hush(tmp_path / "own.wav")), media.bucket(), own)
+        params = {"target_seconds": 20, "music_tracks": [own, "warm"],
+                  "music_note": "первый трек — на вступление"}
+    montage_id = order(conn, memory, params)
     for index in range(2):
         _, key = add_item(conn, memory, "video", status="ready")
         s3.upload_file(str(long_clip(tmp_path / f"clip-{index}.mp4")), media.bucket(), key)
@@ -194,7 +208,17 @@ def test_a_montage_reaches_the_length_that_was_ordered_by_holding_its_clips_long
     # 4 + 4 + 2.5 + 2.5 less three joins is 11.5, so 8.5 seconds are missing and the two clips take
     # 4.25 each — 8.25 seconds of a twelve-second file apiece.
     assert about(duration, 20.0), "ролик вышел не той длины, что заказали"
-    assert about(float(probe(fetch(s3, video_key, tmp_path / "m.mp4"))["format"]["duration"]), 20.0)
+    assembled_file = fetch(s3, video_key, tmp_path / "m.mp4")
+    assembled = probe(assembled_file)
+    assert about(float(assembled["format"]["duration"]), 20.0)
+    tracks = {stream["codec_type"]: stream for stream in assembled["streams"]}
+    assert (tracks["video"]["codec_name"], tracks["audio"]["codec_name"]) == ("h264", "aac")
+    assert float(tracks["audio"]["duration"]) == pytest.approx(
+        float(tracks["video"]["duration"]), abs=0.3
+    ), "дорожка кончилась раньше картинки или пережила её"
+    # The clips are on the screen at the start and the stills at the end, and the clips' own sound
+    # is left out of a montage with music: a loud end can only be the music.
+    assert loudness(assembled_file, at=duration - 3.2, seconds=1.0) > -45, "в конце ролика нет музыки"
 
 
 def layout_of(conn, montage_id):
@@ -322,24 +346,33 @@ def test_a_montage_is_cut_to_the_beat_of_the_track_the_organizer_uploaded(
     )
 
 
-def test_a_music_file_that_will_not_open_fails_the_montage_instead_of_retrying(
-    conn, s3, memory, tmp_path
+@pytest.mark.parametrize("bad_track", ["bytes that are not media", "a photograph",
+                                       "a clip shot with the microphone off"])
+def test_an_uploaded_track_with_no_music_in_it_fails_the_montage_at_once_and_says_why(
+    conn, s3, memory, tmp_path, monkeypatch, bad_track
 ):
-    """An uploaded track is somebody else's bytes, and ffmpeg reads them. Not music at all (or a
-    playlist, which would send ffmpeg walking this worker's disks) — refused on the spot: the second
-    attempt would meet the same file."""
-    track_key = f"music/{uuid.uuid4()}.wav"
-    s3.upload_file(str(unopenable(tmp_path / "notmusic")), media.bucket(), track_key)
-    montage_id = order(conn, memory, {"music_track_key": track_key})
+    """An uploaded track is somebody else's bytes, and ffmpeg reads them: the api takes any file
+    under a track's name. Not music at all, a picture, a clip with nothing to hear (or a playlist,
+    which would send ffmpeg walking this worker's disks) — refused on the spot and with the reason,
+    before a single piece is encoded, and the job ends clean: the second attempt would meet the
+    same file, and three failed assemblies with «не удалось собрать ролик» tell nobody anything.
+    The shelf track next to it in the list does not save the order."""
+    track_key = f"music/{uuid.uuid4()}"
+    made, name = {"bytes that are not media": (unopenable, "track"),
+                  "a photograph": (photo, "track.jpg"),
+                  "a clip shot with the microphone off": (mute_clip, "track.mp4")}[bad_track]
+    s3.upload_file(str(made(tmp_path / name)), media.bucket(), track_key)
+    montage_id = order(conn, memory, {"music_tracks": ["warm", track_key]})
     material(conn, s3, memory, tmp_path)
     job_id = worker.enqueue(conn, "montage", montage_id)
+    encoded = []
+    monkeypatch.setattr(assembly, "assemble", lambda *args, **kwargs: encoded.append(args))
 
     assert worker.run_once(conn) is True
 
     assert conn.execute("SELECT status FROM jobs WHERE id = %s", (job_id,)).fetchone()[0] == "done"
-    status, _, _, error_text = read_montage(conn, montage_id)
-    assert status == "failed"
-    assert "трек" in error_text
+    assert read_montage(conn, montage_id) == ("failed", None, None, "загруженный трек не читается")
+    assert encoded == [], "трек отвергнут после того, как начали собирать ролик"
 
 
 # --- список треков, и пустой список -----------------------------------------
@@ -384,6 +417,10 @@ def test_the_tracks_of_an_order_become_one_soundtrack_in_the_order_they_were_giv
     assert loudness(soundtrack, at=0.2) > loudness(soundtrack, at=3.6) + 30, (
         "треки в дорожке идут не в том порядке, в каком их заказали"
     )
+    twice = assembly.one_track([tracks[0], tracks[0]], tmp_path)
+    assert float(probe(twice)["format"]["duration"]) == pytest.approx(
+        6.0 - assembly.TRACK_FADE_SECONDS, abs=0.2
+    ), "один и тот же трек в списке дважды — два трека, а не один"
     # И два вырожденных случая: собирать нечего, и собирать не из чего.
     assert assembly.one_track(tracks[:1], tmp_path) is tracks[0], "один трек незачем пересобирать"
     assert assembly.one_track([], tmp_path) is None, "пустой список — это «без музыки»"
@@ -432,6 +469,68 @@ def test_a_montage_under_a_list_of_tracks_is_cut_to_the_beat_of_the_whole_soundt
     assert abs(duration - 9.0) > 0.2, "куски тянули к битам, а не оставили как выбрали"
 
 
+@pytest.mark.parametrize("seconds", [3.0, 40.0], ids=["shorter than the video", "longer than the video"])
+def test_a_track_shorter_or_longer_than_the_video_plays_exactly_as_long_as_the_picture(
+    conn, s3, memory, tmp_path, seconds
+):
+    """A short track goes round again and a long one is cut off with the picture — the music is
+    never told how long to play, the montage is cut to the material. A tone has no tempo, so the
+    pieces stay as chosen: nine seconds either way, and the sound lasts to the last of them."""
+    own = f"music/{uuid.uuid4()}.wav"
+    s3.upload_file(str(tone(tmp_path / "own.wav", seconds=seconds)), media.bucket(), own)
+    montage_id = order(conn, memory, {"target_seconds": 30, "music_tracks": [own]})
+    material(conn, s3, memory, tmp_path)
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    status, video_key, duration, error_text = read_montage(conn, montage_id)
+    assert (status, error_text) == ("ready", None)
+    assert duration == pytest.approx(9.0, abs=0.3), "ролик подстроился под длину трека"
+    assembled_file = fetch(s3, video_key, tmp_path / "montage.mp4")
+    streams = {stream["codec_type"]: stream for stream in probe(assembled_file)["streams"]}
+    assert float(streams["audio"]["duration"]) == pytest.approx(duration, abs=0.3), (
+        "звук кончился раньше картинки или пережил её"
+    )
+    assert loudness(assembled_file, at=duration - 3.2, seconds=1.0) > -45, "к концу ролика музыка смолкла"
+
+
+@pytest.mark.parametrize("shape", ["by a shelf id", "by an uploaded key"])
+def test_a_failed_montage_ordered_before_track_lists_is_assembled_again_the_way_it_was_ordered(
+    conn, s3, memory, tmp_path, monkeypatch, shape
+):
+    """Повтор упавшего ролика: строка лежит в базе так, как её записали до списков, — с
+    `music_track_id` или `music_track_key` и без `music_tracks` — и статусом `failed`. Собирается она
+    как собиралась: под тот трек, что в ней назван, и после этого не failed и без старой ошибки."""
+    own = f"music/{uuid.uuid4()}.wav"
+    s3.upload_file(str(tone(tmp_path / "own.wav", seconds=7.0)), media.bucket(), own)
+    params = {"target_seconds": 30}
+    params.update({"music_track_id": "calm"} if shape == "by a shelf id" else {"music_track_key": own})
+    montage_id = order(conn, memory, params)
+    conn.execute("UPDATE montages SET status = 'failed', error_text = 'не удалось собрать ролик' "
+                 "WHERE id = %s", (montage_id,))
+    material(conn, s3, memory, tmp_path)
+    played = []
+    assembling = assembly.assemble
+
+    def watched(pieces, orientation, track, *rest, **kwargs):
+        played.append((track == assembly.track_file("calm"), media._duration(track)))
+        return assembling(pieces, orientation, track, *rest, **kwargs)
+
+    monkeypatch.setattr(assembly, "assemble", watched)
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    status, video_key, _, error_text = read_montage(conn, montage_id)
+    assert (status, video_key, error_text) == ("ready", f"montages/{montage_id}.mp4", None)
+    (shelf, length), = played
+    if shape == "by a shelf id":
+        assert shelf, "под трек полки, что назван в заказе"
+    else:
+        assert not shelf and length == pytest.approx(7.0, abs=0.2), "под свой трек, что назван в заказе"
+
+
 def test_an_order_with_no_music_at_all_keeps_the_live_sound_of_the_videos(
     conn, s3, memory, tmp_path
 ):
@@ -465,8 +564,34 @@ def test_an_order_with_no_music_at_all_keeps_the_live_sound_of_the_videos(
     assert loudness(assembled, at=7.2) > loudness(assembled, at=0.5) + 30, (
         "в конце ролика должен звучать клип, а в начале — молчать фотография"
     )
-    last_moment = loudness(assembled, at=duration - 0.1, seconds=0.1)
-    assert last_moment < loudness(assembled, at=7.2) - 10, (
+
+
+def test_the_live_sound_of_a_montage_without_music_fades_at_both_ends_instead_of_clicking(
+    conn, s3, memory, tmp_path
+):
+    """Звук, оборванный на полуслове, щёлкает: живой звук держится в краях ролика тем же
+    полусекундным фейдом, что и склейки. Мерится по готовому файлу, как и на ревью: первые и
+    последние сотни миллисекунд против середины куска. Оба края ролика — клипы со звуком (старший
+    и новейший), между ними фотография и клип, снятый без звука, — оба молчат, но склеиваются с
+    остальными; а заказано больше, чем есть, — так что клипы растянуты и середина первого из них
+    лежит далеко от обоих краёв и от склеек."""
+    montage_id = order(conn, memory, {"target_seconds": 20, "music_tracks": []})
+    for name, kind, age, make in (("first.mp4", "video", 5, long_clip), ("still.jpg", "photo", 4, photo),
+                                  ("mute.mp4", "video", 3, mute_clip), ("last.mp4", "video", 0, long_clip)):
+        _, key = add_item(conn, memory, kind, status="ready", age_hours=age)
+        s3.upload_file(str(make(tmp_path / name)), media.bucket(), key)
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    status, video_key, duration, error_text = read_montage(conn, montage_id)
+    assert (status, error_text) == ("ready", None)
+    assembled = fetch(s3, video_key, tmp_path / "montage.mp4")
+    length = float(probe(assembled)["format"]["duration"])
+    middle = loudness(assembled, at=2.5, seconds=1.0)
+    assert middle > -40, "в середине клипа должен быть слышен его живой звук"
+    assert loudness(assembled, at=0, seconds=0.1) < middle - 10, "звук начинается сразу, с щелчка"
+    assert loudness(assembled, at=length - 0.1, seconds=0.1) < middle - 10, (
         "живой звук обрывается с концом ролика на полной громкости, а не гаснет"
     )
 
@@ -520,18 +645,15 @@ def test_what_the_order_says_about_music_is_read_the_old_way_too():
 
     named, refusal = montage._ordered_music({"music_tracks": ["warm", "polka"]})
     assert named is None and "polka" in refusal
+    # Чужой ключ бакета — не трек: только полка и `music/…` качаются под музыку.
+    for stranger in ("originals/abc", "tracks/warm.mp3", "../music/abc"):
+        named, refusal = montage._ordered_music({"music_tracks": [stranger]})
+        assert named is None and stranger in refusal
+    assert montage._ordered_music({"music_tracks": ["warm", "music/abc", "warm", "music/abc"]}) == (
+        ["warm", "music/abc", "warm", "music/abc"], None
+    ), "список отдаётся как заказан: дубли не сливаются и порядок не меняется"
     named, refusal = montage._ordered_music({"music_track_id": "polka"})
     assert named is None and "polka" in refusal
-
-
-def test_an_uploaded_track_with_no_sound_in_it_is_refused_at_once(s3, tmp_path):
-    """Под свой трек api принимает любые байты. Фотография на месте музыки — отказ сразу и с
-    причиной, а не три упавшие сборки подряд с «не удалось собрать ролик»."""
-    key = f"music/{uuid.uuid4()}"
-    s3.upload_file(str(photo(tmp_path / "cover.jpg")), media.bucket(), key)
-
-    files, refusal = montage._music_files(["warm", key], s3, tmp_path)
-    assert (files, refusal) == (None, "загруженный трек не читается")
 
 
 def test_a_montage_ordered_portrait_is_assembled_the_other_way_up(conn, s3, memory, tmp_path):
@@ -661,8 +783,11 @@ def test_a_montage_ordered_with_a_story_is_cut_to_the_directors_plan(
             (media_id, str(memory[0]), description, ["человек-1"]),
         )
     net = planning_over(monkeypatch, ids[:3])
+    own = f"music/{uuid.uuid4()}.wav"
+    s3.upload_file(str(tone(tmp_path / "own.wav", seconds=5.0)), media.bucket(), own)
     montage_id = order(conn, memory, {
         "target_seconds": 30, "story_text": "день рождения, всё вокруг торта",
+        "music_tracks": [own, "warm", own], "music_note": "  торт — под припев второго трека  ",
     })
     worker.enqueue(conn, "montage", montage_id)
 
@@ -680,6 +805,16 @@ def test_a_montage_ordered_with_a_story_is_cut_to_the_directors_plan(
     question = json.loads(net.sent.data)["input"][0]["text"]
     assert "всё вокруг торта" in question, "the story the organizer typed reached the director"
     assert "вносят торт" in question, "and so did what the pipeline already knew about the material"
+    (request,), = conn.execute(
+        "SELECT request FROM ai_requests WHERE operation = 'plan_montage' AND ref = %s", (montage_id,)
+    ).fetchall()
+    said = json.loads(request["prompt"])
+    warm = round(media._duration(assembly.track_file("warm")), 1)
+    assert said["music"] == [{"track": "свой трек", "seconds": 5.0}, {"track": "warm", "seconds": warm},
+                             {"track": "свой трек", "seconds": 5.0}], (
+        "the soundtrack goes to the director in the order it plays, an own track by no key of a bucket"
+    )
+    assert said["music_note"] == "торт — под припев второго трека", "the wish is the organizer's words"
 
 
 def test_the_directors_film_is_held_to_the_ordered_length_the_same_way(
@@ -985,6 +1120,30 @@ def test_a_photograph_is_scaled_once_for_the_piece_and_not_once_a_frame(tmp_path
     assert float(clip["format"]["duration"]) == pytest.approx(3.0, abs=0.05), "не та длина куска"
     picture = clip["streams"][0]
     assert (picture["width"], picture["height"]) == assembly.CANVASES["landscape"]
+
+
+def test_a_montage_of_hundreds_of_pieces_is_assembled_without_ffmpeg_running_out_of_threads(
+    tmp_path, monkeypatch
+):
+    """Ten minutes of montage is about three hundred pieces, and all of them are open in one ffmpeg
+    at once: a decoder with a thread pool of its own on every input took the process past its thread
+    limit at about two hundred (ревью m-26). The pieces here are short and on a canvas the size of a
+    stamp — what is being asked is only whether that many inputs can be open at the same time, and
+    the picture is not the point. Five hundred, not three: the limit is threads, cores times inputs,
+    and on this ten-core machine three hundred inputs of the same clips still fit under it with the
+    fix taken out."""
+    monkeypatch.setitem(assembly.CANVASES, "landscape", (128, 72))
+    still = photo(tmp_path / "still.jpg")
+    pieces = [selection.Piece(kind="photo", seconds=0.6, path=still) for _ in range(500)]
+    soundtrack = tone(tmp_path / "track.wav", seconds=40)
+    out = tmp_path / "long.mp4"
+
+    clips = assembly.assemble(pieces, "landscape", soundtrack, tmp_path, out)
+
+    assert len(clips) == len(pieces)
+    assembled = probe(out)
+    assert float(assembled["format"]["duration"]) == pytest.approx(assembly.length_of(clips), abs=0.5)
+    assert {stream["codec_type"] for stream in assembled["streams"]} == {"video", "audio"}
 
 
 def test_a_photograph_is_cut_from_the_large_copy_it_was_judged_on_unless_it_is_short(tmp_path):
