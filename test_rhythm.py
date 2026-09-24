@@ -203,9 +203,9 @@ def test_a_clip_shrunk_to_the_beat_stays_cut_around_its_best_moment():
     not slide that moment out of what is left on screen — the two modules agree on where a clip
     starts (`cut_to`) for exactly this reason, and `fit` has to go through it too, not just swap
     the length in and leave the old, now off-centre, `start` behind."""
-    moments = (1.5, 50.0, 51.0, 52.0, 53.0, 54.0, 55.0, 56.0)
+    moments = (3.0, 50.0, 51.0, 52.0, 53.0, 54.0, 55.0, 56.0)
     clip = dataclasses.replace(
-        photos(4.0)[0], kind="video", seconds=4.0, start=0.0, best_second=2.0, duration=10.0
+        photos(4.0)[0], kind="video", seconds=4.0, start=0.0, best_second=3.8, duration=4.0
     )
 
     fitted = rhythm.fit([clip, *photos(3.0)], moments)
@@ -218,14 +218,27 @@ def test_a_clip_shrunk_to_the_beat_stays_cut_around_its_best_moment():
 
 
 def test_a_piece_is_never_cut_shorter_than_a_glance():
-    """A dense grid of beats must not turn the montage into a flicker: the nearest beat can be half
-    a second from the start of the piece, and that one may not be taken. Nor is the last piece cut
+    """A dense grid of beats must not turn the montage into a flicker: the beat nearest a join can
+    leave its piece shorter than a glance, and that one may not be taken. Nor is the last piece cut
     down past a glance to give back what the joins before it put on."""
-    moments = tuple(0.2 * beat for beat in range(100))
+    moments = tuple(0.2 + 0.5 * beat for beat in range(100))
 
-    fitted = rhythm.fit(photos(0.3, 0.3, 3.0), moments)
+    fitted = rhythm.fit(photos(1.6, 1.6, 1.6), moments)
 
     assert all(piece.seconds >= rhythm.MIN_PIECE_SECONDS for piece in fitted)
+
+
+def test_a_join_is_not_pulled_across_a_stretch_without_beats():
+    """Where the track goes quiet — a fade, the seam of a looped track — the first beat past the
+    silence is seconds from where the join stood. Pulled there, the join would take more than the
+    last still can give back, and the video would run long: it stays where it was instead."""
+    moments = (0.6, 1.2, 1.8, 2.4, *(7.0 + GAP * beat for beat in range(10)))
+    pieces = photos(2.5, 2.5, 2.5)
+
+    fitted = rhythm.fit(pieces, moments)
+
+    assert fitted[1].seconds == 2.5, "the join was pulled across the silence"
+    assert assembly.length_of(fitted) == pytest.approx(assembly.length_of(pieces), abs=ON_THE_BEAT)
 
 
 def test_a_ten_minute_order_keeps_the_length_it_was_stretched_to_under_a_beat_grid():
@@ -288,17 +301,19 @@ def shelf():
     [at(number * 10, 50, media_id=f"p{number}") for number in range(300)],
     [*(clip(minute * 60, 100 - minute, media_id=f"v{minute}") for minute in range(20)),
      *(at(minute * 60 + 30, 50 - minute, media_id=f"p{minute}") for minute in range(10))],
-], ids=["300 фото", "20 клипов по минуте и 10 фото"])
+    [clip(minute * 60, 100 - minute, duration=20.0, media_id=f"v{minute}") for minute in range(40)],
+], ids=["300 фото", "20 клипов по минуте и 10 фото", "40 клипов по 20 с"])
 def test_a_video_under_music_comes_out_the_length_it_was_ordered(
     shelf, track, target_seconds, material
 ):
     """The promise under music, at the three lengths the product talks in: out of material with
     enough in it, the video that the beats have cut is the length that was ordered to within a
-    second — under a slow track and a fast one alike, out of stills that cannot be held longer and
-    out of clips that can — and no longer than ten minutes. So is the file the encoder makes of it,
-    which holds every piece for a whole number of frames, rounded piece by piece. Every join is on
-    a beat of the track, except where the track has none for longer than a piece can reach:
-    «Тёплая» fades out and starts again with nine seconds of no pulse in between."""
+    second — under a slow track and a fast one alike, out of stills that cannot be held longer, out
+    of clips that can and out of nothing but clips already stretched past the window of a beat —
+    and no longer than ten minutes. So is the file the encoder makes of it, which holds every piece
+    for a whole number of frames, rounded piece by piece. Every join is on a beat of the track,
+    except where the track has none for longer than a piece can reach: «Тёплая» fades out and
+    starts again with nine seconds of no pulse in between."""
     moments = shelf[track]
     chosen, _ = selection.choose(material, target_seconds)
 
