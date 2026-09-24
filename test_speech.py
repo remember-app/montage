@@ -16,7 +16,7 @@ import ai
 import media
 import speech
 import worker
-from test_ai import FIXTURES, Recorded, body
+from test_ai import FIXTURES, Recorded, body, saying
 # The fixtures and the ffmpeg-drawn material of the preview tests, rather than a second copy of
 # them: a `media_items` row as the api leaves it is the same row here.
 from test_media import add_item, conn, ffmpeg, memory, photo, s3, video  # noqa: F401
@@ -131,6 +131,25 @@ def test_a_clip_where_nobody_speaks_is_not_asked_about_twice(
 
     assert stored(conn, item_id) == ("",)
     assert len(asked) == 1, "an empty transcript is a settled clip, not an unanswered one"
+
+
+def test_a_character_no_table_can_hold_is_dropped_from_the_words_and_they_are_kept(
+    conn, s3, memory, tmp_path, monkeypatch
+):
+    """A transcript is plain text and never goes through the model's JSON, but it goes into the
+    journal's `jsonb` and into `media_speech.transcript` all the same — and neither takes a NUL or
+    half of a surrogate pair. Both go; the words, which are paid for, stay."""
+    item_id = ready_clip(conn, s3, memory, tmp_path)
+    listens(monkeypatch, saying("Ну что\x00, с днём\ud800 рождения!"))
+    worker.enqueue(conn, "media_speech", item_id)
+
+    assert worker.run_once(conn) is True
+
+    assert stored(conn, item_id) == ("Ну что, с днём рождения!",)
+    assert speech_job(conn, item_id) == [("done",)]
+    assert conn.execute(
+        "SELECT status, response FROM ai_requests WHERE ref = %s", (item_id,)
+    ).fetchone() == ("answered", "Ну что, с днём рождения!")
 
 
 def test_without_a_cloud_model_nothing_is_written_and_nothing_breaks(conn, s3, memory, tmp_path):
