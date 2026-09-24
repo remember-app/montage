@@ -393,6 +393,10 @@ def stretch(pieces, target_seconds):
         grown = min(missing / (len(growing) - served), room[index])
         lengths[index] += grown
         missing -= grown
+    if missing > 0.01:
+        log.warning("material runs out %.1fs short of the %.0fs ordered: the video runs %.1fs → "
+                    "%.1fs, nothing in it can be held longer", missing, target_seconds,
+                    assembly.length_of(pieces), target_seconds - missing)
     return [cut_to(piece, seconds) if seconds > piece.seconds else piece
             for piece, seconds in zip(pieces, lengths)]
 
@@ -401,8 +405,8 @@ def cap(pieces):
     """The same pieces in the same order, cut from the tail to the ten minutes no video runs past.
 
     Every step before this one can carry a video over `MAX_SECONDS`: «включить» is spent whatever
-    it costs (`choose`), the director puts back what its plan left out, and under a fast track the
-    beats pull every join of a ten-minute video the same way (`rhythm.fit`). Ten minutes is a hard
+    it costs (`choose`), the director puts back what its plan left out, and the beats by the
+    fraction of one that the last piece cannot give back (`rhythm.fit`). Ten minutes is a hard
     edge and not a wish, so it is held once, after all of them: whole pieces come off the end while
     the ones before them already reach the ceiling, and the piece that crosses it is held shorter —
     a clip cut around its best moment like any other, a still for less than its 2.5 seconds.

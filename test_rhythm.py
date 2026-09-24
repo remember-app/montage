@@ -8,6 +8,7 @@ a file are the ones put into it, and that the joins between pieces land on them.
 A whole montage assembled to an uploaded track of a known tempo is `test_montage.py`'s.
 """
 
+import bisect
 import dataclasses
 
 import pytest
@@ -20,6 +21,10 @@ from test_selection import at, clip
 
 GAP = 0.6  # seconds between the clicks of the drawn track: a hundred beats a minute
 SECONDS = 30  # and this is how long it runs
+
+# How far a join may be from its beat: half a frame. A piece is held a whole number of frames — the
+# only lengths the encoder can hold exactly — so a join falls on the frame nearest its beat.
+ON_THE_BEAT = 0.5 / assembly.FPS + 1e-9
 
 
 @pytest.fixture(scope="module")
@@ -125,18 +130,39 @@ def test_every_join_lands_on_a_beat():
 
     assert [piece.seconds for piece in pieces] == [3.0] * 4, "the pieces handed in are untouched"
     for cut in joins(fitted):
-        assert min(abs(cut - moment) for moment in moments) < 1e-6, f"the join at {cut} misses"
+        assert min(abs(cut - moment) for moment in moments) <= ON_THE_BEAT, (
+            f"the join at {cut} misses"
+        )
     # And the fitting does not run away with the montage: every piece stayed near its own length.
     assert all(2.5 <= piece.seconds <= 3.5 for piece in fitted)
 
 
-def test_the_last_piece_is_left_as_it_was():
-    """Nothing is joined to it — behind it are the end of the video and the music fading out."""
+def test_the_last_piece_takes_up_what_the_joins_moved():
+    """Nothing is joined to it — behind it are the end of the video and the music fading out — so
+    the beats do not set its length: it is held as much longer or shorter as ends the video on the
+    length it was handed, which is the length that was ordered."""
     moments = tuple(GAP * beat for beat in range(50))
+    pieces = photos(3.0, 3.0, 4.2)
 
-    fitted = rhythm.fit(photos(3.0, 3.0, 4.2), moments)
+    fitted = rhythm.fit(pieces, moments)
 
-    assert fitted[-1].seconds == 4.2
+    assert fitted[-1].seconds != 4.2, "the joins moved and the last piece took up none of it"
+    assert assembly.length_of(fitted) == pytest.approx(assembly.length_of(pieces))
+
+
+def test_a_last_clip_with_nothing_left_in_its_file_ends_the_video_short_and_says_so(caplog):
+    """The joins land early, and the last piece would have to be held longer to make up for it — but
+    it is a clip already running whole. The video comes out that fraction of a beat short, and the
+    worker's log says by how much instead of keeping quiet about it."""
+    moments = tuple(GAP * beat for beat in range(50))
+    whole = dataclasses.replace(photos(3.0)[0], kind="video", duration=3.0)
+    pieces = [*photos(2.9, 2.9), whole]
+
+    fitted = rhythm.fit(pieces, moments)
+
+    assert fitted[-1].seconds == 3.0, "a clip was held past its own file"
+    assert assembly.length_of(fitted) < assembly.length_of(pieces)
+    assert "instead of" in caplog.text, "the video came out short without a word in the log"
 
 
 def test_a_track_without_a_tempo_leaves_the_pieces_alone():
@@ -159,7 +185,7 @@ def test_a_clip_is_never_stretched_past_its_own_file():
 
     fitted = rhythm.fit([clip, *photos(3.0, 3.0)], moments)
 
-    assert fitted[0].seconds == pytest.approx(2.25)
+    assert fitted[0].seconds == pytest.approx(2.25, abs=ON_THE_BEAT)
 
 
 def test_a_piece_keeps_its_own_length_when_no_beat_fits():
@@ -193,12 +219,13 @@ def test_a_clip_shrunk_to_the_beat_stays_cut_around_its_best_moment():
 
 def test_a_piece_is_never_cut_shorter_than_a_glance():
     """A dense grid of beats must not turn the montage into a flicker: the nearest beat can be half
-    a second from the start of the piece, and that one may not be taken."""
+    a second from the start of the piece, and that one may not be taken. Nor is the last piece cut
+    down past a glance to give back what the joins before it put on."""
     moments = tuple(0.2 * beat for beat in range(100))
 
     fitted = rhythm.fit(photos(0.3, 0.3, 3.0), moments)
 
-    assert all(piece.seconds >= rhythm.MIN_PIECE_SECONDS for piece in fitted[:-1])
+    assert all(piece.seconds >= rhythm.MIN_PIECE_SECONDS for piece in fitted)
 
 
 def test_a_ten_minute_order_keeps_the_length_it_was_stretched_to_under_a_beat_grid():
@@ -206,7 +233,7 @@ def test_a_ten_minute_order_keeps_the_length_it_was_stretched_to_under_a_beat_gr
     ordered for 600 seconds are stretched to it, and the beats then pull each join to its nearest
     one. The window of a piece (`MAX_PIECE_SECONDS`) bounds what a beat may do to it, not how long
     the stretch made it — a clip held for half a minute is not cut back to six seconds — and the
-    pulls do not add up to the seconds: the video stays within its five per cent of the order."""
+    pulls do not add up: the video stays within a second of the order."""
     material = [clip(minute * 60, 100 - minute, media_id=f"v{minute}") for minute in range(20)]
     material += [at(minute * 60 + 30, 50 - minute, media_id=f"p{minute}") for minute in range(10)]
     chosen, _ = selection.choose(material, 600)
@@ -218,27 +245,73 @@ def test_a_ten_minute_order_keeps_the_length_it_was_stretched_to_under_a_beat_gr
     assert max(piece.seconds for piece in stretched) > rhythm.MAX_PIECE_SECONDS * 3
     for before, after in zip(stretched[:-1], fitted[:-1]):
         assert after.seconds == pytest.approx(before.seconds, abs=GAP), "a stretched piece was cut back"
-    assert assembly.length_of(fitted) == pytest.approx(600, abs=600 * 0.05)
+    assert assembly.length_of(fitted) == pytest.approx(600, abs=1.0)
     for cut in joins(fitted):
-        assert min(abs(cut - moment) for moment in moments) < 1e-6, f"the join at {cut} misses"
+        assert min(abs(cut - moment) for moment in moments) <= ON_THE_BEAT, (
+            f"the join at {cut} misses"
+        )
 
 
 def test_a_ten_minute_order_under_a_fast_track_still_ends_on_ten_minutes():
-    """Three hundred stills ordered for the ceiling come to 600 seconds exactly, and under a hundred
-    and forty beats a minute the grid pulls their joins the same way, one after another, until the
-    video runs some forty seconds long. Ten minutes is the edge of any video: `selection.cap` takes
-    off the tail what the beats put on, and every join left in the video is still on a beat."""
+    """Three hundred stills ordered for the ceiling come to 600 seconds exactly. Under a hundred and
+    forty beats a minute a grid that pulled every join from where the one before it landed would
+    pull them all the same way and run the video some forty seconds long; each join is pulled from
+    its own place instead, the last still takes up the rest, and the video ends on ten minutes —
+    not past them — with every join in it on a beat."""
     material = [at(number * 10, 50, media_id=f"p{number}") for number in range(300)]
     chosen, _ = selection.choose(material, 600)
     gap = 60 / 140
     moments = tuple(gap * beat for beat in range(1, int(rhythm.HORIZON_SECONDS / gap)))
 
-    fitted = rhythm.fit(selection.stretch(chosen, 600), moments)
-    video = selection.cap(fitted)
+    video = selection.cap(rhythm.fit(selection.stretch(chosen, 600), moments))
 
-    assert assembly.length_of(fitted) > selection.MAX_SECONDS, "the beats did not take it past"
+    assert len(video) == 300, "a still came off the tail"
     assert assembly.length_of(video) <= selection.MAX_SECONDS
     assert assembly.length_of(video) == pytest.approx(selection.MAX_SECONDS)
-    assert video[:-1] == fitted[:len(video) - 1], "something ahead of the cut moved"
     for cut in joins(video):
-        assert min(abs(cut - moment) for moment in moments) < 1e-6, f"the join at {cut} misses"
+        assert min(abs(cut - moment) for moment in moments) <= ON_THE_BEAT, (
+            f"the join at {cut} misses"
+        )
+
+
+@pytest.fixture(scope="module")
+def shelf():
+    """The beats of two tracks of the library, heard the way a montage hears them: «Тёплая», the
+    default, at about eighty beats a minute, and «Ночь» at about a hundred. Under one of them every
+    join pulled the same way would run the video long, under the other short."""
+    return {track: rhythm.beats(assembly.track_file(track)) for track in ("warm", "night")}
+
+
+@pytest.mark.parametrize("target_seconds", [60, 300, 600])
+@pytest.mark.parametrize("track", ["warm", "night"])
+@pytest.mark.parametrize("material", [
+    [at(number * 10, 50, media_id=f"p{number}") for number in range(300)],
+    [*(clip(minute * 60, 100 - minute, media_id=f"v{minute}") for minute in range(20)),
+     *(at(minute * 60 + 30, 50 - minute, media_id=f"p{minute}") for minute in range(10))],
+], ids=["300 фото", "20 клипов по минуте и 10 фото"])
+def test_a_video_under_music_comes_out_the_length_it_was_ordered(
+    shelf, track, target_seconds, material
+):
+    """The promise under music, at the three lengths the product talks in: out of material with
+    enough in it, the video that the beats have cut is the length that was ordered to within a
+    second — under a slow track and a fast one alike, out of stills that cannot be held longer and
+    out of clips that can — and no longer than ten minutes. So is the file the encoder makes of it,
+    which holds every piece for a whole number of frames, rounded piece by piece. Every join is on
+    a beat of the track, except where the track has none for longer than a piece can reach:
+    «Тёплая» fades out and starts again with nine seconds of no pulse in between."""
+    moments = shelf[track]
+    chosen, _ = selection.choose(material, target_seconds)
+
+    video = selection.cap(rhythm.fit(selection.stretch(chosen, target_seconds), moments))
+
+    assert abs(assembly.length_of(video) - target_seconds) <= 1.0
+    assert assembly.length_of(video) <= selection.MAX_SECONDS
+    encoded = sum(round(piece.seconds * assembly.FPS) for piece in video) / assembly.FPS
+    assert abs(encoded - assembly.CROSSFADE_SECONDS * (len(video) - 1) - target_seconds) <= 1.0
+    for cut in joins(video):
+        following = bisect.bisect_left(moments, cut)
+        around = moments[max(following - 1, 0):following + 1]
+        silence = moments[following] - (moments[following - 1] if following else 0.0)
+        assert min(abs(cut - moment) for moment in around) <= ON_THE_BEAT or silence > (
+            rhythm.MAX_PIECE_SECONDS - rhythm.MIN_PIECE_SECONDS
+        ), f"the join at {cut:.2f} misses a beat it could have reached"

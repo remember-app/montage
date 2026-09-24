@@ -3,7 +3,7 @@
   "scenario": "algorithm",
   "montage": {
     "status": "ready",
-    "duration_seconds": 10.4,
+    "duration_seconds": 10.07,
     "params": {
       "target_seconds": 10,
       "music_tracks": [
@@ -181,7 +181,7 @@
       "total_count": 4,
       "outcome": {
         "cuts": 3,
-        "seconds": 10.4
+        "seconds": 10.1
       },
       "updated_at": "2026-01-01T00:00:27Z"
     }
@@ -503,12 +503,12 @@
     {
       "media": "f5",
       "start_seconds": 4.23,
-      "duration_seconds": 4.17
+      "duration_seconds": 3.5
     },
     {
       "media": "f9",
-      "start_seconds": 7.9,
-      "duration_seconds": 2.5
+      "start_seconds": 7.23,
+      "duration_seconds": 2.83
     }
   ]
 }

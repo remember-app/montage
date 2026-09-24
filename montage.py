@@ -251,8 +251,9 @@ def montage(conn, ref):
         if track:
             moments = rhythm.beats(track)
             to_the_beat = rhythm.fit(chosen, moments)
+            # Склейки, а не куски: последний добирает длину ролика, и склейки за ним нет.
             moved = sum(before.seconds != after.seconds
-                        for before, after in zip(chosen, to_the_beat))
+                        for before, after in zip(chosen[:-1], to_the_beat))
             chosen = to_the_beat
         # Под что подогнаны куски: треки в том порядке, в каком они играют (id полки и ключи своих,
         # ровно как в заказе — называет их приложение), темп дорожки и сколько склеек сдвинулось.
