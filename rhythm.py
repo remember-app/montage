@@ -94,8 +94,6 @@ def tempo(moments):
     остальные. Число идёт в журнал монтажа и больше никуда — на сборку темп не влияет, склейки
     попадают в сами биты.
     """
-    if len(moments) < 2:
-        return None
     steps = [after - before for before, after in zip(moments, moments[1:]) if after > before]
     return round(60 / statistics.median(steps)) if steps else None
 

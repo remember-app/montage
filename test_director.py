@@ -208,7 +208,7 @@ def test_the_director_says_what_it_sees_which_part_it_is_and_where_to_look(descr
     """Рассказ режиссёра целиком, порядком плана: мысль о плане в целом первой и без кадра, за ней
     по реплике на каждый показанный кадр — мысль его словами, часть истории номером и названием,
     рамка «куда смотрит» долями, — а кадр, который он в план не взял, идёт «мимо» с его же
-    причиной, а не с кодом.
+    словами о причине.
     """
     film, thoughts, _ = directed(described, "gemini_plan_thoughts.json", story=STORY)
 
@@ -231,8 +231,9 @@ def test_the_director_says_what_it_sees_which_part_it_is_and_where_to_look(descr
         "focus_x": 0.3, "focus_y": 0.05, "focus_w": 0.25, "focus_h": 0.5,
     }
     assert about(thoughts, "m-3") == {
-        "media_id": "m-3", "decision": "skip", "reason": "собака не про этот вечер"
-    }
+        "media_id": "m-3", "decision": "skip", "reason": director.LEFT_OUT,
+        "thought": "собака не про этот вечер",
+    }, "причина — кодом, как везде в журнале, а слова модели о ней — мыслью: их и покажут людям"
 
 
 def test_a_plan_written_before_the_director_spoke_is_still_a_plan(described):
@@ -347,10 +348,17 @@ def test_a_struck_out_piece_is_never_even_shown_to_the_director(described):
     """«Исключить» is not a filter over the answer — the piece does not go into the question, so
     there is nothing for the model to name. Named here anyway (the recorded plan has all three),
     which is exactly the case this rule has to survive: a model that says otherwise."""
-    film, _, net = directed(described, exclude=["m-3"])
+    blurred = dataclasses.replace(shot("m-4", 15), rejected=selection.BLUR)
+    film, thoughts, net = directed(described, pieces=[*MATERIAL, blurred], exclude=["m-3", "m-4"])
 
     assert [piece.media_id for piece in film] == ["m-1", "m-2"]
     assert "m-3" not in asked(net) and "собака" not in asked(net)
+    # Слово организатора видно и на этом пути — «мимо, вычеркнут», как у отсева; а смазанному
+    # второго «мимо» нет: о нём рассказал отсев.
+    assert (about(thoughts, "m-3")["decision"], about(thoughts, "m-3")["reason"]) == (
+        "skip", selection.EXCLUDED
+    )
+    assert not [one for one in thoughts if one.get("media_id") == "m-4"]
 
 
 def test_told_both_at_once_the_piece_stays_out_of_the_film_too(described):
