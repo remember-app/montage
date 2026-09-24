@@ -488,3 +488,21 @@ def test_an_api_that_does_not_answer_does_not_fail_a_finished_montage(monkeypatc
     monkeypatch.setenv("INTERNAL_WORKER_TOKEN", "secret")
 
     montage._tell_the_api("a3b1f2e4-0000-4000-8000-000000000000")  # no exception is the assertion
+
+
+def test_a_montage_whose_memory_was_deleted_leaves_the_queue_quietly(conn):
+    """Организатор удалил воспоминание, пока задача ждала очереди (api, `DELETE /memories/:id`):
+    строки ролика больше нет, собирать нечего — и это не ошибка. Падение здесь стоило бы трёх
+    попыток над пустотой и строки «не удалось собрать ролик» под роликом, которого нет.
+
+    Заказ, до которого очередь дошла *после* удаления, api снимает сам — но та же задача могла быть
+    уже взята в работу, и тогда она приходит сюда.
+    """
+    job_id = worker.enqueue(conn, "montage", str(uuid.uuid4()))
+
+    assert worker.run_once(conn) is True
+
+    status, last_error = conn.execute(
+        "SELECT status, last_error FROM jobs WHERE id = %s", (job_id,)
+    ).fetchone()
+    assert (status, last_error) == ("done", None)
