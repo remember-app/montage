@@ -369,9 +369,10 @@ def test_the_missing_seconds_are_shared_out_equally_and_a_photograph_gets_none_o
     assert assembly.length_of(video) == 20.0
 
 
-def test_material_that_runs_out_makes_a_shorter_video_and_not_a_failure():
+def test_material_that_runs_out_makes_a_shorter_video_and_not_a_failure(caplog):
     """Ten minutes ordered out of eleven seconds of material. The video is eleven seconds long —
-    no error, and nothing shown twice to make up the difference."""
+    no error, and nothing shown twice to make up the difference. Only the worker's log says, with
+    the numbers, that the order was not filled."""
     material = [clip(0, 10, duration=6.0, media_id="v"),
                 at(60, 9, media_id="p0"), at(120, 8, media_id="p1")]
 
@@ -380,6 +381,7 @@ def test_material_that_runs_out_makes_a_shorter_video_and_not_a_failure():
 
     assert [piece.media_id for piece in video] == ["v", "p0", "p1"]
     assert assembly.length_of(video) == 10.0, "the whole clip and both stills, less two joins"
+    assert "590.0s short of the 600s ordered" in caplog.text
 
 
 def test_nothing_that_was_left_out_comes_back_to_fill_the_length():
@@ -404,8 +406,8 @@ def test_nothing_that_was_left_out_comes_back_to_fill_the_length():
 
 # --- ten minutes, the edge of any video --------------------------------------
 # «Включить», the director and the beats can each carry a video past the ceiling; `cap` is the one
-# place it is held, after all of them (`montage.py`). That the beats do is `test_rhythm.py`'s, and
-# that the file itself comes out no longer is `test_montage.py`'s.
+# place it is held, after all of them (`montage.py`). That the beats keep a ten-minute order on it
+# is `test_rhythm.py`'s, and that the file itself comes out no longer is `test_montage.py`'s.
 
 
 def test_everything_the_organizer_asked_for_goes_in_up_to_ten_minutes_and_no_further():

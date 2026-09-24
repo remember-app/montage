@@ -67,12 +67,12 @@ def poster_of(conn, montage_id):
     ).fetchone()[0]
 
 
-# A montage is cut to the beat of its track: every piece is pulled to the nearest one, so the
-# finished video comes out around the sum of its pieces rather than exactly on it — by up to half a
-# beat either way, and the beats of real music are not evenly spaced (`rhythm.py`). A second of
-# slack covers that and still tells a montage of four pieces from one of three or five: there are
-# three seconds between those. What the windows below are for is how many pieces went in, not the
-# music — the rhythm itself is `test_rhythm.py`'s, and a cut to an uploaded track is below.
+# A montage is cut to the beat of its track, and the last piece takes up what the joins moved
+# (`rhythm.fit`): the video comes out the sum of its pieces to within what a piece that cannot be
+# held longer leaves over and a frame or two of encoding. A second of slack — the promise's own —
+# covers that and still tells a montage of four pieces from one of three or five: there are three
+# seconds between those. What the windows below are for is how many pieces went in, not the music
+# — the rhythm itself is `test_rhythm.py`'s, and a cut to an uploaded track is below.
 RHYTHM_SLACK = 1.0
 
 
@@ -222,6 +222,31 @@ def test_a_montage_reaches_the_length_that_was_ordered_by_holding_its_clips_long
     assert loudness(assembled_file, at=duration - 3.2, seconds=1.0) > -45, "в конце ролика нет музыки"
 
 
+@pytest.mark.parametrize("music", [["night"], []], ids=["under «Ночь»", "with no music"])
+def test_a_montage_under_music_comes_out_the_length_it_was_ordered(
+    conn, s3, memory, tmp_path, music
+):
+    """The ordered length under music, on a real file at a length a test can afford: a long clip
+    and twelve stills ordered for thirty seconds. Under «Ночь», a hundred beats a minute, joins each
+    pulled from the one before would all fall the same way and leave the video three seconds short;
+    with no music there is nothing to pull. Either way the file ffprobe reads runs the thirty
+    seconds to within one."""
+    montage_id = order(conn, memory, {"target_seconds": 30, "music_tracks": music})
+    _, key = add_item(conn, memory, "video", status="ready")
+    s3.upload_file(str(long_clip(tmp_path / "clip.mp4")), media.bucket(), key)
+    for index in range(12):
+        _, key = add_item(conn, memory, "photo", status="ready")
+        s3.upload_file(str(photo(tmp_path / f"photo-{index}.jpg")), media.bucket(), key)
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    status, video_key, _, error_text = read_montage(conn, montage_id)
+    assert (status, error_text) == ("ready", None)
+    seconds = float(probe(fetch(s3, video_key, tmp_path / "m.mp4"))["format"]["duration"])
+    assert abs(seconds - 30.0) <= 1.0, f"тридцать секунд заказали, а ролик — {seconds:.2f} с"
+
+
 def layout_of(conn, montage_id):
     """Which frames the montage is made of and where each of them stands in it, in the order they
     are shown — `montage_frames`, the table the frame sheet's «в каких роликах» is answered from."""
@@ -300,30 +325,39 @@ def test_a_layout_that_cannot_be_written_does_not_cost_the_montage(conn, memory)
 def click_track(path, gap=1.6):
     """Thirty seconds of metronome: one click every 1.6 seconds. The tempo is known because it was
     put there, and it is deliberately slow — under a track like this the pieces are pulled visibly
-    off their own lengths, and the same material can no longer come to its even 9 seconds."""
+    off their own lengths."""
     ffmpeg("-f", "lavfi",
            "-i", f"aevalsrc='0.8*sin(2*PI*1200*t)*exp(-40*mod(t,{gap}))':d=30", str(path))
     return path
+
+
+def pulled_to_the_beat(layout, beats, own_lengths):
+    """What the beats did to a finished montage, read off its layout — the lengths of the clips as
+    they were encoded, so of the file itself. Every join is heard half a crossfade into the piece
+    after it, and that moment has to be one of the track's beats: within a frame and a half, for the
+    encoding, which rounds every piece to one — a join that missed its beat would miss it by
+    hundreds of milliseconds. And the pieces have to be held visibly off the lengths they had
+    before the music, or nothing was pulled anywhere."""
+    for _, start, _ in layout[1:]:
+        join = start + assembly.CROSSFADE_SECONDS / 2
+        assert min(abs(join - beat) for beat in beats) < 0.1, f"the join at {join:.2f} is off the beat"
+    assert any(abs(seconds - own) > 0.2 for (_, _, seconds), own in zip(layout, own_lengths)), (
+        "nothing was pulled anywhere — the pieces stayed as they were"
+    )
 
 
 def test_a_montage_is_cut_to_the_beat_of_the_track_the_organizer_uploaded(
     conn, s3, memory, tmp_path
 ):
     """The organizer's own track instead of the library's: the order names a key rather than an id
-    (the api's `music_uploads`), and the joins fall into its rhythm just the same.
-
-    The rhythm is checked at the last join and only there: behind it stands the last piece, which
-    the fitting never touches, and its length is known — the 2.5 seconds a photograph is held. So
-    the last join sits at the end of the montage less those 2.5 seconds plus the half-crossfade
-    that piece began with, and that moment has to be one of the track's beats. The montage itself,
-    under a metronome this slow, has to come out well off the even 9 seconds its pieces add up to
-    — otherwise nothing was pulled anywhere.
+    (the api's `music_uploads`), and the joins fall into its rhythm just the same — while the video
+    stays the nine seconds its pieces add up to, because the last piece takes up what the joins
+    moved.
     """
     track_key = f"music/{uuid.uuid4()}.wav"
     s3.upload_file(str(click_track(tmp_path / "click.wav")), media.bucket(), track_key)
     montage_id = order(conn, memory, {"target_seconds": 30, "music_track_key": track_key})
-    # The clip first (oldest), so the montage is closed by a photograph and the tail of it is the
-    # 2.5 seconds a still is held rather than the three the clip's own file holds.
+    # The clip first (oldest): its file runs three seconds and the pieces after it are stills.
     _, key = add_item(conn, memory, "video", status="ready", age_hours=5)
     s3.upload_file(str(video(tmp_path / "clip.mp4")), media.bucket(), key)
     for index in range(3):
@@ -335,16 +369,10 @@ def test_a_montage_is_cut_to_the_beat_of_the_track_the_organizer_uploaded(
 
     status, _, duration, error_text = read_montage(conn, montage_id)
     assert (status, error_text) == ("ready", None)
-    assert not about(duration, 9.0), "nothing was pulled anywhere — the pieces stayed as they were"
-
-    last_join = duration - selection.PHOTO_SECONDS + assembly.CROSSFADE_SECONDS / 2
+    assert about(duration, 9.0), "the beats changed how long the video is"
     beats = rhythm.beats(tmp_path / "click.wav")
     assert beats, "a metronome is a tempo, or there is nothing here to check"
-    # A frame and a half: for the encoding, which rounds the montage's length to one, and for
-    # nothing else — a join that missed its beat would miss it by hundreds of milliseconds.
-    assert min(abs(last_join - beat) for beat in beats) < 0.1, (
-        f"the last join, at {last_join:.2f}, is not on a beat"
-    )
+    pulled_to_the_beat(layout_of(conn, montage_id), beats, (3.0, 2.5, 2.5, 2.5))
 
 
 @pytest.mark.parametrize("bad_track", ["bytes that are not media", "a photograph",
@@ -502,16 +530,14 @@ def test_a_montage_under_a_list_of_tracks_is_cut_to_the_beat_of_the_whole_soundt
     """Свой трек и трек полки вперемешку: воркер склеивает их в одну дорожку и ищет ритм по ней —
     склейки идут в такт всему списку, а не первому файлу из него.
 
-    Проверяется на последней склейке, как и под одним загруженным треком: за ней стоит последний
-    кусок, которого подгонка не касается, и его длина известна — 2,5 секунды, которые держится
-    фотография. Биты берутся у дорожки, собранной здесь же и из тех же двух файлов: это ровно та,
-    под которую собрали ролик.
+    Проверяется, как и под одним загруженным треком, по раскладке готового файла: каждая склейка —
+    на бите. Биты берутся у дорожки, собранной здесь же и из тех же двух файлов: это ровно та, под
+    которую собрали ролик.
     """
     track_key = f"music/{uuid.uuid4()}.wav"
     s3.upload_file(str(click_track(tmp_path / "click.wav")), media.bucket(), track_key)
     montage_id = order(conn, memory, {"target_seconds": 30, "music_tracks": [track_key, "warm"]})
-    # Клип первым (он старше всех), чтобы ролик закрывала фотография: её длина известна и подгонка
-    # ритма последний кусок не трогает. Набирать заказанные тридцать секунд тут нечем — клип и так
+    # Клип первым (он старше всех). Набирать заказанные тридцать секунд тут нечем — клип и так
     # взят целиком, а фотографии не растягиваются (`selection.stretch`).
     _, key = add_item(conn, memory, "video", status="ready", age_hours=5)
     s3.upload_file(str(video(tmp_path / "clip.mp4")), media.bucket(), key)
@@ -532,11 +558,8 @@ def test_a_montage_under_a_list_of_tracks_is_cut_to_the_beat_of_the_whole_soundt
     soundtrack = assembly.one_track([tmp_path / "click.wav", assembly.track_file("warm")], tmp_path)
     beats = rhythm.beats(soundtrack)
     assert beats, "в дорожке из метронома и музыки есть темп, иначе проверять нечего"
-    last_join = duration - selection.PHOTO_SECONDS + assembly.CROSSFADE_SECONDS / 2
-    assert min(abs(last_join - beat) for beat in beats) < 0.1, (
-        f"последняя склейка, на {last_join:.2f}, не попала в бит дорожки"
-    )
-    assert abs(duration - 9.0) > 0.2, "куски тянули к битам, а не оставили как выбрали"
+    pulled_to_the_beat(layout_of(conn, montage_id), beats, (3.0, 2.5, 2.5, 2.5))
+    assert about(duration, 9.0), "подгонка под биты изменила длину ролика"
 
 
 @pytest.mark.parametrize("seconds", [3.0, 40.0], ids=["shorter than the video", "longer than the video"])
