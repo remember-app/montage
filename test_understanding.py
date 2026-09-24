@@ -178,6 +178,27 @@ def test_only_strings_out_of_a_list_become_labels(conn, s3, memory, tmp_path, mo
     assert described(conn, item_id) == ("Женщина вносит торт", labels)
 
 
+def test_an_answer_nested_past_any_parser_is_paid_for_once(conn, s3, memory, tmp_path, monkeypatch):
+    """Ответ в сотню тысяч скобок глубиной ронял разбор уже после оплаты: задача уходила на повтор,
+    и каждая из попыток платила снова. Глубже предела — `null`, описание остаётся, задача закрыта с
+    первой попытки, и вызов за неё один."""
+    said = ('{"description": "Женщина вносит торт", "cast": ["человек-1"], '
+            f'"nested": {"[" * 100_000}{"]" * 100_000}}}')
+    monkeypatch.setattr(
+        ai, "from_env", lambda *_, **__: ai.Gemini("test-key", transport=saying(said))
+    )
+    item_id = ready_media(conn, s3, memory, photo(tmp_path / "preview.jpg"))
+    worker.enqueue(conn, "media_understanding", item_id)
+
+    assert worker.run_once(conn) is True
+
+    assert described(conn, item_id) == ("Женщина вносит торт", ["человек-1"])
+    assert conn.execute(
+        "SELECT status, attempts FROM jobs WHERE ref = %s", (item_id,)
+    ).fetchall() == [("done", 0)]
+    assert conn.execute("SELECT status FROM ai_requests").fetchall() == [("answered",)]
+
+
 def test_a_clip_is_described_by_stills_cut_out_of_it(conn, s3, memory, tmp_path, model):
     """Frames and not the clip whole: OpenAI takes no video at all, and Gemini charges one by its
     length (doc-11) — so a two-minute clip costs the same three photographs as a five-second one."""
