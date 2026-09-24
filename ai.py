@@ -552,9 +552,9 @@ def _holdable(value):
 # --- чтение плана режиссёра -------------------------------------------------
 # Ответ модели — недоверенный ввод, а слова режиссёра увидят все участники воспоминания и рамку
 # «куда смотрит» приложение нарисует поверх кадра. Поэтому план разбирается здесь, у самой двери, и
-# выше уходит только то, что выдержало чтение: шаг без куска — не шаг, часть не номером и рамка не
-# четырьмя долями внутри кадра — их просто нет. Чей кусок назван, здесь не проверить: что показали
-# модели, знает `director`, он и сверяет.
+# выше уходит только то, что выдержало чтение: шаг без куска — не шаг, длина не конечным числом,
+# часть не номером и рамка не четырьмя долями внутри кадра — их просто нет. Чей кусок назван, здесь
+# не проверить: что показали модели, знает `director`, он и сверяет.
 
 
 def _planned(answered):
@@ -586,7 +586,7 @@ def _step(step):
         return None
     return {
         "media_id": media_id,
-        "seconds": step.get("seconds"),
+        "seconds": _seconds(step.get("seconds")),
         "thought": _said(step.get("thought")) or _said(step.get("accent")),
         "part": _part(step.get("part")),
         "part_title": _said(step.get("part_title")),
@@ -612,6 +612,16 @@ def _said(words):
     if not isinstance(words, str):
         return None
     return words.strip() or None
+
+
+def _seconds(length):
+    """Длина куска в секундах — конечным числом, иначе никакой. Строку `"NaN"` `float` читает в
+    «не число», а оно проходит сквозь любые `min` и `max`, которыми длину потом держат."""
+    try:
+        length = float(length)
+    except (TypeError, ValueError):
+        return None
+    return length if math.isfinite(length) else None
 
 
 def _part(number):
