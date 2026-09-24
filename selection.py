@@ -327,11 +327,11 @@ def choose(pieces, target_seconds, include=(), exclude=()):
         chosen.append(piece)
 
     # An order is whole seconds, and a still cannot be cut to fit one: it adds two seconds to the
-    # video or none. So when no clip can be held longer to make up what is left (`stretch`), the
-    # sharpest still left out goes in after all if the video lands nearer the order with it than
-    # without — which, the two misses adding up to at most those two seconds, is always less than a
-    # second past it. It is what gets every frame into an order for the api's ceiling: that is the
-    # length of everything, rounded down to the second.
+    # video or none. So when the clips cannot be held long enough to make up what is left
+    # (`stretch`), the sharpest still left out goes in after all if the video lands nearer the order
+    # with it than without — which, the two misses adding up to at most those two seconds, is always
+    # less than a second past it. It is what gets every frame into an order for the api's ceiling:
+    # that is the length of everything, rounded down to the second.
     still = next((piece for piece in no_room if piece.kind != "video"), None)
     short = target_seconds - assembly.length_of(chosen) - sum(map(_room, chosen))
     if still and assembly.length_of(chosen + [still]) - target_seconds < short:

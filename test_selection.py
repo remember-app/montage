@@ -200,9 +200,8 @@ def test_ids_from_the_order_are_matched_as_text():
 # --- the length that was ordered ---------------------------------------------
 # What `choose` picks is usually shorter than the order, and past it only by a still that nothing
 # else could make up for; `stretch` is what turns the ordered length from a wish into a promise.
-# Both are arithmetic over pieces, so a
-# ten-minute montage is checked here in milliseconds instead of being encoded — that a real video
-# comes out that long is `test_montage.py`'s.
+# Both are arithmetic over pieces, so a ten-minute montage is checked here in milliseconds instead
+# of being encoded — that a real video comes out that long is `test_montage.py`'s.
 
 
 def clip(second, sharpness, *, duration=60.0, media_id=""):
@@ -292,7 +291,7 @@ def test_a_clip_held_whole_cannot_make_up_for_the_last_still_either():
     assert assembly.length_of(video) == pytest.approx(9.3)
 
 
-def test_a_still_does_not_run_past_the_order_while_a_clip_can_still_be_held_longer():
+def test_a_still_does_not_run_past_the_order_while_the_clips_can_make_up_the_rest():
     """Two clips and two stills against eleven seconds: the clips and one still come to 9.5, and
     the other still would make 11.5. Both clips have most of a minute left in their files, which
     brings the video to the eleven seconds exactly — so that still stays out and they are held
