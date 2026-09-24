@@ -129,23 +129,22 @@ def fit(pieces, moments):
     # Where the piece begins in the assembled montage, and where it began before the beats moved it.
     fitted, at, planned = [], 0.0, 0.0
     for piece in pieces[:-1]:
-        seconds = _snap(moments, piece, at, planned)
         # Through `cut_to` and not a bare length swap: a beat moves how long a piece is held, and
         # `cut_to` is what keeps it cut *around* its best moment at that new length. Without it a
         # piece shrunk here would keep the `start` centred for its old length and could show
         # nothing of what `selection` cut it around in the first place.
-        fitted.append(selection.cut_to(piece, seconds))
-        at += seconds - assembly.CROSSFADE_SECONDS
+        fitted.append(selection.cut_to(piece, _snap(moments, piece, at, planned)))
+        at += fitted[-1].seconds - assembly.CROSSFADE_SECONDS
         planned += piece.seconds - assembly.CROSSFADE_SECONDS
     last = pieces[-1]
     fitted.append(selection.cut_to(
-        last, max(last.seconds + planned - at, min(last.seconds, MIN_PIECE_SECONDS))
+        last, max(_whole_frames(last.seconds + planned - at), min(last.seconds, MIN_PIECE_SECONDS))
     ))
     before, after = assembly.length_of(pieces), assembly.length_of(fitted)
     log.info("cut to the beat: %s became %s, the video %.2fs → %.2fs",
              [round(piece.seconds, 2) for piece in pieces],
              [round(piece.seconds, 2) for piece in fitted], before, after)
-    if abs(after - before) > 0.01:
+    if abs(after - before) > 1 / assembly.FPS:
         log.warning("cut to the beat, the video runs %.2fs instead of %.2fs: the last piece could "
                     "only be held %.2fs of the %.2fs that would end it there", after, before,
                     fitted[-1].seconds, last.seconds + planned - at)
@@ -175,7 +174,19 @@ def _snap(moments, piece, at, planned):
     if not inside:
         return piece.seconds
     wanted = planned + piece.seconds - half_fade  # where the join would be if there were no music
-    return min(inside, key=lambda moment: abs(moment - wanted)) - at + half_fade
+    return _whole_frames(min(inside, key=lambda moment: abs(moment - wanted)) - at + half_fade)
+
+
+def _whole_frames(seconds):
+    """A length the encoder can hold exactly: to the nearest of the video's frames (`assembly.FPS`).
+
+    Every piece is encoded to a whole number of frames, each rounded on its own, and the lengths the
+    beats ask for are no whole number of them. Left to the encoder, those roundings add up over
+    hundreds of pieces — a second and more on a ten-minute video, and every join past them that far
+    off its beat. Rounded here, the next join is measured from where this piece really ends: a join
+    is within half a frame of its beat, and the video within half a frame of its length.
+    """
+    return round(seconds * assembly.FPS) / assembly.FPS
 
 
 def _room(piece):

@@ -340,7 +340,7 @@ def pulled_to_the_beat(layout, beats, own_lengths):
     before the music, or nothing was pulled anywhere."""
     for _, start, _ in layout[1:]:
         join = start + assembly.CROSSFADE_SECONDS / 2
-        assert min(abs(join - beat) for beat in beats) < 0.1, f"the join at {join:.2f} is off the beat"
+        assert min(abs(join - beat) for beat in beats) < 0.1, f"the join at {join:.2f} is off beat"
     assert any(abs(seconds - own) > 0.2 for (_, _, seconds), own in zip(layout, own_lengths)), (
         "nothing was pulled anywhere — the pieces stayed as they were"
     )
