@@ -233,6 +233,21 @@ def test_a_video_ordered_out_of_material_to_spare_comes_out_the_length_it_was_or
     )
 
 
+def test_a_ten_minute_order_out_of_stills_alone_takes_every_one_it_can_hold_at_2_5_seconds():
+    """Stills never stretch, so an order they alone must fill is filled by how many of them go in,
+    and 2.5 seconds each is the arithmetic the api counts the ceiling by. Three hundred photographs
+    of material against ten minutes: two hundred and ninety-nine go in, every one at its 2.5, and
+    the video is short of the order by less than one more still — the 300th would not fit."""
+    material = [at(number * 10, 50, media_id=f"p{number}") for number in range(300)]
+
+    chosen, rejected = selection.choose(material, 600)
+    video = selection.stretch(chosen, 600)
+
+    assert {piece.seconds for piece in video} == {selection.PHOTO_SECONDS}
+    assert len(video) == 299 and len(rejected) == 1
+    assert 600 - selection.PHOTO_SECONDS < assembly.length_of(video) <= 600
+
+
 def test_an_order_for_everything_there_is_takes_every_piece_whole():
     """The longest video the app offers — «сумма всех видео плюс 2,5 секунды на фото» (doc-03) —
     and it means exactly what it says: every clip runs from its first frame to its last and every
