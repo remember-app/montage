@@ -491,6 +491,20 @@ def test_the_director_tells_the_journal_the_plan_it_built(
     }
 
 
+def test_the_parts_of_the_story_are_the_parts_the_video_has():
+    """«3 части, 61 кадр» — про ролик: часть, ни один кадр которой не влез в заказанную длину, в
+    итоге не считается, как не считаются в `frames` её кадры."""
+    thoughts = [
+        {"thought": "Три части: сборы, торт, прощание."},
+        {"media_id": "a", "decision": "take", "story_part": 1, "story_part_title": "Сборы"},
+        {"media_id": "b", "decision": "take", "story_part": 2, "story_part_title": "Торт"},
+        {"media_id": "c", "decision": "skip", "reason": selection.NO_ROOM, "story_part": 3,
+         "story_part_title": "Прощание"},
+    ]
+
+    assert montage._story_parts(thoughts) == {"parts": 2, "part_titles": ["Сборы", "Торт"]}
+
+
 def test_service_characters_in_the_models_words_do_not_reach_the_journal(conn, memory):
     """Мысль модели увидят все участники воспоминания, а сказана она недоверенным ртом: перевод
     строки, управляющий символ, невидимая метка, разворачивающая текст, — всё это в рассказе о
