@@ -627,10 +627,12 @@ def test_the_log_says_what_was_read_and_not_where_it_was(conn, s3, memory, caplo
 @pytest.mark.parametrize("place", [
     "+5531.08+03731.80/",  # degrees and minutes, which reads as decimal degrees far off the globe
     "+" + "9" * 400 + "+037.5300/",  # a run of digits that is infinity as a float
-], ids=["degrees-and-minutes", "infinity"])
+    "+00.0000+000.0000/",  # what a camera with no satellite fix writes; the Gulf of Guinea, not a place
+], ids=["degrees-and-minutes", "infinity", "no-fix"])
 def test_a_place_no_globe_can_hold_is_no_place(conn, s3, memory, tmp_path, place):
-    """A clip's place tag comes off somebody's phone. What is not a place on the globe is left out
-    like any other thing the file does not say — the camera beside it is still read."""
+    """A clip's place tag comes off somebody's phone. What is not a place on the globe — or is the
+    point (0, 0) that a camera without a fix writes in its stead — is left out like any other thing
+    the file does not say, and the camera beside it is still read."""
     item_id, key = add_item(conn, memory, "video")
     s3.upload_file(str(phone_video(tmp_path / "original.mp4", place)), media.bucket(), key)
     worker.enqueue(conn, "media_frame_info", item_id)

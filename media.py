@@ -360,21 +360,23 @@ def _clip_info(path):
 def _plausible(info):
     """What the camera wrote, minus what no column and no map can use. Numbers: NaN and infinity (an
     EXIF rational over zero, a run of digits in a clip's place tag), an optic that is not a positive
-    length, a place off the globe — a tag in degrees-and-minutes read as decimal degrees. And the
+    length, a place off the globe — a tag in degrees-and-minutes read as decimal degrees — and the
+    point (0, 0) itself, which is where a camera with no satellite fix writes its place. And the
     model, which is the file's own text served to every member of the memory: one short line, since
     a NUL in it is refused by the `text` column, which fails the job three times over for good."""
     def positive(value):
         return value if value is not None and math.isfinite(value) and value > 0 else None
 
     model = "".join(char for char in info.camera_model or "" if char.isprintable())
-    on_the_globe = (info.latitude is not None and info.longitude is not None
-                    and abs(info.latitude) <= 90 and abs(info.longitude) <= 180)
+    a_place = (info.latitude is not None and info.longitude is not None
+               and abs(info.latitude) <= 90 and abs(info.longitude) <= 180
+               and (info.latitude, info.longitude) != (0, 0))
     return info._replace(
         camera_model=model.strip()[:MODEL_LENGTH] or None,
         focal_length_mm=positive(info.focal_length_mm),
         aperture=positive(info.aperture),
-        latitude=info.latitude if on_the_globe else None,
-        longitude=info.longitude if on_the_globe else None,
+        latitude=info.latitude if a_place else None,
+        longitude=info.longitude if a_place else None,
     )
 
 

@@ -44,6 +44,7 @@ import assembly
 import director
 import journal
 import media
+import photo
 import rhythm
 import selection
 
@@ -266,7 +267,7 @@ def montage(conn, ref):
 
         # And only now, for the photographs that actually made the cut, whether the copy they were
         # judged on is also the file the piece is cut from.
-        chosen = _back_to_originals(chosen, originals, orientation)
+        chosen = _back_to_originals(chosen, originals, orientation, workdir)
 
         assembled = workdir / "montage.mp4"
         journal.start(conn, ref, "assembly", total=len(chosen))
@@ -522,7 +523,7 @@ def _taken(piece, include):
     return fields
 
 
-def _back_to_originals(chosen, originals, orientation):
+def _back_to_originals(chosen, originals, orientation, workdir):
     """The chosen pieces again, each photograph put back on its original where the large copy it
     was judged on is too small for the canvas.
 
@@ -538,11 +539,22 @@ def _back_to_originals(chosen, originals, orientation):
 
     Videos are never on a copy to begin with: their preview is a 720p re-encode, which is half the
     height the montage is assembled at and smoothed over exactly where sharpness is measured.
+
+    A HEIC is the exception to all of it: ffmpeg does not apply its `irot` turn, so a portrait photo
+    off an iPhone cut from the original — or from a copy made before previews stood it up — lies on
+    its side in the video. It is cut from the file libheif has turned instead (`photo.stand_up`),
+    whatever copy it was judged on: a copy of unknown orientation is the one thing that cannot be
+    told from here.
     """
     width, height = assembly.CANVASES[orientation]
     pieces = []
     for piece in chosen:
         original = originals[piece.media_id]
+        if piece.kind == "photo":
+            upright = workdir / f"upright-{piece.media_id}.jpg"
+            if photo.stand_up(original, upright):
+                pieces.append(dataclasses.replace(piece, path=upright))
+                continue
         if piece.path != original:
             size = media._dimensions(piece.path)
             if not (size and size[0] >= width and size[1] >= height):

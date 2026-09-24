@@ -32,7 +32,7 @@ from test_ai import Recorded
 # fixture is a second thing to keep true. pytest resolves fixtures by name in this module, so they
 # have to be imported by name and not through the module.
 from test_media import (  # noqa: F401
-    add_item, conn, ffmpeg, fetch, memory, photo, probe, s3, video,
+    FIXTURES, add_item, conn, ffmpeg, fetch, memory, near, photo, probe, s3, video,
 )
 
 
@@ -986,13 +986,66 @@ def test_a_photograph_is_cut_from_the_large_copy_it_was_judged_on_unless_it_is_s
     judged_on_the_original = selection.Piece(media_id="two", kind="photo", path=original)
     originals = {"one": original, "two": original}
 
-    (landscape,) = montage._back_to_originals([judged_on_the_copy], originals, "landscape")
-    (portrait,) = montage._back_to_originals([judged_on_the_copy], originals, "portrait")
-    (alone,) = montage._back_to_originals([judged_on_the_original], originals, "landscape")
+    (landscape,) = montage._back_to_originals([judged_on_the_copy], originals, "landscape", tmp_path)
+    (portrait,) = montage._back_to_originals([judged_on_the_copy], originals, "portrait", tmp_path)
+    (alone,) = montage._back_to_originals([judged_on_the_original], originals, "landscape", tmp_path)
 
     assert landscape.path == copy, "ролик режется не из копии"
     assert portrait.path == original, "1366 в высоту мало для холста 1080×1920 — нужен оригинал"
     assert alone.path == original
+
+
+def pixel_at(video, at, x, y):
+    """The colour at (x, y) of a finished video's frame at `at` seconds, at full size. Cut out two
+    pixels square and averaged down to one: a yuv420 frame cannot be cropped to an odd size."""
+    return tuple(subprocess.run(
+        ["ffmpeg", "-nostdin", "-loglevel", "error", "-ss", f"{at:.3f}", "-i", str(video),
+         "-frames:v", "1", "-vf", f"crop=2:2:{x}:{y},scale=1:1", "-f", "rawvideo", "-pix_fmt", "rgb24",
+         "-"],
+        capture_output=True, check=True,
+    ).stdout)
+
+
+@pytest.mark.parametrize("copy", ["no copy", "a copy made before previews stood HEIC up"])
+def test_a_portrait_heic_stands_up_in_the_montage(conn, s3, memory, tmp_path, copy):
+    """What an iPhone holds upright is a sensor frame with an `irot` note, which ffmpeg does not
+    apply: cut from that file, or from a large copy made while previews did not either, the photo
+    lies on its side in the video. `portrait-photo.heic` is 96×64 on the sensor with red in its
+    top-left corner and blue in its bottom-right; seen upright it is 64×96, red top-right and blue
+    bottom-left. On the 1920×1080 canvas it is scaled to the width and cropped to its middle band,
+    which leaves a thin red strip at the top right and a thin blue one at the bottom left — and
+    turned on its side, a big red block at the top left instead.
+    """
+    ids = []
+    for index in range(2):
+        item_id, key = add_item(conn, memory, "photo", status="ready")
+        s3.upload_file(str(photo(tmp_path / f"photo-{index}.jpg")), media.bucket(), key)
+        ids.append(item_id)
+    heic_id, key = add_item(conn, memory, "photo", status="ready")
+    s3.upload_file(str(FIXTURES / "portrait-photo.heic"), media.bucket(), key)
+    if copy != "no copy":
+        # What the old preview made of it: ffmpeg's own reading, on its side, and big enough for the
+        # canvas to be cut from without going back to the original.
+        sideways = tmp_path / "sideways.jpg"
+        ffmpeg("-i", str(FIXTURES / "portrait-photo.heic"), "-vf", "scale=2048:1365", str(sideways))
+        s3.upload_file(str(sideways), media.bucket(), f"previews/{heic_id}.jpg")
+        conn.execute("UPDATE media_items SET preview_key = %s WHERE id = %s",
+                     (f"previews/{heic_id}.jpg", heic_id))
+    montage_id = order(conn, memory, {"target_seconds": 30, "music_tracks": [],
+                                      "include_media_ids": [*ids, heic_id]})
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    status, video_key, _, error_text = read_montage(conn, montage_id)
+    assert (status, error_text) == ("ready", None)
+    video_file = fetch(s3, video_key, tmp_path / "montage.mp4")
+    (start, seconds), = [(start, seconds) for media_id, start, seconds in layout_of(conn, montage_id)
+                         if media_id == heic_id]
+    middle = start + seconds / 2  # clear of the crossfades on both sides
+    assert near(pixel_at(video_file, middle, 1560, 20), (255, 0, 0)), "красной полосы справа вверху нет"
+    assert near(pixel_at(video_file, middle, 360, 1050), (0, 0, 255)), "синей полосы слева внизу нет"
+    assert not near(pixel_at(video_file, middle, 300, 100), (255, 0, 0)), "кадр лежит на боку"
 
 
 def test_too_little_material_fails_the_montage_instead_of_retrying(conn, memory):

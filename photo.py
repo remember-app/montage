@@ -50,10 +50,13 @@ def stand_up(path, out):
     side. libheif applies it while it decodes. The JPEG carries no orientation of its own, so nothing
     downstream can turn it twice.
     """
-    with open(path, "rb") as file:
-        # ftyp is how every ISO base media file starts, HEIC and mp4 alike; the child says which.
-        if file.read(12)[4:8] != b"ftyp":
-            return False
+    try:
+        with open(path, "rb") as file:
+            # ftyp is how every ISO base media file starts, HEIC and mp4 alike; the child says which.
+            if file.read(12)[4:8] != b"ftyp":
+                return False
+    except OSError:
+        return False
     return _ask("stand-up", path, out) is True
 
 
