@@ -75,6 +75,14 @@ def test_the_beats_go_round_with_a_track_shorter_than_the_montage(click):
     assert len(second) == len([moment for moment in moments if moment < SECONDS])
 
 
+def test_a_track_longer_than_the_horizon_is_heard_only_up_to_it(click, monkeypatch):
+    """A list of tracks is one soundtrack as long as all of them together, and nothing past the
+    horizon ever plays: analysed whole, a few hours of it would take the worker's memory."""
+    monkeypatch.setattr(rhythm, "HORIZON_SECONDS", SECONDS / 3)
+
+    assert max(rhythm.beats(click)) < SECONDS / 3
+
+
 def test_the_tempo_of_a_track_is_the_one_it_was_drawn_to(click):
     """Темп дорожки — то единственное, что из ритма уходит в журнал монтажа: «подогнал под
     «Тёплую», 100 ударов». Считается он по тем же битам, что двигают склейки, поэтому у

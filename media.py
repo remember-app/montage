@@ -144,6 +144,15 @@ def _dimensions(path):
     return (height, width) if upended else (width, height)
 
 
+def _has_sound(path):
+    """Whether the file carries an audio stream at all. A clip shot with the microphone off is
+    common, and ffmpeg answers a request for its sound with an error rather than with silence."""
+    return bool(_run(
+        "ffprobe", "-v", "error", "-protocol_whitelist", "file", "-select_streams", "a:0",
+        "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(path),
+    ).strip())
+
+
 def _refuse_playlists(path):
     """Stop before encoding anything if the «media» is really a list of other files to fetch.
 

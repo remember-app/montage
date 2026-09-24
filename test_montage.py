@@ -465,6 +465,10 @@ def test_an_order_with_no_music_at_all_keeps_the_live_sound_of_the_videos(
     assert loudness(assembled, at=7.2) > loudness(assembled, at=0.5) + 30, (
         "в конце ролика должен звучать клип, а в начале — молчать фотография"
     )
+    last_moment = loudness(assembled, at=duration - 0.1, seconds=0.1)
+    assert last_moment < loudness(assembled, at=7.2) - 10, (
+        "живой звук обрывается с концом ролика на полной громкости, а не гаснет"
+    )
 
 
 def mute_clip(path, seconds=3.0):
@@ -518,6 +522,16 @@ def test_what_the_order_says_about_music_is_read_the_old_way_too():
     assert named is None and "polka" in refusal
     named, refusal = montage._ordered_music({"music_track_id": "polka"})
     assert named is None and "polka" in refusal
+
+
+def test_an_uploaded_track_with_no_sound_in_it_is_refused_at_once(s3, tmp_path):
+    """Под свой трек api принимает любые байты. Фотография на месте музыки — отказ сразу и с
+    причиной, а не три упавшие сборки подряд с «не удалось собрать ролик»."""
+    key = f"music/{uuid.uuid4()}"
+    s3.upload_file(str(photo(tmp_path / "cover.jpg")), media.bucket(), key)
+
+    files, refusal = montage._music_files(["warm", key], s3, tmp_path)
+    assert (files, refusal) == (None, "загруженный трек не читается")
 
 
 def test_a_montage_ordered_portrait_is_assembled_the_other_way_up(conn, s3, memory, tmp_path):

@@ -63,9 +63,11 @@ def beats(path):
             # Through ffmpeg rather than librosa's own reading: behind that is libsndfile, which
             # opens neither the m4a off a phone nor half of what an organizer may upload as their
             # track. ffmpeg is in this worker anyway, it opens everything, and it is the same door
-            # every other piece of somebody else's media comes through.
+            # every other piece of somebody else's media comes through. Only up to the horizon: past
+            # it nothing ever plays, and an hour of track takes about two gigabytes to analyse.
             wav = pathlib.Path(workdir) / "track.wav"
-            media._ffmpeg("-i", str(path), "-ac", "1", "-ar", str(ANALYSIS_RATE), str(wav))
+            media._ffmpeg("-i", str(path), "-t", str(HORIZON_SECONDS), "-ac", "1",
+                          "-ar", str(ANALYSIS_RATE), str(wav))
             samples, rate = librosa.load(wav, sr=ANALYSIS_RATE, mono=True)
         _, moments = librosa.beat.beat_track(y=samples, sr=rate, units="time")
         length = len(samples) / rate
