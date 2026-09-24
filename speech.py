@@ -70,7 +70,7 @@ def transcribe(conn, ref):
         # Before ffmpeg is pointed at it: these bytes came off somebody's phone, and a playlist
         # dressed up as a clip would have ffmpeg read this worker's own disk into a prompt.
         media._refuse_playlists(original)
-        if not _has_sound(original):
+        if not media._has_sound(original):
             # A clip shot with the microphone off, or one whose track the phone never wrote. There
             # is nothing to send and nothing to invent, and the empty row settles it for good.
             log.info("clip %s carries no sound at all", ref)
@@ -81,17 +81,6 @@ def transcribe(conn, ref):
 
     _remember(conn, ref, spoken)
     log.info("clip %s said %s character(s)", ref, len(spoken))
-
-
-def _has_sound(path):
-    """Whether the file carries an audio stream at all. A clip with none is not a failure — phones
-    record them — but ffmpeg would refuse to write an audio-only file out of one, and the refusal
-    would read as a broken upload."""
-    return bool(media._run(
-        "ffprobe", "-v", "error", "-protocol_whitelist", "file",
-        "-select_streams", "a", "-show_entries", "stream=codec_type",
-        "-of", "csv=p=0", str(path),
-    ).strip())
 
 
 def _remembered(conn, ref):

@@ -342,22 +342,15 @@ def _ordered_music(params):
     загрузил сам (api, `music_uploads`); что именно, разбирается по ключу — свой трек лежит под
     `music/<uuid>`. Пустой список — это «без музыки»: ролик пойдёт с живым звуком видео.
 
-    Заказа старой формы (`music_tracks` в `params` нет вовсе) это не касается: там по-прежнему
-    читаются `music_track_key`, `music_track_id` и «тёплая» по умолчанию, и повтор упавшего ролика,
-    заказанного до списков, собирается ровно как собирался. Ключ и id — одно или другое: api не
-    пропускает заказ с обоими, так что ключ здесь значит, что выбран он, и id не читается вовсе.
+    Заказ старой формы (`music_tracks` в `params` нет вовсе) — список из одного трека:
+    `music_track_key`, иначе `music_track_id`, иначе «тёплая» по умолчанию, — и повтор упавшего
+    ролика, заказанного до списков, собирается ровно как собирался. Ключ и id — одно или другое: api
+    не пропускал заказ с обоими, так что ключ здесь значит, что выбран он, и id не читается вовсе.
     """
     tracks = params.get("music_tracks")
     if tracks is None:
-        key = params.get("music_track_key")
-        if key:
-            return [str(key)], None
-        track_id = params.get("music_track_id") or assembly.DEFAULT_TRACK
-        if track_id not in assembly.TRACKS:
-            # The api refuses an unknown id at the order, so this is the two lists having drifted
-            # apart. Retrying would ask for the same missing track three times.
-            return None, f"неизвестный музыкальный трек «{track_id}»"
-        return [track_id], None
+        tracks = [params.get("music_track_key") or params.get("music_track_id")
+                  or assembly.DEFAULT_TRACK]
     named = [str(one) for one in tracks]
     unknown = [
         one for one in named
@@ -374,7 +367,9 @@ def _music_files(named, s3, workdir):
     """Те же треки файлами на диске, в том же порядке, — и отказ, если чей-то файл не читается.
 
     Трек полки лежит рядом с воркером, свой качается из бакета и проходит ту же дверь, что и любая
-    чужая медиа: «трек», внутри которого плейлист, отправил бы ffmpeg читать диски воркера.
+    чужая медиа: «трек», внутри которого плейлист, отправил бы ffmpeg читать диски воркера. И в нём
+    должен быть звук: api принимает под свой трек любые байты, а фотография или немой клип на месте
+    музыки роняли бы сборку на каждой из трёх попыток.
     """
     files = []
     for index, one in enumerate(named):
@@ -385,8 +380,10 @@ def _music_files(named, s3, workdir):
         s3.download_file(media.bucket(), one, str(downloaded))
         try:
             media._refuse_playlists(downloaded)
+            if not media._has_sound(downloaded):
+                raise RuntimeError("no audio stream in it")
         except RuntimeError as exc:
-            # Unreadable, or a playlist where the music should be: identical on a second try.
+            # Unreadable, silent, or a playlist in place of music: identical on a second try.
             log.info("the uploaded track %s is no good: %s", one, exc)
             return None, "загруженный трек не читается"
         files.append(downloaded)

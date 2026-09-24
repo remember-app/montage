@@ -221,7 +221,7 @@ def _normalise(piece, orientation, out, live_sound=False):
         cut = ()
     added, sound = (), ("-an",)
     if live_sound:
-        its_own = piece.kind == "video" and _has_sound(piece.path)
+        its_own = piece.kind == "video" and media._has_sound(piece.path)
         # `-shortest` для клипа, которому дописали тишину: она бесконечна, и без него кодировался
         # бы бесконечный кусок. Фотографию всё равно кончает её собственный `-t`.
         added = () if its_own else ("-f", "lavfi", "-i", SILENCE)
@@ -231,15 +231,6 @@ def _normalise(piece, orientation, out, live_sound=False):
         *opened, *added, "-vf", canvas, *cut, *sound,
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", str(out),
     )
-
-
-def _has_sound(path):
-    """Есть ли в файле звуковая дорожка вообще. Клип, снятый с выключенным микрофоном, — обычное
-    дело, и на попытку взять у него звук ffmpeg отвечает ошибкой, а не тишиной."""
-    return bool(media._run(
-        "ffprobe", "-v", "error", "-protocol_whitelist", "file", "-select_streams", "a:0",
-        "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(path),
-    ).strip())
 
 
 def _assemble(clips, track, out):
@@ -261,44 +252,41 @@ def _assemble(clips, track, out):
     # the video, and it is named the way ffmpeg names inputs rather than filter outputs.
     video = f"[{label}]" if len(clips) > 1 else "0:v"
 
-    music = ()
     if track is None:
         # Живой звук: дорожки кусков склеиваются тем же перехлёстом, что и картинки. acrossfade
         # накладывает конец одной на начало следующей ровно так, как xfade накладывает кадры, —
-        # поэтому звук и изображение остаются вместе, а не расходятся на каждой склейке.
-        joined = "0:a"
+        # поэтому звук и изображение остаются вместе, а не расходятся на каждой склейке. Края
+        # ролика — тем же полусекундным фейдом: звук, оборванный на полуслове, щёлкает.
+        music, sound, fade = (), "0:a", CROSSFADE_SECONDS
         for index in range(1, len(clips)):
-            chain.append(f"[{joined}][{index}:a]acrossfade=d={CROSSFADE_SECONDS}[a{index}]")
-            joined = f"a{index}"
-        audio = f"[{joined}]" if len(clips) > 1 else "0:a"
+            chain.append(f"[{sound}][{index}:a]acrossfade=d={CROSSFADE_SECONDS}[a{index}]")
+            sound = f"a{index}"
     else:
-        fade = min(MUSIC_FADE_SECONDS, total / 3)
         # A track shorter than the montage is played again from the top (`-stream_loop -1`), a
         # longer one is cut off with the picture, because `-shortest` is down below. Either way the
         # music never has to be told how long to play: the montage is cut to the material, not to
-        # the track. `-protocol_whitelist` is the track's own, like every clip's below.
+        # the track. `-protocol_whitelist` is the track's own, like every clip's below. The track
+        # is the input after the last clip.
         music = ("-protocol_whitelist", "file", "-stream_loop", "-1", "-i", str(track))
-        chain.append(
-            f"[{len(clips)}:a]afade=t=in:st=0:d={fade:.3f},"  # the track is the input after the
-            f"afade=t=out:st={total - fade:.3f}:d={fade:.3f}[a]"  # last clip
-        )
-        audio = "[a]"
+        sound, fade = f"{len(clips)}:a", MUSIC_FADE_SECONDS
+    fade = min(fade, total / 3)
+    chain.append(f"[{sound}]afade=t=in:st=0:d={fade:.3f},"
+                 f"afade=t=out:st={total - fade:.3f}:d={fade:.3f}[a]")
 
     # `-protocol_whitelist` is an *input* option: ffmpeg scopes it to the group it precedes, so the
-    # one `media._ffmpeg` puts at the front guards input 0 and nothing else. This is the worker's
-    # only multi-input call, so it is the only place that has to repeat it — every clip and the
-    # track get their own, and the whitelist means the same thing on all of them.
+    # one `media._ffmpeg` puts at the front guards input 0 and nothing else — every clip and the
+    # track get their own. So does `-threads 1`, and the filter graph runs on one thread as well: a
+    # ten-minute montage is some three hundred clips open at once, and a thread pool on each of
+    # them took ffmpeg past its process's thread limit at about two hundred pieces on a ten-core
+    # machine. Only a clip or two is being decoded at any moment, and the encoder keeps its threads.
     inputs = [
         argument
         for clip in clips
-        for argument in ("-protocol_whitelist", "file", "-i", str(clip.path))
+        for argument in ("-protocol_whitelist", "file", "-threads", "1", "-i", str(clip.path))
     ]
     media._ffmpeg(
-        *inputs, *music,
-        # Один кусок без музыки — единственный случай, когда склеивать нечего ни там, ни там, и
-        # цепочки фильтров нет вовсе: пустую ffmpeg не берёт.
-        *(("-filter_complex", ";".join(chain)) if chain else ()),
-        "-map", video, "-map", audio,
+        "-filter_complex_threads", "1", *inputs, *music,
+        "-filter_complex", ";".join(chain), "-map", video, "-map", "[a]",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-shortest", str(out),
     )
