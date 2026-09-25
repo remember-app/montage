@@ -110,7 +110,9 @@ def encoding(frames, *args):
     `frames` are the input options that say what is written — its format, size and rate — and
     `args` what becomes of it, the file last. Leaving the block closes the pipe and waits for the
     file to be finished. A failure here is raised over anything that broke the block: when the
-    encoder falls over, whatever was writing into it only sees its pipe break.
+    encoder falls over, whatever was writing into it only sees its pipe break. Over anything but
+    an interrupt: that is the worker stopping (`worker._Shutdown`), and a Ctrl-C stops the encoder
+    along with it.
     """
     with tempfile.TemporaryFile() as said:
         # Its complaints go to a file and not a pipe: a pipe nobody reads until the end would fill
@@ -120,11 +122,15 @@ def encoding(frames, *args):
             stdin=subprocess.PIPE,
             stderr=said,
         )
+        interrupted = False
         try:
             yield encoder.stdin
+        except KeyboardInterrupt:
+            interrupted = True
+            raise
         finally:
             encoder.stdin.close()
-            if encoder.wait() != 0:
+            if encoder.wait() != 0 and not interrupted:
                 said.seek(0)
                 raise RuntimeError(
                     f"ffmpeg failed: {said.read().decode(errors='replace').strip()[-500:]}"

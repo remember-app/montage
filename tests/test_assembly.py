@@ -223,6 +223,16 @@ def test_every_ffmpeg_of_a_montage_is_held_to_the_threads_it_was_given(
                 assert command[at - 2 : at] == ["-threads", "3"], f"вход без предела: {command}"
 
 
+def test_ctrl_c_in_the_middle_of_a_montage_stays_an_interrupt(tmp_path):
+    """Ctrl-C reaches every ffmpeg of the terminal, the encoder too, and it exits complaining. An
+    interrupt hands the job back to the queue (`worker.run_once`); the encoder's failure raised
+    over it would count an attempt against a job that did not fail. Here the encoder fails anyway,
+    with nowhere to write."""
+    with pytest.raises(KeyboardInterrupt):
+        with ffmpeg.encoding(assembly.RAW, str(tmp_path / "missing" / "picture.mp4")):
+            raise KeyboardInterrupt
+
+
 def test_ffmpeg_takes_two_threads_unless_the_environment_says_otherwise(monkeypatch):
     monkeypatch.delenv("FFMPEG_THREADS", raising=False)
     assert ffmpeg._threads() == "2"
