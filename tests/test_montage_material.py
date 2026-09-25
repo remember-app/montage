@@ -3,7 +3,6 @@
 См. `docs/jobs/montage.md`. Всё живое: настоящий Postgres, бакет и ffmpeg.
 """
 
-import subprocess
 import uuid
 
 import pytest
@@ -11,7 +10,7 @@ import pytest
 from montage import ffmpeg, storage, worker
 from montage.video import assembly, montage, selection
 
-from checks import about, near
+from checks import about, near, pixel_at
 from material import FIXTURES, click_track, crushed, draw, jpeg, lopsided, probe, tone, unopenable
 from rows import add_item, fetch, layout_of, order, read_montage, ready_material
 
@@ -348,36 +347,6 @@ def test_a_photograph_is_cut_from_the_large_copy_it_was_judged_on_unless_it_is_s
     assert landscape.path == copy, "ролик режется не из копии"
     assert portrait.path == original, "1366 в высоту мало для холста 1080×1920 — нужен оригинал"
     assert alone.path == original
-
-
-def pixel_at(video, at, x, y):
-    """The colour at (x, y) of a finished video's frame at `at` seconds, at full size. Cut out two
-    pixels square and averaged down to one: a yuv420 frame cannot be cropped to an odd size."""
-    return tuple(
-        subprocess.run(
-            [
-                "ffmpeg",
-                "-nostdin",
-                "-loglevel",
-                "error",
-                "-ss",
-                f"{at:.3f}",
-                "-i",
-                str(video),
-                "-frames:v",
-                "1",
-                "-vf",
-                f"crop=2:2:{x}:{y},scale=1:1",
-                "-f",
-                "rawvideo",
-                "-pix_fmt",
-                "rgb24",
-                "-",
-            ],
-            capture_output=True,
-            check=True,
-        ).stdout
-    )
 
 
 @pytest.mark.parametrize("copy", ["no copy", "a copy made before previews stood HEIC up"])

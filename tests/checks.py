@@ -46,3 +46,33 @@ def loudness(path, at, seconds=1.2):
 
 def near(pixel, colour):
     return all(abs(a - b) < 40 for a, b in zip(pixel, colour))
+
+
+def pixel_at(video, at, x, y):
+    """The colour at (x, y) of a finished video's frame at `at` seconds, at full size. Cut out two
+    pixels square and averaged down to one: a yuv420 frame cannot be cropped to an odd size."""
+    return tuple(
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-ss",
+                f"{at:.3f}",
+                "-i",
+                str(video),
+                "-frames:v",
+                "1",
+                "-vf",
+                f"crop=2:2:{x}:{y},scale=1:1",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "-",
+            ],
+            capture_output=True,
+            check=True,
+        ).stdout
+    )
