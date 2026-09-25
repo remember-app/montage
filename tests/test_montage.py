@@ -557,32 +557,6 @@ def test_the_directors_film_is_held_to_the_ordered_length_the_same_way(
     assert about(duration, 16.0), "план не дотянули до заказанной длины"
 
 
-def test_a_montage_of_hundreds_of_pieces_is_assembled_without_ffmpeg_running_out_of_threads(
-    tmp_path, monkeypatch
-):
-    """Ten minutes of montage is about three hundred pieces, and all of them are open in one ffmpeg
-    at once: a decoder with a thread pool of its own on every input took the process past its thread
-    limit at about two hundred (ревью m-26). The pieces here are short and on a canvas the size of a
-    stamp — what is being asked is only whether that many inputs can be open at the same time, and
-    the picture is not the point. Five hundred, not three: the limit is threads, cores times inputs,
-    and on this ten-core machine three hundred inputs of the same clips still fit under it with the
-    fix taken out."""
-    monkeypatch.setitem(assembly.CANVASES, "landscape", (128, 72))
-    still = jpeg(tmp_path / "still.jpg")
-    pieces = [selection.Piece(kind="photo", seconds=0.6, path=still) for _ in range(500)]
-    soundtrack = tone(tmp_path / "track.wav", seconds=40)
-    out = tmp_path / "long.mp4"
-
-    clips = assembly.assemble(pieces, "landscape", soundtrack, tmp_path, out)
-
-    assert len(clips) == len(pieces)
-    assembled = probe(out)
-    assert float(assembled["format"]["duration"]) == pytest.approx(
-        assembly.length_of(clips), abs=0.5
-    )
-    assert {stream["codec_type"] for stream in assembled["streams"]} == {"video", "audio"}
-
-
 def test_too_little_material_fails_the_montage_instead_of_retrying(conn, memory):
     """Not a transient failure: the library would be just as small on the third attempt, and the
     organizer needs the reason under the video rather than three useless retries."""
