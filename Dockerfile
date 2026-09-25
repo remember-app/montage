@@ -29,6 +29,4 @@ RUN useradd --system --uid 10001 --user-group --no-create-home montage
 ENV NUMBA_CACHE_DIR=/tmp/numba
 # Числом, а не именем: иначе runAsNonRoot в кластере не сможет проверить, что это не root.
 USER 10001:10001
-# Python под PID 1 не отвечает на SIGTERM, и под ждал бы SIGKILL; SIGINT для `run` — это Ctrl-C.
-STOPSIGNAL SIGINT
 CMD ["python", "-m", "montage", "run"]
