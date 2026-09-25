@@ -60,6 +60,20 @@ CREATE TABLE IF NOT EXISTS ai_requests (
     updated_at  timestamptz NOT NULL DEFAULT now()
 );
 
+-- What the provider counted a call at, off its own answer — the bill is paid in tokens. Added to a
+-- table that was already in use, so `init` brings an older journal up to date and leaves its rows as
+-- they were, with these empty. Empty too on every row whose provider did not say: never made up.
+--
+-- `usage` is the provider's count whole — Gemini splits the input by modality, and audio is priced
+-- apart; the three numbers out of it make a bill one query for either provider. `output_tokens` is
+-- all that is billed at the output rate: Gemini's thinking is counted apart from its answer and is
+-- added in here, OpenAI's reasoning is inside its output already.
+ALTER TABLE ai_requests
+    ADD COLUMN IF NOT EXISTS usage         jsonb,
+    ADD COLUMN IF NOT EXISTS input_tokens  integer,
+    ADD COLUMN IF NOT EXISTS output_tokens integer,
+    ADD COLUMN IF NOT EXISTS total_tokens  integer;
+
 -- «Что уже спрашивали про этот кадр» — the one lookup that is not just the tail of the table.
 CREATE INDEX IF NOT EXISTS ai_requests_ref_idx ON ai_requests (ref) WHERE ref IS NOT NULL;
 

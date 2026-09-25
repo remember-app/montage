@@ -1,3 +1,10 @@
 {
-  "text": "Ну что, с днём рождения! Загадывай желание и задувай."
+  "text": "Ну что, с днём рождения! Загадывай желание и задувай.",
+  "usage": {
+    "type": "tokens",
+    "input_tokens": 112,
+    "input_token_details": {"text_tokens": 0, "audio_tokens": 112},
+    "output_tokens": 19,
+    "total_tokens": 131
+  }
 }
