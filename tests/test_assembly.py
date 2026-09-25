@@ -6,12 +6,13 @@
 
 import subprocess
 
+import numpy
 import pytest
 
 from montage import ffmpeg
 from montage.video import assembly, selection
 
-from checks import near, pixel_at
+from checks import loudness, near, pixel_at
 from material import draw, probe, tone
 
 COLOURS = {
@@ -96,6 +97,43 @@ def test_a_montage_put_together_by_parts_is_the_one_chain_of_its_clips(
             half = tuple((a + b) / 2 for a, b in zip(colours[index - 1], colours[index]))
             join = start + assembly.CROSSFADE_SECONDS / 2
             assert near(pixel_at(out, join, 64, 36), half), f"склейка {index} не там, где план"
+
+
+def test_the_clips_own_sound_runs_on_through_every_part_without_a_gap_or_a_jump(
+    tmp_path, monkeypatch
+):
+    """A part's sound opens on the half second of the clip before, from where that clip's own part
+    stopped. A tail even a sample shorter than the dissolve and acrossfade silences the whole part;
+    one picked up a little off where the part before stopped and the sound jumps there, a click.
+    One steady tone under every clip: each is heard, and no step from sample to sample is steeper
+    than the tone's own."""
+    monkeypatch.setitem(assembly.CANVASES, "landscape", (128, 72))
+    pieces = []
+    for index, seconds in enumerate((2.0, 2.53, 1.5, 3.0, 2.52)):
+        path = tmp_path / f"{index}.mp4"
+        draw(
+            "-f", "lavfi", "-i", "color=c=gray:s=320x180:r=30:d=4", "-f", "lavfi", "-i",
+            "sine=f=440:d=4", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest",
+            str(path),
+        )  # fmt: skip
+        pieces.append(selection.Piece(kind="video", path=path, seconds=seconds))
+    out = tmp_path / "montage.mp4"
+
+    clips = assembly.assemble(pieces, "landscape", None, tmp_path, out)
+
+    start = 0.0
+    for index, clip in enumerate(clips):
+        assert loudness(out, start + clip.seconds / 2 - 0.2, 0.4) > -40, f"кусок {index} онемел"
+        start += clip.seconds - assembly.CROSSFADE_SECONDS
+    pcm = subprocess.run(
+        ("ffmpeg", "-loglevel", "error", "-i", str(out), "-ac", "1", "-f", "s16le", "-"),
+        capture_output=True,
+        check=True,
+    ).stdout
+    steps = numpy.abs(numpy.diff(numpy.frombuffer(pcm, "<i2").astype(int)))
+    rate = assembly.SAMPLE_RATE
+    own = steps[int(0.6 * rate) : int(1.2 * rate)].max()  # the first clip alone, faded in by then
+    assert steps.max() < 2 * own, "звук скачет на стыке частей"
 
 
 def test_photographs_and_clips_keep_their_colours_through_the_pipe(tmp_path, monkeypatch):
@@ -183,6 +221,16 @@ def test_every_ffmpeg_of_a_montage_is_held_to_the_threads_it_was_given(
         for at, arg in enumerate(command):
             if arg == "-i":
                 assert command[at - 2 : at] == ["-threads", "3"], f"вход без предела: {command}"
+
+
+def test_ctrl_c_in_the_middle_of_a_montage_stays_an_interrupt(tmp_path):
+    """Ctrl-C reaches every ffmpeg of the terminal, the encoder too, and it exits complaining. An
+    interrupt hands the job back to the queue (`worker.run_once`); the encoder's failure raised
+    over it would count an attempt against a job that did not fail. Here the encoder fails anyway,
+    with nowhere to write."""
+    with pytest.raises(KeyboardInterrupt):
+        with ffmpeg.encoding(assembly.RAW, str(tmp_path / "missing" / "picture.mp4")):
+            raise KeyboardInterrupt
 
 
 def test_ffmpeg_takes_two_threads_unless_the_environment_says_otherwise(monkeypatch):
