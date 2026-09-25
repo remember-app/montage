@@ -1,19 +1,84 @@
-# Образ воркера на каждый пуш в main — в реестр проекта с тегом по SHA коммита. Выкатки здесь нет:
-# писать новый тег в репозиторий инфраструктуры — отдельное решение.
+# Пуш в dev: образ в реестр проекта с тегом по SHA коммита, затем этот тег — в чарт обработчика в
+# nox-infra-dev, откуда dev-контур разворачивает ArgoCD. main не привязана: она под боевой контур.
 include:
   - project: 'nox-labs/internal/devops/ci-templates'
     ref: main
     file:
       - '/jobs/docker.yml'
+      - '/jobs/deploy.yml'
 
 stages:
   - build
+  - deploy
 
-build:
-  extends: .docker_build
-  stage: build
+.dev_push_rules:
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "dev"'
+
+dev_build:
+  extends:
+    - .docker_build
+    - .dev_push_rules
+  stage: build
   script:
     - docker build -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" .
     - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+
+dev_deploy:
+  extends:
+    - .deploy_alpine
+    - .dev_push_rules
+  stage: deploy
+  resource_group: remember-montage-dev-gitops
+  # С окружением GitLab не даёт джобе старого пайплайна записать свой тег поверх более нового.
+  environment:
+    name: dev
+    deployment_tier: development
+  variables:
+    INFRA_REPO: ssh://git@git.dapp-devs.com:2222/nox-labs/infra/stage/nox-infra-dev.git
+    VALUES: ioc-helm/nox/remember/montage/values-dev.yaml
+  script:
+    - git clone "$INFRA_REPO" infra
+    - cd infra
+    - |
+      export IMAGE_REPOSITORY="$CI_REGISTRY_IMAGE" IMAGE_TAG="$CI_COMMIT_SHA"
+      # Правит sed, а не yq -i, как у qe-life: yq образа выкатки (4.44) выбрасывает пустые строки
+      # по всему файлу. yq только сверяет.
+      sed -i -e "/^image:/,/^[^ ]/{/^  repository:/d;s|^  tag:.*|  tag: \"$IMAGE_TAG\"|;}" \
+        -e "s|^image:.*|&\n  repository: $IMAGE_REPOSITORY|" "$VALUES"
+      if [ "$(yq e '.image.repository + ":" + .image.tag' "$VALUES")" != "$IMAGE_REPOSITORY:$IMAGE_TAG" ]; then
+        echo "Образ не записался в $VALUES: под image нужна строка tag с отступом в два пробела" >&2
+        exit 1
+      fi
+
+      changed=$(git status --porcelain)
+      if [ -z "$changed" ]; then
+        echo "Dev уже использует $CI_COMMIT_SHA — обновлять нечего"
+        exit 0
+      fi
+
+      # Джоба пушит в main репозитория, где лежат чарты и секреты соседей. Коммит — только если
+      # изменён ровно этот файл, в нём только строки образа и значения прочих полей те же.
+      # Diff в лог не выводится: в нём могли бы оказаться секреты.
+      image_lines='^  (repository|tag): '
+      others() { yq e 'del(.image.repository, .image.tag)' "$1"; }
+      if [ "$changed" != " M $VALUES" ] \
+        || [ "$(git show "HEAD:$VALUES" | grep -vE "$image_lines")" != "$(grep -vE "$image_lines" "$VALUES")" ] \
+        || [ "$(git show "HEAD:$VALUES" | others -)" != "$(others "$VALUES")" ]; then
+        echo "Изменено не только image.repository и image.tag в $VALUES — не коммичу:" >&2
+        git status --porcelain >&2
+        exit 1
+      fi
+
+      git add "$VALUES"
+      git commit -m "deploy remember-montage dev $CI_COMMIT_SHORT_SHA"
+
+      n=0
+      until [ "$n" -ge 5 ]; do
+        if git pull --rebase origin main && git push origin HEAD:main; then
+          break
+        fi
+        n=$((n + 1))
+        sleep 5
+      done
+      [ "$n" -lt 5 ]
