@@ -68,7 +68,7 @@ def files(named, s3, workdir):
         except s3.exceptions.ClientError as exc:
             # Пропавший файл между попытками сам не вернётся. Всё прочее — хранилище не ответило,
             # сеть, таймаут — проходит само, и это обычные повторы очереди.
-            if exc.response.get("Error", {}).get("Code") not in ("404", "NoSuchKey"):
+            if not storage.missing(exc):
                 raise
             log.info("the uploaded track %s is not in the bucket", one)
             return None, "загруженный трек не найден"

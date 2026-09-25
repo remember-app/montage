@@ -1,7 +1,8 @@
-"""R2: the bucket everything the worker touches comes out of and goes back into.
+"""The bucket everything the worker touches comes out of and goes back into — Google Cloud Storage
+over its S3-compatible XML API in production, MinIO locally.
 
-The same four variable names the api reads, so one `.env` serves both. Nothing here knows what is
-in an object — a key is a key.
+The same variable names the api reads, so one `.env` serves both; they are still called `R2_*`
+after the storage this started on. Nothing here knows what is in an object — a key is a key.
 """
 
 import logging
@@ -9,6 +10,7 @@ import os
 
 import boto3
 from botocore.config import Config
+from botocore.exceptions import ClientError
 
 log = logging.getLogger("montage.storage")
 
@@ -19,17 +21,64 @@ def client():
         endpoint_url=os.environ["R2_ENDPOINT"].rstrip("/"),
         aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
         aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
-        # R2 ignores the region and wants the literal `auto`; MinIO signs with `us-east-1` unless
-        # told otherwise. A knob because those two disagree — same as the api.
+        # Google takes any region in the signature and documents `auto`; MinIO signs with
+        # `us-east-1` unless told otherwise. A knob because those two disagree — same as the api.
         region_name=os.environ.get("R2_REGION", "auto"),
-        # `<endpoint>/<bucket>/<key>`, which is how the api addresses it too. The alternative puts
-        # the bucket in the hostname, and `remember.localhost` resolves nowhere.
-        config=Config(s3={"addressing_style": "path"}),
+        config=Config(
+            # `<endpoint>/<bucket>/<key>`, which is how the api addresses it too. The alternative
+            # puts the bucket in the hostname, and `remember.localhost` resolves nowhere.
+            s3={"addressing_style": "path"},
+            # Since 1.36 boto3 checksums every upload of its own accord — over HTTPS as an
+            # `aws-chunked` body with the sum in a trailer — and asks every download for a sum
+            # back. Those are S3's own headers, Google's XML API does not list them, and uploads
+            # sent to it that way come back refused. So: only where an operation cannot go without
+            # one, and none the worker makes is such. Here and not in a version pin, so that no
+            # upgrade brings the default back; `test_storage.py` holds every request to it.
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
+        ),
     )
 
 
 def bucket():
     return os.environ["R2_BUCKET"]
+
+
+def missing(exc):
+    """Whether the bucket answered «nothing there»: no object under the key, no such upload.
+
+    By the status and not by the code: the code is `NoSuchKey` or `NoSuchUpload`, and a HEAD, which
+    has no body, carries none but `404`. Storages differ on when they say it at all — S3, MinIO and
+    R2 answer a DELETE of a key that holds nothing with 204, Google with 404 `NoSuchKey`. A bucket
+    that is not there is a 404 too, and that one is a misconfiguration to be loud about, not an
+    object already gone.
+    """
+    return (
+        isinstance(exc, ClientError)
+        and exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 404
+        and exc.response.get("Error", {}).get("Code") != "NoSuchBucket"
+    )
+
+
+def free(s3, key, upload_id=None):
+    """Whatever an upload left under `key` taken out of the bucket: its unfinished parts, if it
+    was a multipart, and the object, if it was ever completed.
+
+    Either may be gone already — the upload aborted or finished, the object never made — and that
+    is the outcome wanted, not a failure. The abort goes first: a phone completing the upload after
+    it is refused, one that completed before it leaves an object the delete then takes.
+    """
+    if upload_id:
+        _unless_missing(s3.abort_multipart_upload, Key=key, UploadId=upload_id)
+    _unless_missing(s3.delete_object, Key=key)
+
+
+def _unless_missing(call, **params):
+    try:
+        call(Bucket=bucket(), **params)
+    except ClientError as exc:
+        if not missing(exc):
+            raise
 
 
 def upload(s3, path, key, content_type):

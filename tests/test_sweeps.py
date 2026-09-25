@@ -3,7 +3,11 @@
 См. `docs/queue.md`. Всё живое: настоящий Postgres и настоящий бакет.
 """
 
+import logging
+
 import pytest
+from botocore.exceptions import ClientError
+from botocore.stub import Stubber
 
 from montage import storage, sweeps, worker
 
@@ -24,6 +28,66 @@ def test_the_sweep_takes_an_abandoned_upload_with_its_multipart(conn, s3, memory
     assert read_item(conn, fresh) is not None, "a day has to pass before a row is given up on"
     live = s3.list_multipart_uploads(Bucket=storage.bucket(), Prefix=key).get("Uploads", [])
     assert upload_id not in [upload["UploadId"] for upload in live], "the parts are released"
+
+
+def test_the_sweep_deletes_an_upload_finished_in_the_bucket_but_never_reported(
+    conn, s3, memory, caplog
+):
+    """The phone completed its multipart and never told the api: the row is still
+    `pending_upload`, the object is in the bucket, and the upload id names an upload that is over.
+    The abort is refused as «no such upload» and the object has to go all the same."""
+    item_id, key = add_item(conn, memory, "photo", status="pending_upload", age_hours=25)
+    upload_id = s3.create_multipart_upload(Bucket=storage.bucket(), Key=key)["UploadId"]
+    part = s3.upload_part(
+        Bucket=storage.bucket(), Key=key, UploadId=upload_id, PartNumber=1, Body=b"photo"
+    )
+    s3.complete_multipart_upload(
+        Bucket=storage.bucket(),
+        Key=key,
+        UploadId=upload_id,
+        MultipartUpload={"Parts": [{"PartNumber": 1, "ETag": part["ETag"]}]},
+    )
+    conn.execute("UPDATE media_items SET upload_id = %s WHERE id = %s", (upload_id, item_id))
+
+    with caplog.at_level(logging.WARNING, logger="montage.sweeps"):
+        assert sweeps.sweep_stale_uploads(conn) == 1
+
+    assert read_item(conn, item_id) is None
+    with pytest.raises(ClientError) as gone:
+        s3.head_object(Bucket=storage.bucket(), Key=key)
+    assert storage.missing(gone.value), "the finished original is left in the bucket"
+    assert "left behind" not in caplog.text
+
+
+def test_the_sweep_takes_googles_nothing_there_for_an_answer(conn, memory, monkeypatch, caplog):
+    """Where S3 and MinIO say «done», Google says «not found»: deleting a key with nothing under it
+    is 404 `NoSuchKey` there — and an upload abandoned half-way never put anything under its key —
+    while an abort of an upload already over is 404 `NoSuchUpload`. Both are the outcome the sweep
+    wants. Taken for failures they would cost a warning for every upload swept, every hour, and
+    MinIO, which answers 204, would never show it — so these are Google's answers, word for word."""
+    item_id, key = add_item(
+        conn, memory, "photo", status="pending_upload", age_hours=25, upload_id="over"
+    )
+    s3 = storage.client()
+    google = Stubber(s3)
+    where = {"Bucket": storage.bucket(), "Key": key}
+    google.add_client_error(
+        "abort_multipart_upload",
+        "NoSuchUpload",
+        http_status_code=404,
+        expected_params=where | {"UploadId": "over"},
+    )
+    google.add_client_error(
+        "delete_object", "NoSuchKey", http_status_code=404, expected_params=where
+    )
+    monkeypatch.setattr(storage, "client", lambda: s3)
+
+    with google, caplog.at_level(logging.WARNING, logger="montage.sweeps"):
+        assert sweeps.sweep_stale_uploads(conn) == 1
+        google.assert_no_pending_responses()
+
+    assert read_item(conn, item_id) is None
+    assert "left behind" not in caplog.text
 
 
 def test_the_sweep_leaves_an_upload_that_finished_while_it_ran(conn, memory, monkeypatch):
