@@ -91,6 +91,16 @@ def order(conn, memory, params):
     )
 
 
+def api_params(music_tracks=(), music_wishes=None, **rest):
+    """`params` of a montage as the api writes it (`api/docs/montages.md`, `src/montages/order.ts`):
+    the tracks always, even empty; the wishes only when there is at least one, every one trimmed and
+    filled, keyed by a track of that same list. Hand-written dicts drift from this; this cannot."""
+    params = {"target_seconds": 60, "music_tracks": list(music_tracks), **rest}
+    wishes = {track: text.strip() for track, text in (music_wishes or {}).items() if text.strip()}
+    assert set(wishes) <= set(music_tracks), "the api refuses a wish to a track not in the order"
+    return {**params, **({"music_wishes": wishes} if wishes else {})}
+
+
 def read_montage(conn, montage_id):
     return conn.execute(
         "SELECT status, video_key, duration_seconds, error_text FROM montages WHERE id = %s",
