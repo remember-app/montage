@@ -328,7 +328,8 @@ def run(conn):
                         # — nor one sweep take the other with it.
                         log.exception("%s failed, trying again in an hour", sweep.__name__)
             reap(conn)
-            if not run_once(conn):
+            # Asked again: SIGTERM may have come while the sweeps ran, and no job is taken after it.
+            if not shutdown.asked and not run_once(conn):
                 shutdown.waiting = True
                 wait_for_job(conn)
                 shutdown.waiting = False

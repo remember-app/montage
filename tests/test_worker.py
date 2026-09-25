@@ -251,6 +251,15 @@ def test_sigterm_lets_a_job_finish_in_its_grace_and_takes_no_new_one(loop, sigte
     assert read(loop, next_job)[0] == "queued"
 
 
+def test_sigterm_during_the_sweeps_takes_no_job_after_them(loop, monkeypatch):
+    monkeypatch.setattr(sweeps, "SWEEPS", (lambda conn: os.kill(os.getpid(), signal.SIGTERM),))
+    job_id = worker.enqueue(loop, "dummy")
+
+    worker.run(loop)
+
+    assert read(loop, job_id)[0] == "queued"
+
+
 def test_sigterm_stops_a_waiting_worker_at_once(loop, sigterm_in):
     sigterm_in(0.5)
     started = time.monotonic()
