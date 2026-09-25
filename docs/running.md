@@ -124,9 +124,41 @@ python -m montage enqueue dummy fail   # ref=fail — упадёт и уйдёт
 # Образ
 
 `Dockerfile` — две стадии на одной основе: последняя — боевой образ, `test` — среда
-`test-in-docker.sh`. CI (`.gitlab-ci.yml`) на каждый пуш в main собирает боевой и кладёт в реестр
-проекта `git.dapp-devs.com:5050/nox-labs/nox/remember/montage` с тегом по SHA коммита. Выкатки в
-CI нет.
+`test-in-docker.sh`. CI (`.gitlab-ci.yml`) на каждый пуш в `dev` собирает боевой, кладёт в реестр
+проекта `git.dapp-devs.com:5050/nox-labs/nox/remember/montage` с тегом по SHA коммита и выкатывает
+на dev-контур. `main` к CI не привязана — она под боевой контур.
+
+Выкатка — джоба `dev_deploy`, после сборки:
+
+- клонирует репозиторий инфраструктуры `nox-labs/infra/stage/nox-infra-dev`, пишет в
+  `ioc-helm/nox/remember/montage/values-dev.yaml` только `image.repository` и `image.tag`, коммитит
+  «deploy remember-montage dev <короткий SHA>» и пушит в его `main`; если там успели закоммитить —
+  `pull --rebase` и снова, до пяти раз. Дальше приложение `dev-remember-montage` синкает ArgoCD, и
+  под обработчика перезапускается — на любой пуш в `dev`, даже если менялись только документы.
+  Ключ для пуша — переменная CI `SSH_PRIVATE_KEY`, заведённая на весь GitLab;
+- перед коммитом сверяет, что изменён ровно этот файл, в нём — только строки образа, а значения
+  остальных полей те же. Иначе падает, ничего не запушив. Тег уже стоит — выходит без коммита.
+
+Прошла ли выкатка: публичного адреса у обработчика нет — смотреть поды в Prometheus
+https://prometheus.noxlabs.xyz запросами из README чартов (`ioc-helm/nox/remember/README.md`, «Как
+наблюдать выкатку без доступа к кластеру»). Для обработчика главные:
+
+| Что | Запрос |
+|---|---|
+| Готов ли (1 — да) | `kube_pod_status_ready{exported_namespace="default", exported_pod=~"dev-remember-montage.*", condition="true"}` |
+| Почему не стартует создание таблиц | `kube_pod_init_container_status_waiting_reason{exported_namespace="default", exported_pod=~"dev-remember-montage.*"} == 1` |
+| Упала выкладка музыки | `kube_job_status_failed{exported_namespace="default", job_name=~"dev-remember-montage.*"} > 0` |
+
+Откат — вернуть прежний тег в `image.tag` того же `values-dev.yaml` и закоммитить в `main`
+репозитория инфраструктуры, ArgoCD откатит сам. Прежние теги — в истории файла, в коммитах «deploy
+remember-montage dev …». Следующий пуш в `dev` снова выкатит свежий.
+
+Пока чарты Remember не слиты в `main` репозитория инфраструктуры, `dev_deploy` падает: файла там
+ещё нет. Это ожидаемо, образ при этом собран; после слияния — перезапустить джобу.
+
+api выкатывается своим пайплайном тем же путём, и какой из двух окажется на dev первым, не угадать.
+Контракт между ними — «Пожелания к трекам» (`jobs/montage.md`): пока одна сторона уже новая, а
+другая ещё старая, они рассогласованы. Окно короткое, для пилота допустимо.
 
 | Команда | Когда | Из окружения |
 |---|---|---|
