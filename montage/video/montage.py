@@ -76,9 +76,10 @@ def montage(conn, ref):
     ordered_music, refusal = music.ordered(params)
     if refusal:
         return _give_up_for_good(conn, ref, refusal)
-    # Пожелания организатора к трекам, его словами. Как и история, читает их только режиссёр:
-    # дорожку они не перекраивают.
-    music_note = (params.get("music_note") or "").strip()
+    # Пожелания организатора к трекам, его словами, — у каждого трека своё. Как и история, читает
+    # их только режиссёр: дорожку они не перекраивают. Общее `music_note` старых заказов не читается
+    # вовсе (docs/jobs/montage.md, «Пожелания к трекам»).
+    music_wishes = params.get("music_wishes") or {}
     orientation = params.get("orientation") or assembly.DEFAULT_ORIENTATION
     if orientation not in assembly.CANVASES:
         # Same drift, same answer: the api validates the two values it may write here, so anything
@@ -225,8 +226,7 @@ def montage(conn, ref):
             exclude,
             story=story_text,
             ref=ref,
-            music=music.heard(ordered_music, tracks),
-            music_note=music_note,
+            music=music.heard(ordered_music, tracks, music_wishes),
         )
         turned_down = None
         if chosen is None:

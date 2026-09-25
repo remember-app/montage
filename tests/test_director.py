@@ -150,29 +150,29 @@ def test_two_stories_over_the_same_material_are_two_different_films(described):
     assert STORY in asked(first) and "про собаку" in asked(second)
 
 
-def test_the_music_and_what_the_organizer_asked_of_it_go_to_the_director(described):
+def test_the_music_and_what_the_organizer_asked_of_each_track_go_to_the_director(described):
     """Под что соберут ролик — часть того, из чего режиссёр строит план: треки по порядку, длина
-    каждого и пожелания организатора его же словами. Дорожку от этого никто не перекраивает — она
-    собрана до вопроса; в запросе она для того, чтобы под неё лёг порядок и длина кусков.
+    каждого и пожелание организатора его же словами — у того трека, к которому оно написано, а не
+    одной строкой на весь ролик. Дорожку от этого никто не перекраивает — она собрана до вопроса; в
+    запросе она для того, чтобы под неё лёг порядок и длина кусков.
 
-    И то и другое обязано оказаться в журнале запросов: запрос к модели сохраняется целиком
-    (doc-03, «все запросы обязательно сохраняются»), а прочитать, почему ролик вышел таким, можно
-    только там.
+    И всё это обязано оказаться в журнале запросов: запрос к модели сохраняется целиком (doc-03,
+    «все запросы обязательно сохраняются»), а прочитать, почему ролик вышел таким, можно только там.
     """
-    _, _, net = directed(
-        described,
-        story=STORY,
-        music=[{"track": "warm", "seconds": 121.0}, {"track": "свой трек", "seconds": 48.2}],
-        music_note="торт поставь под припев второго трека",
-    )
+    music = [
+        {"track": "warm", "seconds": 121.0},
+        {"track": "свой трек", "seconds": 48.2, "wish": "торт поставь под припев"},
+    ]
 
-    question = asked(net)
-    assert "warm" in question and "48.2" in question, "дорожка ушла не по порядку или без длин"
-    assert "под припев второго трека" in question
+    _, _, net = directed(described, story=STORY, music=music)
+
     ((request,),) = described.execute(
         "SELECT request FROM ai_requests WHERE operation = 'plan_montage'"
     ).fetchall()
-    assert "под припев второго трека" in request["prompt"] and "warm" in request["prompt"]
+    assert asked(net).endswith(request["prompt"]), "в журнале не тот вопрос, что ушёл модели"
+    said = json.loads(request["prompt"])
+    assert said["music"] == music, "дорожка ушла не по порядку, без длин или пожелание не у трека"
+    assert "music_note" not in said, "общего пожелания на весь ролик больше нет"
 
 
 def test_what_is_said_in_a_clip_goes_to_the_director_too(conn):

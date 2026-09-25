@@ -90,7 +90,7 @@ class AI:
             lambda provider: provider.transcribe(audio),
         )
 
-    def plan_montage(self, shots, story="", target_seconds=None, music=(), music_note="", ref=None):
+    def plan_montage(self, shots, story="", target_seconds=None, music=(), ref=None):
         """The order of the film: which piece, for how long, and what it is there for.
 
         `shots` is what may go into the montage, one dict per piece — `media_id` and whatever is
@@ -99,10 +99,10 @@ class AI:
         model never to see it.
 
         `music` is the montage's soundtrack as it will actually sound — the tracks in the order
-        they play and how long each of them runs, empty when the order asked for no music at all —
-        and `music_note` is the organizer's own word on what to do with them. The soundtrack is
-        assembled from the order's list whatever comes back: these two are the model's to plan the
-        picture against, not to change (doc-03).
+        they play, how long each of them runs and the organizer's own wish on a track where they
+        wrote one, empty when the order asked for no music at all. The soundtrack is assembled from
+        the order's list whatever comes back: it is the model's to plan the picture against, not to
+        change (doc-03).
 
         Returns the plan as it can be read (`answers.planned`) or None:
 
@@ -118,7 +118,6 @@ class AI:
                 "story": story,
                 "target_seconds": target_seconds,
                 "music": list(music),
-                "music_note": music_note,
                 "shots": list(shots),
             },
             ensure_ascii=False,
