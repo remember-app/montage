@@ -21,7 +21,7 @@ import time
 
 import psycopg
 
-from montage import ai, sweeps
+from montage import ai, storage, sweeps
 from montage.media import frame_info, preview, screening, speech, understanding
 
 # Модуль и задача, которую он выполняет, зовутся одинаково — отсюда второе имя.
@@ -166,9 +166,8 @@ def _give_up(conn, type_, ref):
         # Same for the video that was ordered: the organizer's «повторить» has to appear, and it
         # only appears under a montage that says it failed. Not the error itself though — the api
         # serves `error_text` to every member of the memory, and this one is an ffmpeg stderr tail
-        # or a botocore message: temp paths, and the storage endpoint, which in production carries
-        # the Cloudflare account id. The full text stays in `jobs.last_error`, which is the
-        # operator's to read.
+        # or the storage's: temp paths, and the bucket's address with the object's name in it. The
+        # full text stays in `jobs.last_error`, which is the operator's to read.
         montages.give_up(conn, ref, "не удалось собрать ролик")
 
 
@@ -311,6 +310,9 @@ def run(conn):
     # Says which cloud model this worker has, or says out loud that it has none — the job that
     # then quietly cuts a montage without one is otherwise indistinguishable from one that had it.
     log.info("cloud model: %s", ai.from_env() or "none, every call to it will be skipped")
+    # Which bucket, and — built here rather than at the first job — a setting that is missing or
+    # wrong (a broken key, the google driver with no prefix) stops the worker as it starts.
+    log.info("storage: %s", storage.client())
     conn.execute("LISTEN jobs")  # every insert into `jobs` notifies this channel — see schema.sql
     next_sweep = 0.0  # once at start-up, then hourly
     with _Shutdown() as shutdown:

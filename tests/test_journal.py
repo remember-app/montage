@@ -42,7 +42,7 @@ def test_the_journal_tells_the_whole_assembly_stage_by_stage(conn, s3, memory, t
     journal_ready(conn)
     ids = ready_material(conn, s3, memory, tmp_path)
     dark, key = add_item(conn, memory, "photo", status="ready")
-    s3.upload_file(str(crushed(tmp_path / "crushed.jpg")), storage.bucket(), key)
+    s3.upload_file(str(crushed(tmp_path / "crushed.jpg")), storage.client().bucket, key)
     montage_id = order(
         conn,
         memory,
@@ -115,7 +115,7 @@ def test_a_montage_without_music_says_so_where_the_rhythm_would_be(conn, s3, mem
     montage_id = order(conn, memory, {"target_seconds": 10, "music_tracks": []})
     for index in range(3):
         _, key = add_item(conn, memory, "photo", status="ready")
-        s3.upload_file(str(jpeg(tmp_path / f"photo-{index}.jpg")), storage.bucket(), key)
+        s3.upload_file(str(jpeg(tmp_path / f"photo-{index}.jpg")), storage.client().bucket, key)
     worker.enqueue(conn, "montage", montage_id)
 
     assert worker.run_once(conn) is True
@@ -150,7 +150,7 @@ def test_the_journal_is_read_from_another_connection_while_the_montage_is_still_
     journal_ready(conn)
     ready_material(conn, s3, memory, tmp_path)
     _, key = add_item(conn, memory, "photo", status="ready")
-    s3.upload_file(str(crushed(tmp_path / "crushed.jpg")), storage.bucket(), key)
+    s3.upload_file(str(crushed(tmp_path / "crushed.jpg")), storage.client().bucket, key)
     montage_id = order(conn, memory, {"target_seconds": 30, "music_tracks": []})
 
     before, after = [], []

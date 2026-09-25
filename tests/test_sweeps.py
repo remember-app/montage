@@ -17,7 +17,7 @@ from rows import add_item, fetch, only_jobs_for, read_frame_info, read_item, rea
 
 def test_the_sweep_takes_an_abandoned_upload_with_its_multipart(conn, s3, memory):
     abandoned, key = add_item(conn, memory, "photo", status="pending_upload", age_hours=25)
-    upload_id = s3.create_multipart_upload(Bucket=storage.bucket(), Key=key)["UploadId"]
+    upload_id = s3.create_multipart_upload(Bucket=storage.client().bucket, Key=key)["UploadId"]
     conn.execute("UPDATE media_items SET upload_id = %s WHERE id = %s", (upload_id, abandoned))
     # Somebody who started uploading a minute ago, and is still uploading.
     fresh, _ = add_item(conn, memory, "photo", status="pending_upload")
@@ -26,7 +26,7 @@ def test_the_sweep_takes_an_abandoned_upload_with_its_multipart(conn, s3, memory
 
     assert read_item(conn, abandoned) is None
     assert read_item(conn, fresh) is not None, "a day has to pass before a row is given up on"
-    live = s3.list_multipart_uploads(Bucket=storage.bucket(), Prefix=key).get("Uploads", [])
+    live = s3.list_multipart_uploads(Bucket=storage.client().bucket, Prefix=key).get("Uploads", [])
     assert upload_id not in [upload["UploadId"] for upload in live], "the parts are released"
 
 
@@ -37,12 +37,12 @@ def test_the_sweep_deletes_an_upload_finished_in_the_bucket_but_never_reported(
     `pending_upload`, the object is in the bucket, and the upload id names an upload that is over.
     The abort is refused as «no such upload» and the object has to go all the same."""
     item_id, key = add_item(conn, memory, "photo", status="pending_upload", age_hours=25)
-    upload_id = s3.create_multipart_upload(Bucket=storage.bucket(), Key=key)["UploadId"]
+    upload_id = s3.create_multipart_upload(Bucket=storage.client().bucket, Key=key)["UploadId"]
     part = s3.upload_part(
-        Bucket=storage.bucket(), Key=key, UploadId=upload_id, PartNumber=1, Body=b"photo"
+        Bucket=storage.client().bucket, Key=key, UploadId=upload_id, PartNumber=1, Body=b"photo"
     )
     s3.complete_multipart_upload(
-        Bucket=storage.bucket(),
+        Bucket=storage.client().bucket,
         Key=key,
         UploadId=upload_id,
         MultipartUpload={"Parts": [{"PartNumber": 1, "ETag": part["ETag"]}]},
@@ -54,12 +54,12 @@ def test_the_sweep_deletes_an_upload_finished_in_the_bucket_but_never_reported(
 
     assert read_item(conn, item_id) is None
     with pytest.raises(ClientError) as gone:
-        s3.head_object(Bucket=storage.bucket(), Key=key)
+        s3.head_object(Bucket=storage.client().bucket, Key=key)
     assert storage.missing(gone.value), "the finished original is left in the bucket"
     assert "left behind" not in caplog.text
 
 
-def test_the_sweep_takes_googles_nothing_there_for_an_answer(conn, memory, monkeypatch, caplog):
+def test_the_sweep_takes_googles_nothing_there_for_an_answer(conn, memory, caplog):
     """Where S3 and MinIO say «done», Google says «not found»: deleting a key with nothing under it
     is 404 `NoSuchKey` there — and an upload abandoned half-way never put anything under its key —
     while an abort of an upload already over is 404 `NoSuchUpload`. Both are the outcome the sweep
@@ -68,9 +68,8 @@ def test_the_sweep_takes_googles_nothing_there_for_an_answer(conn, memory, monke
     item_id, key = add_item(
         conn, memory, "photo", status="pending_upload", age_hours=25, upload_id="over"
     )
-    s3 = storage.client()
-    google = Stubber(s3)
-    where = {"Bucket": storage.bucket(), "Key": key}
+    google = Stubber(storage.client().s3)
+    where = {"Bucket": storage.client().bucket, "Key": key}
     google.add_client_error(
         "abort_multipart_upload",
         "NoSuchUpload",
@@ -80,7 +79,6 @@ def test_the_sweep_takes_googles_nothing_there_for_an_answer(conn, memory, monke
     google.add_client_error(
         "delete_object", "NoSuchKey", http_status_code=404, expected_params=where
     )
-    monkeypatch.setattr(storage, "client", lambda: s3)
 
     with google, caplog.at_level(logging.WARNING, logger="montage.sweeps"):
         assert sweeps.sweep_stale_uploads(conn) == 1
@@ -88,6 +86,26 @@ def test_the_sweep_takes_googles_nothing_there_for_an_answer(conn, memory, monke
 
     assert read_item(conn, item_id) is None
     assert "left behind" not in caplog.text
+
+
+def test_the_sweep_in_google_frees_under_the_prefix_and_nowhere_else(conn, memory, google, caplog):
+    """The same sweep over the google driver: an abandoned upload is aborted and its key deleted
+    under the prefix, and a row whose key would lead out of it — nothing the api writes, but the
+    row is all the sweep goes by — costs a warning and not a single request."""
+    _, key = add_item(conn, memory, "photo", status="pending_upload", age_hours=25, upload_id="up")
+    stray, _ = add_item(conn, memory, "photo", status="pending_upload", age_hours=25, upload_id="x")
+    conn.execute("UPDATE media_items SET original_key = '../elsewhere' WHERE id = %s", (stray,))
+    google.answers = [204, (404, "NoSuchKey")]
+
+    with caplog.at_level(logging.WARNING, logger="montage.sweeps"):
+        assert sweeps.sweep_stale_uploads(conn) == 2
+
+    assert [(sent.method, sent.url) for sent in google.sent] == [
+        ("DELETE", f"{google.objects}{key}?uploadId=up"),
+        ("DELETE", f"{google.objects}{key}"),
+    ]
+    assert "../elsewhere" in caplog.text and "left behind" in caplog.text
+    assert f"{key} but" not in caplog.text, "Google's «nothing there» is not a failure"
 
 
 def test_the_sweep_leaves_an_upload_that_finished_while_it_ran(conn, memory, monkeypatch):
@@ -118,7 +136,7 @@ def test_the_sweep_catches_up_a_photo_that_has_no_large_copy(conn, s3, memory, t
         "UPDATE media_items SET thumbnail_key = %s WHERE id = %s",
         (f"thumbnails/{item_id}.jpg", item_id),
     )
-    s3.upload_file(str(jpeg(tmp_path / "original.jpg")), storage.bucket(), key)
+    s3.upload_file(str(jpeg(tmp_path / "original.jpg")), storage.client().bucket, key)
 
     sweeps.sweep_photos_without_previews(conn)
     assert only_jobs_for(conn, item_id) == 1
@@ -175,7 +193,7 @@ def test_the_sweep_reads_the_camera_off_material_from_before(conn, s3, memory):
     """A frame that went `ready` before the worker learned to read one. Nobody uploads anything
     again — the original is in the bucket and the sweep finds it."""
     item_id, key = add_item(conn, memory, "photo", status="ready")
-    s3.upload_file(str(FIXTURES / "exif-photo.jpg"), storage.bucket(), key)
+    s3.upload_file(str(FIXTURES / "exif-photo.jpg"), storage.client().bucket, key)
 
     sweeps.sweep_media_without_frame_info(conn)
     assert only_jobs_for(conn, item_id, "media_frame_info") == 1
@@ -191,7 +209,7 @@ def test_the_sweep_stops_asking_about_a_file_that_carries_nothing(conn, s3, memo
     opened yet. What the sweep goes by is the size, which this one has like every other picture;
     going by the camera it would fetch and probe most of a library every hour forever."""
     item_id, key = add_item(conn, memory, "photo", status="ready")
-    s3.upload_file(str(jpeg(tmp_path / "original.jpg")), storage.bucket(), key)
+    s3.upload_file(str(jpeg(tmp_path / "original.jpg")), storage.client().bucket, key)
 
     sweeps.sweep_media_without_frame_info(conn)
     assert worker.run_once(conn) is True
@@ -207,7 +225,7 @@ def test_the_sweep_measures_a_frame_that_was_read_before_sizes(conn, s3, memory,
     a size (below) — and the size is missing all the same. It is measured on the next pass, and
     nobody uploads anything again."""
     item_id, key = add_item(conn, memory, "photo", status="ready")
-    s3.upload_file(str(jpeg(tmp_path / "original.jpg")), storage.bucket(), key)
+    s3.upload_file(str(jpeg(tmp_path / "original.jpg")), storage.client().bucket, key)
     already_read = worker.enqueue(conn, "media_frame_info", item_id)
     conn.execute(
         "UPDATE jobs SET status = 'done', updated_at = now() - interval '2 days' WHERE id = %s",
@@ -227,7 +245,7 @@ def test_the_sweep_does_not_go_on_asking_about_a_file_it_cannot_measure(conn, s3
     file until the worker was stopped; a read that finished within the day is a read that has
     been made."""
     item_id, key = add_item(conn, memory, "photo", status="ready")
-    s3.upload_file(str(sound(tmp_path / "original.m4a")), storage.bucket(), key)
+    s3.upload_file(str(sound(tmp_path / "original.m4a")), storage.client().bucket, key)
 
     sweeps.sweep_media_without_frame_info(conn)
     assert worker.run_once(conn) is True

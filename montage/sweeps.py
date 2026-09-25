@@ -175,7 +175,10 @@ def sweep_stale_uploads(conn):
     if not stale:
         return 0
 
-    s3, swept = storage.client(), 0
+    # Built before anything is claimed: storage that cannot be built for want of a setting must not
+    # cost the rows, which are the only record of what is left in the bucket.
+    storage.client()
+    swept = 0
     for item_id, original_key, upload_id in stale:
         # The row is claimed first, and only if it is still the row that was found. A phone can
         # finish a day-old upload in the seconds between the SELECT above and this line — the api
@@ -191,7 +194,7 @@ def sweep_stale_uploads(conn):
         try:
             # The parts, and whatever landed under the key anyway, for the client that completed
             # its upload in the bucket and never told the api.
-            storage.free(s3, original_key, upload_id)
+            storage.free(original_key, upload_id)
         except Exception as exc:
             # The row is already gone, so nothing will ever name these again and the next hour will
             # not find them. The log is the only record left — hence the upload id in it.

@@ -115,7 +115,7 @@ def test_a_montage_reaches_the_length_that_was_ordered_by_holding_its_clips_long
         params = {"target_seconds": 20, "music_track_id": "warm"}
     else:
         own = f"music/{uuid.uuid4()}.wav"
-        s3.upload_file(str(hush(tmp_path / "own.wav")), storage.bucket(), own)
+        s3.upload_file(str(hush(tmp_path / "own.wav")), storage.client().bucket, own)
         params = {
             "target_seconds": 20,
             "music_tracks": [own, "warm"],
@@ -124,10 +124,10 @@ def test_a_montage_reaches_the_length_that_was_ordered_by_holding_its_clips_long
     montage_id = order(conn, memory, params)
     for index in range(2):
         _, key = add_item(conn, memory, "video", status="ready")
-        s3.upload_file(str(long_clip(tmp_path / f"clip-{index}.mp4")), storage.bucket(), key)
+        s3.upload_file(str(long_clip(tmp_path / f"clip-{index}.mp4")), storage.client().bucket, key)
     for index in range(2):
         _, key = add_item(conn, memory, "photo", status="ready")
-        s3.upload_file(str(jpeg(tmp_path / f"photo-{index}.jpg")), storage.bucket(), key)
+        s3.upload_file(str(jpeg(tmp_path / f"photo-{index}.jpg")), storage.client().bucket, key)
     worker.enqueue(conn, "montage", montage_id)
 
     assert worker.run_once(conn) is True
@@ -163,10 +163,10 @@ def test_a_montage_under_music_comes_out_the_length_it_was_ordered(
     seconds to within one."""
     montage_id = order(conn, memory, {"target_seconds": 30, "music_tracks": music})
     _, key = add_item(conn, memory, "video", status="ready")
-    s3.upload_file(str(long_clip(tmp_path / "clip.mp4")), storage.bucket(), key)
+    s3.upload_file(str(long_clip(tmp_path / "clip.mp4")), storage.client().bucket, key)
     for index in range(12):
         _, key = add_item(conn, memory, "photo", status="ready")
-        s3.upload_file(str(jpeg(tmp_path / f"photo-{index}.jpg")), storage.bucket(), key)
+        s3.upload_file(str(jpeg(tmp_path / f"photo-{index}.jpg")), storage.client().bucket, key)
     worker.enqueue(conn, "montage", montage_id)
 
     assert worker.run_once(conn) is True
@@ -316,10 +316,10 @@ def test_a_montage_that_opens_on_a_video_with_a_dark_start_gets_a_bright_cover(
     _, key = add_item(
         conn, memory, "video", status="ready", age_hours=5
     )  # oldest → opens the montage
-    s3.upload_file(str(dark_opening_clip(tmp_path / "dark.mp4")), storage.bucket(), key)
+    s3.upload_file(str(dark_opening_clip(tmp_path / "dark.mp4")), storage.client().bucket, key)
     for index in range(3):
         _, key = add_item(conn, memory, "photo", status="ready")
-        s3.upload_file(str(jpeg(tmp_path / f"photo-{index}.jpg")), storage.bucket(), key)
+        s3.upload_file(str(jpeg(tmp_path / f"photo-{index}.jpg")), storage.client().bucket, key)
     worker.enqueue(conn, "montage", montage_id)
 
     assert worker.run_once(conn) is True
@@ -354,7 +354,7 @@ def test_a_montage_ordered_with_a_story_is_cut_to_the_directors_plan(
         )
     net = planning_over(monkeypatch, ids[:3])
     own = f"music/{uuid.uuid4()}.wav"
-    s3.upload_file(str(tone(tmp_path / "own.wav", seconds=5.0)), storage.bucket(), own)
+    s3.upload_file(str(tone(tmp_path / "own.wav", seconds=5.0)), storage.client().bucket, own)
     montage_id = order(
         conn,
         memory,
@@ -490,7 +490,7 @@ def test_the_order_as_the_api_writes_it_reaches_the_director_with_each_wish_at_i
     строки и кавычками, полочного — и нет у трека без пожелания; общего поля нет. Заказ без музыки
     уходит с пустой дорожкой. Первая попытка падает, вторая ту же строку читает так же."""
     own = f"music/{uuid.uuid4()}"
-    s3.upload_file(str(tone(tmp_path / "own.wav", seconds=5.0)), storage.bucket(), own)
+    s3.upload_file(str(tone(tmp_path / "own.wav", seconds=5.0)), storage.client().bucket, own)
     awkward = 'Тихо 🎂 日本語\nвторая строка\t"в кавычках" \\'
     if shelf:
         tracks = [own, *shelf]
@@ -532,11 +532,11 @@ def test_the_directors_film_is_held_to_the_ordered_length_the_same_way(
     exactly as the отбор's own cut is. The plan opens on the long clip, and that is what the
     missing seconds go into — the model is not asked again and nothing is added to the film."""
     clip_id, key = add_item(conn, memory, "video", status="ready")
-    s3.upload_file(str(long_clip(tmp_path / "clip.mp4")), storage.bucket(), key)
+    s3.upload_file(str(long_clip(tmp_path / "clip.mp4")), storage.client().bucket, key)
     ids = [clip_id]
     for index in range(2):
         photo_id, key = add_item(conn, memory, "photo", status="ready")
-        s3.upload_file(str(jpeg(tmp_path / f"photo-{index}.jpg")), storage.bucket(), key)
+        s3.upload_file(str(jpeg(tmp_path / f"photo-{index}.jpg")), storage.client().bucket, key)
         ids.append(photo_id)
     for media_id, description in zip(ids, ("вносят торт", "все за столом", "задувают свечи")):
         conn.execute(
@@ -671,8 +671,8 @@ def test_a_memory_deleted_mid_assembly_takes_the_video_back_out_of_the_bucket(
     uploaded = []
     lands = storage.upload
 
-    def land_and_delete(client, path, key, content_type):
-        lands(client, path, key, content_type)
+    def land_and_delete(path, key, content_type):
+        lands(path, key, content_type)
         uploaded.append(key)
         conn.execute("DELETE FROM montages WHERE id = %s", (montage_id,))
 
@@ -681,6 +681,4 @@ def test_a_memory_deleted_mid_assembly_takes_the_video_back_out_of_the_bucket(
     assert worker.run_once(conn) is True, "задача закончилась, а не упала"
 
     assert uploaded, "ролик вообще дошёл до хранилища — иначе тест проверяет пустоту"
-    for key in uploaded:
-        with pytest.raises(s3.exceptions.ClientError):
-            s3.head_object(Bucket=storage.bucket(), Key=key)
+    assert [key for key in uploaded if storage.exists(key)] == []

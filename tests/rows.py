@@ -64,7 +64,7 @@ def read_size(conn, item_id):
 
 
 def fetch(s3, key, path):
-    s3.download_file(storage.bucket(), key, str(path))
+    s3.download_file(storage.client().bucket, key, str(path))
     return path
 
 
@@ -114,10 +114,10 @@ def ready_material(conn, s3, memory, tmp_path):
     ids = []
     for index in range(3):
         item_id, key = add_item(conn, memory, "photo", status="ready")
-        s3.upload_file(str(jpeg(tmp_path / f"photo-{index}.jpg")), storage.bucket(), key)
+        s3.upload_file(str(jpeg(tmp_path / f"photo-{index}.jpg")), storage.client().bucket, key)
         ids.append(item_id)
     item_id, key = add_item(conn, memory, "video", status="ready")
-    s3.upload_file(str(video(tmp_path / "clip.mp4")), storage.bucket(), key)
+    s3.upload_file(str(video(tmp_path / "clip.mp4")), storage.client().bucket, key)
     return [*ids, item_id]
 
 

@@ -25,7 +25,7 @@ def test_a_file_that_will_not_open_is_left_out_rather_than_failing_the_video(
     montage_id = order(conn, memory, {"target_seconds": 30})
     ready_material(conn, s3, memory, tmp_path)
     _, key = add_item(conn, memory, "photo", status="ready")
-    s3.upload_file(str(unopenable(tmp_path / "broken")), storage.bucket(), key)
+    s3.upload_file(str(unopenable(tmp_path / "broken")), storage.client().bucket, key)
     worker.enqueue(conn, "montage", montage_id)
 
     assert worker.run_once(conn) is True
@@ -44,7 +44,7 @@ def test_a_badly_exposed_photo_is_left_out_rather_than_failing_the_video(
     montage_id = order(conn, memory, {"target_seconds": 30})
     ready_material(conn, s3, memory, tmp_path)
     _, key = add_item(conn, memory, "photo", status="ready")
-    s3.upload_file(str(crushed(tmp_path / "crushed.jpg")), storage.bucket(), key)
+    s3.upload_file(str(crushed(tmp_path / "crushed.jpg")), storage.client().bucket, key)
     worker.enqueue(conn, "montage", montage_id)
 
     assert worker.run_once(conn) is True
@@ -62,7 +62,7 @@ def test_a_photo_the_organizer_marked_include_is_in_the_video_the_algorithm_notw
     the test above proves is dropped is here proved to be in the video."""
     ready_material(conn, s3, memory, tmp_path)
     crushed_id, key = add_item(conn, memory, "photo", status="ready")
-    s3.upload_file(str(crushed(tmp_path / "crushed.jpg")), storage.bucket(), key)
+    s3.upload_file(str(crushed(tmp_path / "crushed.jpg")), storage.client().bucket, key)
     montage_id = order(conn, memory, {"target_seconds": 30, "include_media_ids": [crushed_id]})
     worker.enqueue(conn, "montage", montage_id)
 
@@ -81,11 +81,13 @@ def test_the_floor_counts_the_pieces_the_organizer_asked_for_too(conn, s3, memor
     it — refusing the order here would be the automatic отсев beating the person, which is the one
     thing «включить» exists to prevent (doc-03, «Кадры, отмеченные включить, есть в ролике»)."""
     _, key = add_item(conn, memory, "photo", status="ready")
-    s3.upload_file(str(jpeg(tmp_path / "good.jpg")), storage.bucket(), key)
+    s3.upload_file(str(jpeg(tmp_path / "good.jpg")), storage.client().bucket, key)
     wanted = []
     for index in range(2):
         crushed_id, key = add_item(conn, memory, "photo", status="ready")
-        s3.upload_file(str(crushed(tmp_path / f"crushed-{index}.jpg")), storage.bucket(), key)
+        s3.upload_file(
+            str(crushed(tmp_path / f"crushed-{index}.jpg")), storage.client().bucket, key
+        )
         wanted.append(crushed_id)
     montage_id = order(conn, memory, {"target_seconds": 30, "include_media_ids": wanted})
     worker.enqueue(conn, "montage", montage_id)
@@ -107,11 +109,13 @@ def test_no_montage_runs_past_the_ceiling_whatever_the_organizer_asked_for_and_t
     their order — and the file ffprobe reads runs no longer than it."""
     monkeypatch.setattr(selection, "MAX_SECONDS", 8.0)
     track_key = f"music/{uuid.uuid4()}.wav"
-    s3.upload_file(str(click_track(tmp_path / "click.wav", gap=0.43)), storage.bucket(), track_key)
+    s3.upload_file(
+        str(click_track(tmp_path / "click.wav", gap=0.43)), storage.client().bucket, track_key
+    )
     ids = []
     for index in range(5):
         item_id, key = add_item(conn, memory, "photo", status="ready", age_hours=5 - index)
-        s3.upload_file(str(jpeg(tmp_path / f"photo-{index}.jpg")), storage.bucket(), key)
+        s3.upload_file(str(jpeg(tmp_path / f"photo-{index}.jpg")), storage.client().bucket, key)
         ids.append(item_id)
     montage_id = order(
         conn, memory, {"target_seconds": 30, "music_track_key": track_key, "include_media_ids": ids}
@@ -160,7 +164,7 @@ def test_the_order_judges_a_photograph_on_the_same_copy_the_proposal_did(
     photo_id = ready_material(conn, s3, memory, tmp_path)[0]
     black = tmp_path / "black.jpg"
     draw("-f", "lavfi", "-i", "color=black:size=2048x1366", "-frames:v", "1", str(black))
-    s3.upload_file(str(black), storage.bucket(), f"previews/{photo_id}.jpg")
+    s3.upload_file(str(black), storage.client().bucket, f"previews/{photo_id}.jpg")
     conn.execute(
         "UPDATE media_items SET preview_key = %s WHERE id = %s",
         (f"previews/{photo_id}.jpg", photo_id),
@@ -202,7 +206,7 @@ def test_the_floor_treats_a_piece_named_on_both_lists_as_struck_out(conn, s3, me
     ids = []
     for index in range(3):
         item_id, key = add_item(conn, memory, "photo", status="ready")
-        s3.upload_file(str(jpeg(tmp_path / f"photo-{index}.jpg")), storage.bucket(), key)
+        s3.upload_file(str(jpeg(tmp_path / f"photo-{index}.jpg")), storage.client().bucket, key)
         ids.append(item_id)
     montage_id = order(
         conn,
@@ -226,10 +230,10 @@ def test_too_little_material_that_actually_opens_fails_without_retrying(conn, s3
     which two are unreadable would otherwise have been assembled into one three-second still."""
     montage_id = order(conn, memory, {})
     _, key = add_item(conn, memory, "photo", status="ready")
-    s3.upload_file(str(jpeg(tmp_path / "good.jpg")), storage.bucket(), key)
+    s3.upload_file(str(jpeg(tmp_path / "good.jpg")), storage.client().bucket, key)
     for index in range(montage.MIN_ITEMS - 1):
         _, key = add_item(conn, memory, "photo", status="ready")
-        s3.upload_file(str(unopenable(tmp_path / f"broken-{index}")), storage.bucket(), key)
+        s3.upload_file(str(unopenable(tmp_path / f"broken-{index}")), storage.client().bucket, key)
     job_id = worker.enqueue(conn, "montage", montage_id)
 
     assert worker.run_once(conn) is True
@@ -247,10 +251,10 @@ def test_a_clip_is_laid_into_the_chain_at_the_length_it_really_is(conn, s3, memo
     montage_id = order(conn, memory, {"target_seconds": 30})
     # Oldest, so the chronological order puts it first and the drift hits every join after it.
     _, key = add_item(conn, memory, "video", status="ready", age_hours=5)
-    s3.upload_file(str(lopsided(tmp_path / "lopsided.mp4")), storage.bucket(), key)
+    s3.upload_file(str(lopsided(tmp_path / "lopsided.mp4")), storage.client().bucket, key)
     for index in range(3):
         _, key = add_item(conn, memory, "photo", status="ready")
-        s3.upload_file(str(jpeg(tmp_path / f"photo-{index}.jpg")), storage.bucket(), key)
+        s3.upload_file(str(jpeg(tmp_path / f"photo-{index}.jpg")), storage.client().bucket, key)
     worker.enqueue(conn, "montage", montage_id)
 
     assert worker.run_once(conn) is True
@@ -389,16 +393,16 @@ def test_a_portrait_heic_stands_up_in_the_montage(conn, s3, memory, tmp_path, co
     ids = []
     for index in range(2):
         item_id, key = add_item(conn, memory, "photo", status="ready")
-        s3.upload_file(str(jpeg(tmp_path / f"photo-{index}.jpg")), storage.bucket(), key)
+        s3.upload_file(str(jpeg(tmp_path / f"photo-{index}.jpg")), storage.client().bucket, key)
         ids.append(item_id)
     heic_id, key = add_item(conn, memory, "photo", status="ready")
-    s3.upload_file(str(FIXTURES / "portrait-photo.heic"), storage.bucket(), key)
+    s3.upload_file(str(FIXTURES / "portrait-photo.heic"), storage.client().bucket, key)
     if copy != "no copy":
         # What the old preview made of it: ffmpeg's own reading, on its side, and big enough for the
         # canvas to be cut from without going back to the original.
         sideways = tmp_path / "sideways.jpg"
         draw("-i", str(FIXTURES / "portrait-photo.heic"), "-vf", "scale=2048:1365", str(sideways))
-        s3.upload_file(str(sideways), storage.bucket(), f"previews/{heic_id}.jpg")
+        s3.upload_file(str(sideways), storage.client().bucket, f"previews/{heic_id}.jpg")
         conn.execute(
             "UPDATE media_items SET preview_key = %s WHERE id = %s",
             (f"previews/{heic_id}.jpg", heic_id),
