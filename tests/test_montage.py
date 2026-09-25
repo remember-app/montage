@@ -16,7 +16,7 @@ from montage.video import assembly, frames, layout, library, montage, selection
 from checks import about, loudness
 from material import dark_opening_clip, hush, jpeg, long_clip, probe, tone
 from recorded import planning_over
-from rows import add_item, fetch, layout_of, order, read_montage, ready_material
+from rows import add_item, api_params, fetch, layout_of, order, read_montage, ready_material
 
 BLACK = 16  # the value `frames._exposed` already counts as black
 
@@ -382,14 +382,8 @@ def test_a_montage_ordered_with_a_story_is_cut_to_the_directors_plan(
     assert "music_note" not in said and "не из заказа" not in request["prompt"]
 
 
-def test_an_order_from_before_wishes_per_track_is_directed_without_its_note(
-    conn, s3, memory, tmp_path, monkeypatch
-):
-    """Строка `params` старого заказа: общее пожелание `music_note`, а `music_wishes` нет. Такой
-    ролик собирается, как любой другой, — и режиссёру общее пожелание не уходит: общего поля в
-    запросе нет, а приписать его одному треку значило бы соврать, к чему организатор его писал
-    (docs/jobs/montage.md, «Пожелания к трекам»). Повтор упавшего — та же строка, прочитанная
-    заново, так что одной попытки здесь хватает."""
+def planned_montage(conn, s3, memory, tmp_path, monkeypatch, params):
+    """A montage the recorded director plans over real material, ordered with `params`."""
     ids = ready_material(conn, s3, memory, tmp_path)
     for media_id, description in zip(ids, ("накрывают на стол", "вносят торт", "все за столом")):
         conn.execute(
@@ -398,28 +392,118 @@ def test_an_order_from_before_wishes_per_track_is_directed_without_its_note(
             (media_id, str(memory[0]), description, ["человек-1"]),
         )
     planning_over(monkeypatch, ids[:3])
-    montage_id = order(
+    return order(conn, memory, params)
+
+
+def plan_prompts(conn, montage_id):
+    """Every question the director was asked about this montage, as the journal kept it."""
+    return [
+        json.loads(prompt)
+        for (prompt,) in conn.execute(
+            """SELECT request->>'prompt' FROM ai_requests
+               WHERE operation = 'plan_montage' AND ref = %s ORDER BY id""",
+            (montage_id,),
+        )
+    ]
+
+
+def falls_once_in_assembly(monkeypatch):
+    assembling = assembly.assemble
+
+    def falls_once(*args, **kwargs):
+        monkeypatch.setattr(assembly, "assemble", assembling)
+        raise RuntimeError("ffmpeg fell over")
+
+    monkeypatch.setattr(assembly, "assemble", falls_once)
+
+
+@pytest.mark.parametrize(
+    "old_params",
+    [
+        {"music_track_id": "warm", "music_note": "торт — под припев"},
+        {"music_tracks": ["warm"], "music_note": "торт — под припев"},
+    ],
+    ids=["before track lists", "after lists, before wishes per track"],
+)
+def test_an_order_from_before_wishes_per_track_is_directed_without_its_note_and_again_on_retry(
+    conn, s3, memory, tmp_path, monkeypatch, old_params
+):
+    """Строка `params` старого заказа: общее пожелание `music_note`, а `music_wishes` нет. Такой
+    ролик собирается, как любой другой, — и режиссёру общее пожелание не уходит: общего поля в
+    запросе нет, а приписать его одному треку значило бы соврать, к чему организатор его писал
+    (docs/jobs/montage.md, «Пожелания к трекам»). Первая попытка падает на склейке, вторая — тот же
+    заказ, прочитанный заново, — проходит: обе спросили режиссёра одним и тем же и обе записаны."""
+    montage_id = planned_montage(
         conn,
+        s3,
         memory,
-        {
-            "target_seconds": 30,
-            "story_text": "день рождения",
-            "music_tracks": ["warm"],
-            "music_note": "торт — под припев",
-        },
+        tmp_path,
+        monkeypatch,
+        {"target_seconds": 30, "story_text": "день рождения", **old_params},
     )
+    falls_once_in_assembly(monkeypatch)
     worker.enqueue(conn, "montage", montage_id)
+    assert worker.run_once(conn) is True
+    assert read_montage(conn, montage_id)[0] == "processing", "первая попытка должна упасть"
+    conn.execute("UPDATE jobs SET run_after = now() WHERE type = 'montage'")
 
     assert worker.run_once(conn) is True
 
     status, _, _, error_text = read_montage(conn, montage_id)
     assert (status, error_text) == ("ready", None)
-    ((prompt,),) = conn.execute(
-        "SELECT request->>'prompt' FROM ai_requests WHERE operation = 'plan_montage' AND ref = %s",
-        (montage_id,),
-    ).fetchall()
-    assert "под припев" not in prompt, "общее пожелание не ушло режиссёру ни полем, ни у трека"
-    assert [set(track) for track in json.loads(prompt)["music"]] == [{"track", "seconds"}]
+    first, second = plan_prompts(conn, montage_id)
+    assert first == second, "повтор спросил режиссёра не тем же, чем первая попытка"
+    assert "под припев" not in json.dumps(first, ensure_ascii=False), (
+        "общее пожелание не ушло режиссёру ни полем, ни у трека"
+    )
+    assert "music_note" not in first
+    assert [set(track) for track in first["music"]] == [{"track", "seconds"}]
+
+
+@pytest.mark.parametrize(
+    "shelf", [["warm", "night", "road"], []], ids=["own track among the shelf's", "no music"]
+)
+def test_the_order_as_the_api_writes_it_reaches_the_director_with_each_wish_at_its_track(
+    conn, s3, memory, tmp_path, monkeypatch, shelf
+):
+    """Стык с api: `params` собран `rows.api_params` — ровно так, как его пишет api (треки всегда,
+    пожелания только непустые, обрезанные, по ключу трека из того же списка), — и по нему воркер
+    собирает ролик. В журнале запросов пожелание стоит у своего трека — своего с эмодзи, переводом
+    строки и кавычками, полочного — и нет у трека без пожелания; общего поля нет. Заказ без музыки
+    уходит с пустой дорожкой. Первая попытка падает, вторая ту же строку читает так же."""
+    own = f"music/{uuid.uuid4()}"
+    s3.upload_file(str(tone(tmp_path / "own.wav", seconds=5.0)), storage.bucket(), own)
+    awkward = 'Тихо 🎂 日本語\nвторая строка\t"в кавычках" \\'
+    if shelf:
+        tracks = [own, *shelf]
+        wishes = {own: f"  {awkward}  ", "night": "к финалу", "road": "   "}
+    else:
+        tracks, wishes = [], {}
+    params = api_params(tracks, wishes, story_text="день рождения", target_seconds=30)
+    montage_id = planned_montage(conn, s3, memory, tmp_path, monkeypatch, params)
+    falls_once_in_assembly(monkeypatch)
+    worker.enqueue(conn, "montage", montage_id)
+    assert worker.run_once(conn) is True
+    conn.execute("UPDATE jobs SET run_after = now() WHERE type = 'montage'")
+
+    assert worker.run_once(conn) is True
+
+    status, _, _, error_text = read_montage(conn, montage_id)
+    assert (status, error_text) == ("ready", None)
+    first, second = plan_prompts(conn, montage_id)
+    assert first == second
+    length = {name: round(ffmpeg.duration(library.track_file(name)), 1) for name in shelf}
+    assert first["music"] == (
+        [
+            {"track": "свой трек", "seconds": 5.0, "wish": awkward},
+            {"track": "warm", "seconds": length["warm"]},
+            {"track": "night", "seconds": length["night"], "wish": "к финалу"},
+            {"track": "road", "seconds": length["road"]},
+        ]
+        if shelf
+        else []
+    )
+    assert "music_note" not in first and "music_wishes" not in first
 
 
 def test_the_directors_film_is_held_to_the_ordered_length_the_same_way(

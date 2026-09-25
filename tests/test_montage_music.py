@@ -3,6 +3,7 @@
 См. `docs/jobs/montage.md`, «Треки». Всё живое: настоящий Postgres, бакет и ffmpeg.
 """
 
+import json
 import uuid
 
 import pytest
@@ -13,7 +14,7 @@ from montage.video import assembly, library, music, rhythm, selection
 
 from checks import about, loudness
 from material import click_track, hush, jpeg, long_clip, mute_clip, probe, tone, unopenable, video
-from rows import add_item, fetch, layout_of, order, read_montage, ready_material
+from rows import add_item, api_params, fetch, layout_of, order, read_montage, ready_material
 
 
 def pulled_to_the_beat(layout, beats, own_lengths):
@@ -434,6 +435,64 @@ def test_what_the_order_says_about_music_is_read_the_old_way_too():
     ), "список отдаётся как заказан: дубли не сливаются и порядок не меняется"
     named, refusal = music.ordered({"music_track_id": "polka"})
     assert named is None and "polka" in refusal
+
+
+# Что организатор может написать у трека: буквы разных письменностей, эмодзи, перевод строки,
+# кавычки и обратный слэш (JSON их экранирует), край api в 500 символов и втрое больше.
+AWKWARD_WISHES = [
+    'Тихо 🎂 и 日本語, é — «под тост»\nвторая строка\t"в кавычках" \\ слэш',
+    "я" * 500,
+    "🎂" * 1500,
+]
+
+
+def test_the_director_hears_each_wish_at_the_track_it_was_written_to_and_nowhere_else(tmp_path):
+    """Дорожка словами для режиссёра (`music.heard`) из заказа в том виде, в каком его пишет api:
+    пожелание стоит у своего трека и у каждого его повтора, у остальных поля `wish` нет вовсе, а
+    пожелание к треку, которого в списке нет, не приложено ни к чему и ничего не роняет. Текст
+    доходит буква в букву — пожелание не чистится и не режется: обрезает его api."""
+    own = f"music/{uuid.uuid4()}"
+    files = {own: tone(tmp_path / "own.wav", seconds=4.0)}
+
+    def heard(params):
+        named, refusal = music.ordered(params)
+        assert refusal is None
+        paths = [files.get(one) or library.track_file(one) for one in named]
+        return music.heard(named, paths, params.get("music_wishes") or {})
+
+    assert heard(api_params()) == [], "без музыки в запрос уходит пустой список"
+    assert heard(api_params(["calm"])) == [
+        {"track": "calm", "seconds": round(ffmpeg.duration(library.track_file("calm")), 1)}
+    ]
+
+    said = heard(
+        api_params(
+            [own, "calm", "road", "night"], {own: "  начало  ", "night": "к финалу", "road": "   "}
+        )
+    )
+    assert [(one["track"], one.get("wish")) for one in said] == [
+        ("свой трек", "начало"),
+        ("calm", None),
+        ("road", None),
+        ("night", "к финалу"),
+    ]
+    assert all("wish" not in one for one in said[1:3]), "у трека без пожелания поля нет"
+    assert said[0]["seconds"] == 4.0, "свой трек назван словами, а длина — его собственная"
+    assert own not in json.dumps(said), "ключ бакета в запрос не уходит"
+
+    # Повтор в списке — то же пожелание у каждого появления (api повторов не пропускает, но воркер
+    # читает и такой заказ).
+    twice = heard({"music_tracks": [own, "warm", own], "music_wishes": {own: "и в конце"}})
+    assert [one.get("wish") for one in twice] == ["и в конце", None, "и в конце"]
+
+    # Пожелание не к тому, что играет, и заказ вовсе без музыки: воркер не падает и не прикладывает.
+    stray = {"music_tracks": ["calm"], "music_wishes": {"night": "не сюда", own: "и не сюда"}}
+    assert [one.get("wish") for one in heard(stray)] == [None]
+    assert heard({"music_tracks": [], "music_wishes": {"calm": "некому"}}) == []
+
+    for wish in AWKWARD_WISHES:
+        (only,) = heard(api_params(["warm"], {"warm": wish}))
+        assert only["wish"] == wish.strip() and json.loads(json.dumps(only)) == only
 
 
 def test_a_track_nobody_has_fails_the_montage_instead_of_retrying(conn, memory):

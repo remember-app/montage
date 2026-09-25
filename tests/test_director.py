@@ -150,7 +150,27 @@ def test_two_stories_over_the_same_material_are_two_different_films(described):
     assert STORY in asked(first) and "про собаку" in asked(second)
 
 
-def test_the_music_and_what_the_organizer_asked_of_each_track_go_to_the_director(described):
+@pytest.mark.parametrize(
+    "music",
+    [
+        [
+            {"track": "warm", "seconds": 121.0},
+            {"track": "свой трек", "seconds": 48.2, "wish": "торт поставь под припев"},
+        ],
+        [],
+        [
+            {
+                "track": "calm",
+                "seconds": 90.5,
+                "wish": 'Тихо 🎂 日本語\nвторая строка\t"кавычки" \\',
+            },
+            {"track": "свой трек", "seconds": 5.0, "wish": "я" * 5000},
+            {"track": "road", "seconds": 60.0},
+        ],
+    ],
+    ids=["a wish at an own track", "no music", "awkward and very long wishes"],
+)
+def test_the_music_and_what_the_organizer_asked_of_each_track_go_to_the_director(described, music):
     """Под что соберут ролик — часть того, из чего режиссёр строит план: треки по порядку, длина
     каждого и пожелание организатора его же словами — у того трека, к которому оно написано, а не
     одной строкой на весь ролик. Дорожку от этого никто не перекраивает — она собрана до вопроса; в
@@ -159,11 +179,6 @@ def test_the_music_and_what_the_organizer_asked_of_each_track_go_to_the_director
     И всё это обязано оказаться в журнале запросов: запрос к модели сохраняется целиком (doc-03,
     «все запросы обязательно сохраняются»), а прочитать, почему ролик вышел таким, можно только там.
     """
-    music = [
-        {"track": "warm", "seconds": 121.0},
-        {"track": "свой трек", "seconds": 48.2, "wish": "торт поставь под припев"},
-    ]
-
     _, _, net = directed(described, story=STORY, music=music)
 
     ((request,),) = described.execute(
@@ -173,6 +188,9 @@ def test_the_music_and_what_the_organizer_asked_of_each_track_go_to_the_director
     said = json.loads(request["prompt"])
     assert said["music"] == music, "дорожка ушла не по порядку, без длин или пожелание не у трека"
     assert "music_note" not in said, "общего пожелания на весь ролик больше нет"
+    assert "wish" in request["instruction"] and "wish" in asked(net), (
+        "поле wish уходит модели, а объяснения, что это пожелание к треку, нет"
+    )
 
 
 def test_what_is_said_in_a_clip_goes_to_the_director_too(conn):
