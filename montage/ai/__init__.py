@@ -29,7 +29,7 @@ from psycopg.types.json import Jsonb
 
 from montage.ai import answers
 from montage.ai.prompts import DESCRIBE, PLAN, TRANSCRIBE
-from montage.ai.providers import Blob, from_env
+from montage.ai.providers import Blob, Said, from_env
 
 __all__ = ["AI", "DESCRIBE", "PLAN", "TRANSCRIBE", "Blob", "from_env"]
 
@@ -72,7 +72,8 @@ class AI:
             prompt,
             media,
             ref,
-            lambda provider: answers.as_json(provider.generate(DESCRIBE, prompt, media)),
+            lambda provider: provider.generate(DESCRIBE, prompt, media),
+            answers.as_json,
         )
 
     def transcribe_speech(self, audio, ref=None):
@@ -129,13 +130,14 @@ class AI:
                 prompt,
                 (),
                 ref,
-                lambda provider: answers.as_json(provider.generate(PLAN, prompt)),
+                lambda provider: provider.generate(PLAN, prompt),
+                answers.as_json,
             )
         )
 
     # --- the gateway itself ---
 
-    def _call(self, operation, instruction, prompt, blobs, ref, ask):
+    def _call(self, operation, instruction, prompt, blobs, ref, ask, read=None):
         """Nothing reaches a model except through here, and nothing gets back to the caller before
         the journal holds both halves of it.
 
@@ -143,6 +145,10 @@ class AI:
         a worker killed mid-call, or a provider that never answers, still leaves the record of what
         was asked — which is what the journal is for (doc-03, «все запросы обязательно
         сохраняются»).
+
+        `ask` gets the provider's `Said`; `read` makes the answer of its words, which are the answer
+        themselves without one. Apart, because words that fail to read were billed all the same:
+        the failed row keeps what the provider counted them at.
         """
         # What the journal keeps of the question. No key in it: the journal outlives every key
         # that was ever used and is read by hand in psql. No media bytes either — the material is
@@ -180,12 +186,14 @@ class AI:
             model=self.provider.model,
         )
         started = time.monotonic()
+        said = None
         try:
-            answer = ask(self.provider)
+            said = ask(self.provider)
+            answer = read(said.text) if read else said.text
         except Exception as exc:
-            self._closed(row, "failed", started, error=str(exc))
+            self._closed(row, "failed", started, said, error=str(exc))
             raise
-        self._closed(row, "answered", started, response=answer)
+        self._closed(row, "answered", started, said, response=answer)
         return answer
 
     def _born(self, operation, request, ref, *, provider, model, status, error=None):
@@ -195,16 +203,23 @@ class AI:
             (provider, model, operation, ref, status, Jsonb(request), error),
         ).fetchone()[0]
 
-    def _closed(self, row, status, started, response=None, error=None):
+    def _closed(self, row, status, started, said, response=None, error=None):
+        """`said` is None when the provider never answered — and then nothing was counted."""
+        said = said or Said("")
         self.conn.execute(
             """UPDATE ai_requests SET status = %s, response = %s, error = %s, took_ms = %s,
-                                      updated_at = now()
+                                      usage = %s, input_tokens = %s, output_tokens = %s,
+                                      total_tokens = %s, updated_at = now()
                WHERE id = %s""",
             (
                 status,
                 Jsonb(response) if response is not None else None,
                 error,
                 round((time.monotonic() - started) * 1000),
+                Jsonb(said.usage) if said.usage is not None else None,
+                said.input_tokens,
+                said.output_tokens,
+                said.total_tokens,
                 row,
             ),
         )

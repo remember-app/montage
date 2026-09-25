@@ -60,3 +60,52 @@ psql "$DATABASE_URL" -c "select created_at, provider, operation, ref, status, to
 `ai.DEPTH_LIMIT` (64 уровня; настоящий ответ — четыре-пять) становится `null`, не читаясь, — иначе
 ответ в тысячу скобок ронял разбор рекурсией уже после оплаты.
 
+### Токены — из чего складывается счёт
+
+Поставщик берёт деньги за токены, и сколько их ушло, знает только он: число приходит в его ответе и
+ложится в ту же строку журнала, что и сам ответ.
+
+| столбец | что в нём |
+|---|---|
+| `input_tokens` | вход: промпт и приложенные файлы |
+| `output_tokens` | всё, что оплачивается по цене выхода, — ответ и размышления модели. Gemini считает размышления отдельно от ответа (`total_thought_tokens`), здесь они уже прибавлены; у OpenAI они и так внутри выхода |
+| `total_tokens` | всего — как посчитал сам поставщик |
+| `usage` | счётчик поставщика целиком, как пришёл. У Gemini в нём вход по видам (`input_tokens_by_modality`: текст, картинка, видео, звук — звук дороже) и закэшированное (`total_cached_tokens`), у OpenAI — закэшированное и размышления: по ним счёт уточняется, когда цена зависит не только от трёх чисел |
+
+Пусто (`NULL`) — значит, поставщик числа не назвал, и ноль вместо «не знаем» там не ставится
+никогда: вызов пропущен (`skipped`), ответа не было (`failed` от сети или отказа поставщика, `sent`
+у воркера, умершего посреди вызова), ответ пришёл без счётчика — или это строка, записанная до того,
+как токены стали писать: на такие `python -m montage init` добавил столбцы, строк не тронув. А вот
+`failed` с числами бывает: модель ответила прозой вместо JSON — вызов не удался, но оплачен.
+Расшифровка у OpenAI моделью, которая считает секунды (`whisper-1`), оставляет три числа пустыми,
+а секунды — в `usage`.
+
+Сколько ушло за сутки, по каждому виду вызова. Модель — в группировке, потому что цена миллиона
+токенов у каждой своя, и у входа с выходом разная; `calls` больше `counted` — часть вызовов без
+счёта:
+
+```sql
+select operation, provider, model, count(*) as calls, count(total_tokens) as counted,
+       sum(input_tokens) as input, sum(output_tokens) as output, sum(total_tokens) as total
+from ai_requests
+where created_at > now() - interval '1 day'
+group by operation, provider, model
+order by operation, provider, model;
+```
+
+За одно воспоминание — разбор его кадров и все его ролики. Описание и расшифровку воркер
+заказывает раз на кадр и берёт потом для каждого ролика, так что делить их по роликам было бы
+выдумкой; `ref` у них — кадр, у режиссёра — ролик:
+
+```sh
+psql "$DATABASE_URL" -v memory=<id воспоминания> <<'SQL'
+select r.operation, count(*) as calls, sum(r.input_tokens) as input,
+       sum(r.output_tokens) as output, sum(r.total_tokens) as total
+from ai_requests r
+left join media_items mi on r.operation <> 'plan_montage' and mi.id::text = r.ref
+left join montages mo on r.operation = 'plan_montage' and mo.id::text = r.ref
+where coalesce(mi.memory_id, mo.memory_id) = :'memory'
+group by r.operation;
+SQL
+```
+

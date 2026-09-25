@@ -11,9 +11,9 @@ import logging
 import os
 import urllib.request
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from montage.ai.answers import loaded
+from montage.ai.answers import counted, loaded
 from montage.ai.prompts import TRANSCRIBE
 
 TIMEOUT_SECONDS = 180  # a model watching a clip takes its time, and the job it serves is long
@@ -50,6 +50,22 @@ class Blob:
     def summary(self):
         """What the journal keeps of it: enough to know what was sent, never the bytes."""
         return {"mime_type": self.mime_type, "bytes": len(self.data)}
+
+
+@dataclass(frozen=True)
+class Said:
+    """A model's words, and what its provider counted the call at — the bill is paid in tokens.
+
+    `usage` is the provider's own count, whole: a price can hang on more than the three numbers
+    taken out of it (audio against text, a cached prefix, seconds instead of tokens). Each of the
+    three is None when the provider did not say it — never a guess.
+    """
+
+    text: str
+    usage: dict | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None  # everything billed at the output rate, thinking included
+    total_tokens: int | None = None
 
 
 class _NoRedirects(urllib.request.HTTPRedirectHandler):
@@ -97,11 +113,11 @@ class Provider:
         return loaded(self.transport(request))
 
     def generate(self, instruction, prompt, blobs=(), as_json=True):
-        """The model's answer as text, with `blobs` attached to the prompt."""
+        """The model's answer as `Said`, with `blobs` attached to the prompt."""
         raise NotImplementedError
 
     def transcribe(self, audio):
-        """The speech in one audio file as plain text; empty when there is none."""
+        """The speech in one audio file as `Said` plain text; empty when there is none."""
         raise NotImplementedError
 
 
@@ -135,10 +151,26 @@ class Gemini(Provider):
             method="POST",
             headers={"x-goog-api-key": self.key, "Content-Type": "application/json"},
         )
-        return _gemini_text(self._answered(request))
+        return _gemini_said(self._answered(request))
 
     def transcribe(self, audio):
-        return self.generate(TRANSCRIBE, "", [audio], as_json=False).strip()
+        said = self.generate(TRANSCRIBE, "", [audio], as_json=False)
+        return replace(said, text=said.text.strip())
+
+
+def _gemini_said(payload):
+    usage = _usage(payload)
+    output = counted(usage.get("total_output_tokens"))
+    thought = counted(usage.get("total_thought_tokens")) or 0
+    return Said(
+        _gemini_text(payload),
+        usage or None,
+        counted(usage.get("total_input_tokens")),
+        # Gemini counts thinking apart from the answer and bills both at the output rate
+        # (interactions/thinking); OpenAI's output has its reasoning inside already.
+        None if output is None else counted(output + thought),
+        counted(usage.get("total_tokens")),
+    )
 
 
 def _gemini_text(payload):
@@ -192,7 +224,8 @@ class OpenAI(Provider):
             method="POST",
             headers={"Authorization": f"Bearer {self.key}", "Content-Type": "application/json"},
         )
-        return _openai_text(self._answered(request))
+        payload = self._answered(request)
+        return _openai_said(_openai_text(payload), payload)
 
     def transcribe(self, audio):
         content_type, body = _multipart(
@@ -207,7 +240,21 @@ class OpenAI(Provider):
             method="POST",
             headers={"Authorization": f"Bearer {self.key}", "Content-Type": content_type},
         )
-        return self._answered(request).get("text", "").strip()
+        payload = self._answered(request)
+        return _openai_said(payload.get("text", "").strip(), payload)
+
+
+def _openai_said(text, payload):
+    """The same three counts in a response and in a transcription — the latter only when its model
+    bills in tokens and not in seconds."""
+    usage = _usage(payload)
+    tokens = (counted(usage.get(key)) for key in ("input_tokens", "output_tokens", "total_tokens"))
+    return Said(text, usage or None, *tokens)
+
+
+def _usage(payload):
+    usage = payload.get("usage")
+    return usage if isinstance(usage, dict) else {}
 
 
 def _openai_image(blob):

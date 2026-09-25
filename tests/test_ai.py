@@ -46,7 +46,7 @@ def test_gemini_attaches_the_photo_and_asks_for_json():
 
     answered = providers.Gemini("test-key", transport=net).generate("инструкция", "вопрос", [PHOTO])
 
-    assert json.loads(answered)["cast"] == ["человек-1", "животное-1"]
+    assert json.loads(answered.text)["cast"] == ["человек-1", "животное-1"]
     sent = net.sent
     assert sent.full_url == providers.Gemini.ENDPOINT
     assert sent.get_header("X-goog-api-key") == "test-key"
@@ -76,7 +76,7 @@ def test_gemini_reads_the_answer_out_of_the_steps_when_there_is_no_shortcut():
     net = Recorded("gemini_transcribe.json")
 
     assert "output_text" not in json.loads(net.answer)
-    assert providers.Gemini("test-key", transport=net).transcribe(SPEECH).startswith("Ну что")
+    assert providers.Gemini("test-key", transport=net).transcribe(SPEECH).text.startswith("Ну что")
     assert body(net.sent)["input"][1]["mime_type"] == "audio/m4a"
 
 
@@ -85,7 +85,7 @@ def test_openai_sends_the_photo_as_a_data_uri_and_the_instruction_apart():
 
     answered = providers.OpenAI("test-key", transport=net).generate("инструкция", "вопрос", [PHOTO])
 
-    assert json.loads(answered)["cast"] == ["человек-1", "животное-1"]
+    assert json.loads(answered.text)["cast"] == ["человек-1", "животное-1"]
     sent = net.sent
     assert sent.full_url == providers.OpenAI.ENDPOINT
     assert sent.get_header("Authorization") == "Bearer test-key"
@@ -111,7 +111,7 @@ def test_openai_will_not_be_handed_a_clip():
 def test_openai_uploads_speech_as_a_file():
     net = Recorded("openai_transcribe.json")
 
-    assert providers.OpenAI("test-key", transport=net).transcribe(SPEECH).startswith("Ну что")
+    assert providers.OpenAI("test-key", transport=net).transcribe(SPEECH).text.startswith("Ну что")
 
     sent = net.sent
     assert sent.full_url == providers.OpenAI.TRANSCRIPTIONS
@@ -227,6 +227,12 @@ def journalled(conn):
     ).fetchall()
 
 
+def counts(conn):
+    return conn.execute(
+        "SELECT input_tokens, output_tokens, total_tokens, usage FROM ai_requests ORDER BY id"
+    ).fetchall()
+
+
 def test_a_call_and_its_answer_are_both_in_the_journal(conn):
     net = Recorded("gemini_describe.json")
     gateway = ai.AI(conn, providers.Gemini("test-key", transport=net))
@@ -272,6 +278,7 @@ def test_a_call_that_failed_is_in_the_journal_too(conn):
     assert (status, response) == ("failed", None)
     assert "429" in error
     assert request["attached"] == [{"mime_type": "audio/m4a", "bytes": len(SPEECH.data)}]
+    assert counts(conn) == [(None, None, None, None)], "no answer, nothing counted"
 
 
 def test_an_answer_that_is_not_json_fails_the_call_and_says_what_came_instead(conn):
@@ -431,6 +438,137 @@ def test_the_journal_keeps_neither_the_key_nor_the_material(conn):
 
     gateway.describe_media([PHOTO])
 
-    written = json.dumps(journalled(conn), ensure_ascii=False)
+    (written,) = conn.execute("SELECT to_jsonb(ai_requests)::text FROM ai_requests").fetchone()
     assert "test-key" not in written
     assert base64.b64encode(PHOTO.data).decode() not in written
+
+
+# --- what it cost -----------------------------------------------------------
+
+
+ASKED = {
+    "describe_media": lambda gateway: gateway.describe_media([PHOTO]),
+    "transcribe_speech": lambda gateway: gateway.transcribe_speech(SPEECH),
+    "plan_montage": lambda gateway: gateway.plan_montage([{"media_id": "m-1"}]),
+}
+
+
+@pytest.mark.parametrize(
+    "provider, operation, fixture, counted",
+    [
+        (providers.Gemini, "describe_media", "gemini_describe.json", (1170, 61, 1231)),
+        (providers.Gemini, "transcribe_speech", "gemini_transcribe.json", (886, 17, 903)),
+        # 124 tokens of answer and 96 of thinking, both billed at the output rate.
+        (providers.Gemini, "plan_montage", "gemini_plan.json", (402, 220, 622)),
+        (providers.OpenAI, "describe_media", "openai_describe.json", (1146, 48, 1194)),
+        (providers.OpenAI, "transcribe_speech", "openai_transcribe.json", (112, 19, 131)),
+        (providers.OpenAI, "plan_montage", "openai_plan.json", (1204, 214, 1418)),
+    ],
+)
+def test_what_the_provider_counted_is_on_the_row_next_to_the_answer(
+    conn, provider, operation, fixture, counted
+):
+    """The bill is in tokens, and only the provider knows how many: its count goes on the same row
+    as the answer, in three numbers to add up and whole as it came."""
+    net = Recorded(fixture)
+
+    ASKED[operation](ai.AI(conn, provider("test-key", transport=net)))
+
+    ((status, response, *tokens, usage),) = conn.execute(
+        """SELECT status, response, input_tokens, output_tokens, total_tokens, usage
+           FROM ai_requests"""
+    ).fetchall()
+    assert status == "answered" and response, "the answer is on the row as before"
+    assert tuple(tokens) == counted
+    assert usage == json.loads(net.answer)["usage"]
+
+
+def test_an_answer_that_counts_nothing_leaves_the_count_empty(conn):
+    """Empty, not zero: a zero would be a count nobody made."""
+    gateway = ai.AI(conn, providers.Gemini("test-key", transport=saying('{"description": "кадр"}')))
+
+    gateway.describe_media([PHOTO])
+
+    assert counts(conn) == [(None, None, None, None)]
+
+
+def test_a_transcription_billed_in_seconds_keeps_the_seconds_and_no_tokens(conn):
+    """OpenAI's whisper counts audio in seconds: no tokens to take out, the count itself kept."""
+    usage = {"type": "duration", "seconds": 9}
+    answer = json.dumps({"text": "Ну что", "usage": usage}).encode()
+    gateway = ai.AI(conn, providers.OpenAI("test-key", transport=lambda request: answer))
+
+    gateway.transcribe_speech(SPEECH)
+
+    assert counts(conn) == [(None, None, None, usage)]
+
+
+@pytest.mark.parametrize(
+    "number, kept",
+    [
+        ("1170", None),
+        (1170.5, None),
+        (-1, None),
+        (True, None),
+        (2**31, None),
+        (2**31 - 1, 2**31 - 1),
+    ],
+)
+def test_a_count_that_is_no_count_is_left_empty_and_the_answer_kept(conn, number, kept):
+    """A count is the provider's word, not a trusted one. Past what the journal holds it would fail
+    the UPDATE of a call already paid for — so it goes, and the answer and the other counts stay."""
+    usage = {"total_input_tokens": number, "total_output_tokens": 61, "total_tokens": 1231}
+    answer = json.dumps({"output_text": '{"description": "кадр"}', "usage": usage}).encode()
+    gateway = ai.AI(conn, providers.Gemini("test-key", transport=lambda request: answer))
+
+    assert gateway.describe_media([PHOTO]) == {"description": "кадр"}
+
+    ((*tokens, _),) = counts(conn)
+    assert tokens == [kept, 61, 1231]
+
+
+def test_thinking_that_adds_the_output_past_what_the_journal_holds_is_no_count(conn):
+    usage = {"total_output_tokens": answers.COUNT_LIMIT, "total_thought_tokens": 1}
+    answer = json.dumps({"output_text": '{"description": "кадр"}', "usage": usage}).encode()
+    gateway = ai.AI(conn, providers.Gemini("test-key", transport=lambda request: answer))
+
+    gateway.describe_media([PHOTO])
+
+    assert counts(conn) == [(None, None, None, usage)]
+
+
+def test_prose_is_a_failed_call_that_was_paid_for_and_its_count_is_kept(conn):
+    usage = {"total_input_tokens": 1170, "total_output_tokens": 9, "total_tokens": 1179}
+    answer = json.dumps({"output_text": "Конечно! Вот описание кадра:", "usage": usage}).encode()
+    gateway = ai.AI(conn, providers.Gemini("test-key", transport=lambda request: answer))
+
+    with pytest.raises(RuntimeError, match="Конечно"):
+        gateway.describe_media([PHOTO])
+
+    ((*_, status, _, _, _, _),) = journalled(conn)
+    assert status == "failed"
+    assert counts(conn) == [(1170, 9, 1179, usage)]
+
+
+def test_init_brings_an_older_journal_up_to_date_and_keeps_its_rows(conn):
+    """A database the worker ran on before calls were counted: `init` adds the columns, empty on
+    the rows already there and nothing else of them changed — and a second `init` is a no-op."""
+    conn.execute(
+        """ALTER TABLE ai_requests DROP COLUMN usage, DROP COLUMN input_tokens,
+                                   DROP COLUMN output_tokens, DROP COLUMN total_tokens"""
+    )
+    conn.execute(
+        """INSERT INTO ai_requests (provider, model, operation, ref, status, request, response,
+                                    took_ms)
+           VALUES ('gemini', 'gemini-3.8-flash', 'describe_media', 'media-7', 'answered',
+                   '{"prompt": "вопрос"}', '{"description": "кадр"}', 2300)"""
+    )
+    before = conn.execute("SELECT * FROM ai_requests").fetchall()
+
+    worker.init_schema(conn)
+    worker.init_schema(conn)
+
+    assert conn.execute("SELECT * FROM ai_requests").fetchall() == [
+        (*row, None, None, None, None) for row in before
+    ]
+    assert counts(conn) == [(None, None, None, None)]

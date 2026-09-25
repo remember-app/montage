@@ -104,6 +104,19 @@ def _holdable(value):
         return None
 
 
+# The journal keeps a count in an `integer`; one past it would fail the UPDATE after the call is
+# paid for.
+COUNT_LIMIT = 2**31 - 1
+
+
+def counted(number):
+    """A token count off the provider's envelope — a whole number the journal can hold, or none. A
+    string, a fraction or a negative there is no count, and not worth failing an answer over."""
+    if isinstance(number, bool) or not isinstance(number, int):
+        return None
+    return number if 0 <= number <= COUNT_LIMIT else None
+
+
 # --- чтение плана режиссёра -------------------------------------------------
 # Ответ модели — недоверенный ввод, а слова режиссёра увидят все участники воспоминания и рамку
 # «куда смотрит» приложение нарисует поверх кадра. Поэтому план разбирается здесь, у самой двери, и
