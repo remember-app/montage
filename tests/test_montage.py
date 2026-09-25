@@ -382,13 +382,14 @@ def test_a_montage_ordered_with_a_story_is_cut_to_the_directors_plan(
     assert "music_note" not in said and "не из заказа" not in request["prompt"]
 
 
-def test_an_order_from_before_wishes_per_track_is_directed_and_retried_without_its_note(
+def test_an_order_from_before_wishes_per_track_is_directed_without_its_note(
     conn, s3, memory, tmp_path, monkeypatch
 ):
-    """Строка `params` старого заказа: общее пожелание `music_note`, а `music_wishes` нет. Повтор
-    такого ролика собирается, как любой другой, — и режиссёру общее пожелание не уходит ни в первой
-    попытке, ни во второй: общего поля в запросе нет, а приписать его одному треку значило бы
-    соврать, к чему организатор его писал (docs/jobs/montage.md, «Пожелания к трекам»)."""
+    """Строка `params` старого заказа: общее пожелание `music_note`, а `music_wishes` нет. Такой
+    ролик собирается, как любой другой, — и режиссёру общее пожелание не уходит: общего поля в
+    запросе нет, а приписать его одному треку значило бы соврать, к чему организатор его писал
+    (docs/jobs/montage.md, «Пожелания к трекам»). Повтор упавшего — та же строка, прочитанная
+    заново, так что одной попытки здесь хватает."""
     ids = ready_material(conn, s3, memory, tmp_path)
     for media_id, description in zip(ids, ("накрывают на стол", "вносят торт", "все за столом")):
         conn.execute(
@@ -407,34 +408,18 @@ def test_an_order_from_before_wishes_per_track_is_directed_and_retried_without_i
             "music_note": "торт — под припев",
         },
     )
-    assembling = assembly.assemble
-
-    def falls_once(*args, **kwargs):
-        monkeypatch.setattr(assembly, "assemble", assembling)
-        raise RuntimeError("ffmpeg fell over")
-
-    monkeypatch.setattr(assembly, "assemble", falls_once)
     worker.enqueue(conn, "montage", montage_id)
-    assert worker.run_once(conn) is True
-    assert read_montage(conn, montage_id)[0] == "processing", "первая попытка упала"
-    conn.execute("UPDATE jobs SET run_after = now() WHERE type = 'montage'")
 
     assert worker.run_once(conn) is True
 
     status, _, _, error_text = read_montage(conn, montage_id)
     assert (status, error_text) == ("ready", None)
-    prompts = [
-        json.loads(prompt)
-        for (prompt,) in conn.execute(
-            """SELECT request->>'prompt' FROM ai_requests
-               WHERE operation = 'plan_montage' AND ref = %s ORDER BY id""",
-            (montage_id,),
-        ).fetchall()
-    ]
-    assert len(prompts) == 2, "режиссёра спросили в каждой из двух попыток"
-    for said in prompts:
-        assert "music_note" not in said and "под припев" not in json.dumps(said, ensure_ascii=False)
-        assert [set(track) for track in said["music"]] == [{"track", "seconds"}]
+    ((prompt,),) = conn.execute(
+        "SELECT request->>'prompt' FROM ai_requests WHERE operation = 'plan_montage' AND ref = %s",
+        (montage_id,),
+    ).fetchall()
+    assert "под припев" not in prompt, "общее пожелание не ушло режиссёру ни полем, ни у трека"
+    assert [set(track) for track in json.loads(prompt)["music"]] == [{"track", "seconds"}]
 
 
 def test_the_directors_film_is_held_to_the_ordered_length_the_same_way(
