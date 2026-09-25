@@ -11,7 +11,7 @@
 set -e
 cd "$(dirname "$0")"
 
-docker build -t montage-tests .
+docker build --target test -t montage-tests .
 
 exec docker run --rm \
   --add-host=host.docker.internal:host-gateway \
