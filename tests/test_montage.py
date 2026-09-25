@@ -240,6 +240,24 @@ def test_a_layout_that_cannot_be_written_does_not_cost_the_montage(conn, memory)
     assert layout_of(conn, gone) == []
 
 
+def test_a_montage_that_is_ready_already_is_not_assembled_again(conn, memory):
+    """Its job run a second time, because the worker that made it died before marking the job done
+    (`worker.reap`): the video the organizer has stays the one they have. There is no material in
+    this memory at all — a second assembly would have failed the montage for the lack of it."""
+    montage_id = order(conn, memory, {"target_seconds": 30})
+    video_key = f"montages/{montage_id}.mp4"
+    conn.execute(
+        "UPDATE montages SET status = 'ready', video_key = %s WHERE id = %s",
+        (video_key, montage_id),
+    )
+    job_id = worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    assert read_montage(conn, montage_id)[:2] == ("ready", video_key)
+    assert conn.execute("SELECT status FROM jobs WHERE id = %s", (job_id,)).fetchone()[0] == "done"
+
+
 def test_a_montage_ordered_portrait_is_assembled_the_other_way_up(conn, s3, memory, tmp_path):
     """The organizer asked for a video to watch on a phone. The same material, the same length, the
     same everything else — cut into 1080×1920 instead of 1920×1080. The numbers are written out

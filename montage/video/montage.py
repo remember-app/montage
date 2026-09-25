@@ -54,13 +54,22 @@ log = logging.getLogger("montage.montage")
 def montage(conn, ref):
     """One ordered video: the memory's material out of R2, the assembled file back in, the row
     to `ready` — and then the api, so the phones hear about it."""
-    row = conn.execute("SELECT memory_id, params FROM montages WHERE id = %s", (ref,)).fetchone()
+    row = conn.execute(
+        "SELECT memory_id, params, status FROM montages WHERE id = %s", (ref,)
+    ).fetchone()
     if row is None:
         # The memory was deleted while the job waited, and the montage with it. Nothing to assemble
         # and nothing wrong: retrying would only fail three times.
         log.info("montage %s is gone, nothing to assemble", ref)
         return
-    memory_id, params = row
+    memory_id, params, status = row
+    if status == "ready":
+        # Its job run a second time: the worker that made it died between marking the video ready
+        # and marking the job done (`worker.reap`). Assembling it again would swap the video the
+        # organizer may have watched already for another cut of it, and push it twice. No order of
+        # theirs comes here: «повторить» only takes a failed one (the api, `montages.ts`).
+        log.info("montage %s is ready already, nothing to assemble", ref)
+        return
     params = params or {}
     conn.execute(
         "UPDATE montages SET status = 'processing', updated_at = now() WHERE id = %s", (ref,)
