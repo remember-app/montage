@@ -46,7 +46,7 @@ def test_a_frame_is_measured_the_way_it_is_seen(
     A file turned by its metadata is the ordinary case — every photograph taken with the phone on
     its side, and every clip shot holding it upright."""
     item_id, key = add_item(conn, memory, kind)
-    s3.upload_file(str(draw(tmp_path / name)), storage.bucket(), key)
+    s3.upload_file(str(draw(tmp_path / name)), storage.client().bucket, key)
     worker.enqueue(conn, "media_frame_info", item_id)
 
     assert worker.run_once(conn) is True
@@ -58,7 +58,7 @@ def test_a_file_with_no_picture_in_it_is_left_unmeasured(conn, s3, memory, tmp_p
     """Nothing to measure is not a failure: the two columns stay empty, the job is done, and the
     sheet leaves the line out — `kind` being only the phone's word for what it sent."""
     item_id, key = add_item(conn, memory, "photo")
-    s3.upload_file(str(sound(tmp_path / "original.m4a")), storage.bucket(), key)
+    s3.upload_file(str(sound(tmp_path / "original.m4a")), storage.client().bucket, key)
     job_id = worker.enqueue(conn, "media_frame_info", item_id)
 
     assert worker.run_once(conn) is True
@@ -72,7 +72,7 @@ def test_a_file_with_no_picture_in_it_is_left_unmeasured(conn, s3, memory, tmp_p
 def test_a_photograph_brings_its_camera_and_its_place(conn, s3, memory, fixture):
     """HEIC beside JPEG on purpose: HEIC is what an iPhone actually uploads."""
     item_id, key = add_item(conn, memory, "photo")
-    s3.upload_file(str(FIXTURES / fixture), storage.bucket(), key)
+    s3.upload_file(str(FIXTURES / fixture), storage.client().bucket, key)
     worker.enqueue(conn, "media_frame_info", item_id)
 
     assert worker.run_once(conn) is True
@@ -86,7 +86,7 @@ def test_a_photograph_brings_its_camera_and_its_place(conn, s3, memory, fixture)
 
 def test_a_clip_brings_its_camera_and_its_place_off_the_container(conn, s3, memory, tmp_path):
     item_id, key = add_item(conn, memory, "video")
-    s3.upload_file(str(phone_video(tmp_path / "original.mp4")), storage.bucket(), key)
+    s3.upload_file(str(phone_video(tmp_path / "original.mp4")), storage.client().bucket, key)
     worker.enqueue(conn, "media_frame_info", item_id)
 
     assert worker.run_once(conn) is True
@@ -105,7 +105,7 @@ def test_a_file_that_carries_nothing_leaves_the_camera_empty(
     through a messenger. Reading it is not a failure and the job says so — nor is a file that is
     no photograph at all, `kind` being only the phone's word for what it sent."""
     item_id, key = add_item(conn, memory, "photo")
-    s3.upload_file(str(draw(tmp_path / name)), storage.bucket(), key)
+    s3.upload_file(str(draw(tmp_path / name)), storage.client().bucket, key)
     job_id = worker.enqueue(conn, "media_frame_info", item_id)
 
     assert worker.run_once(conn) is True
@@ -117,7 +117,7 @@ def test_a_file_that_carries_nothing_leaves_the_camera_empty(
 
 def test_a_finished_preview_asks_for_the_camera_to_be_read(conn, s3, memory, tmp_path):
     item_id, key = add_item(conn, memory, "photo")
-    s3.upload_file(str(jpeg(tmp_path / "original.jpg")), storage.bucket(), key)
+    s3.upload_file(str(jpeg(tmp_path / "original.jpg")), storage.client().bucket, key)
     worker.enqueue(conn, "media_preview", item_id)
 
     assert worker.run_once(conn) is True
@@ -129,7 +129,7 @@ def test_the_log_says_what_was_read_and_not_where_it_was(conn, s3, memory, caplo
     """The place is where somebody was. The sheet shows it to the members of one memory; the log
     is read by whoever runs the worker and kept by whatever collects it."""
     item_id, key = add_item(conn, memory, "photo")
-    s3.upload_file(str(FIXTURES / "exif-photo.jpg"), storage.bucket(), key)
+    s3.upload_file(str(FIXTURES / "exif-photo.jpg"), storage.client().bucket, key)
     worker.enqueue(conn, "media_frame_info", item_id)
 
     with caplog.at_level(logging.INFO):
@@ -156,7 +156,7 @@ def test_a_place_no_globe_can_hold_is_no_place(conn, s3, memory, tmp_path, place
     point (0, 0) that a camera without a fix writes in its stead — is left out like any other thing
     the file does not say, and the camera beside it is still read."""
     item_id, key = add_item(conn, memory, "video")
-    s3.upload_file(str(phone_video(tmp_path / "original.mp4", place)), storage.bucket(), key)
+    s3.upload_file(str(phone_video(tmp_path / "original.mp4", place)), storage.client().bucket, key)
     worker.enqueue(conn, "media_frame_info", item_id)
 
     assert worker.run_once(conn) is True
@@ -169,7 +169,9 @@ def test_numbers_a_camera_wrote_that_nothing_can_use_are_left_out(conn, s3, memo
     """An f-number over zero is NaN, and NaN goes into a double column and out to the sheet as if
     it were a reading. The same file's latitude is two hundred degrees."""
     item_id, key = add_item(conn, memory, "photo")
-    s3.upload_file(str(photo_with_odd_numbers(tmp_path / "original.jpg")), storage.bucket(), key)
+    s3.upload_file(
+        str(photo_with_odd_numbers(tmp_path / "original.jpg")), storage.client().bucket, key
+    )
     job_id = worker.enqueue(conn, "media_frame_info", item_id)
 
     assert worker.run_once(conn) is True
@@ -203,7 +205,7 @@ def test_a_photo_that_claims_to_be_a_gigapixel_is_left_unmeasured(conn, s3, memo
     """The header of a decompression bomb says what nobody will ever decode. Nothing is decoded
     for it — and the size that comes back is none, not a size of zero."""
     item_id, key = add_item(conn, memory, "photo")
-    s3.upload_file(str(gigantic_photo(tmp_path / "original.jpg")), storage.bucket(), key)
+    s3.upload_file(str(gigantic_photo(tmp_path / "original.jpg")), storage.client().bucket, key)
     job_id = worker.enqueue(conn, "media_frame_info", item_id)
 
     assert worker.run_once(conn) is True
@@ -229,7 +231,7 @@ def test_a_camera_name_is_made_a_short_line_of_text(conn, s3, memory, tmp_path, 
     exif[ExifTags.Base.Model] = model
     Image.new("RGB", (64, 48), "gray").save(tmp_path / "original.jpg", exif=exif)
     item_id, key = add_item(conn, memory, "photo")
-    s3.upload_file(str(tmp_path / "original.jpg"), storage.bucket(), key)
+    s3.upload_file(str(tmp_path / "original.jpg"), storage.client().bucket, key)
     job_id = worker.enqueue(conn, "media_frame_info", item_id)
 
     assert worker.run_once(conn) is True
@@ -243,7 +245,7 @@ def test_a_png_is_measured_by_ffprobe_and_carries_no_camera(conn, s3, memory, tm
     """PNG is left to ffprobe: Pillow decodes the whole picture to answer `getexif()` on one, and a
     camera does not write PNG in any case."""
     item_id, key = add_item(conn, memory, "photo")
-    s3.upload_file(str(jpeg(tmp_path / "original.png")), storage.bucket(), key)
+    s3.upload_file(str(jpeg(tmp_path / "original.png")), storage.client().bucket, key)
     worker.enqueue(conn, "media_frame_info", item_id)
 
     assert worker.run_once(conn) is True
@@ -256,7 +258,7 @@ def test_a_photo_that_crashes_libheif_does_not_take_the_worker_with_it(conn, s3,
     """Opening this HEIC segfaults the library. It is read in a process of its own, so the job ends
     — `done`, with nothing read — instead of the worker ending with it."""
     item_id, key = add_item(conn, memory, "photo")
-    s3.upload_file(str(crashing_heic(tmp_path / "original.heic")), storage.bucket(), key)
+    s3.upload_file(str(crashing_heic(tmp_path / "original.heic")), storage.client().bucket, key)
     job_id = worker.enqueue(conn, "media_frame_info", item_id)
 
     assert worker.run_once(conn) is True
@@ -267,7 +269,7 @@ def test_a_photo_that_crashes_libheif_does_not_take_the_worker_with_it(conn, s3,
 
 def test_a_portrait_heic_is_measured_the_way_it_is_seen(conn, s3, memory):
     item_id, key = add_item(conn, memory, "photo")
-    s3.upload_file(str(FIXTURES / "portrait-photo.heic"), storage.bucket(), key)
+    s3.upload_file(str(FIXTURES / "portrait-photo.heic"), storage.client().bucket, key)
     worker.enqueue(conn, "media_frame_info", item_id)
 
     assert worker.run_once(conn) is True

@@ -54,12 +54,12 @@ def media_screening(conn, ref):
         #
         # A video stays on its original whatever copy exists beside it: its preview is a 720p
         # re-encode, which smooths away the very edges sharpness is measured in.
-        s3, looked_at = storage.client(), None
+        looked_at = None
         if kind == "photo" and preview_key:
-            looked_at = storage.large_copy(s3, preview_key, workdir / "large.jpg")
+            looked_at = storage.large_copy(preview_key, workdir / "large.jpg")
         if looked_at is None:
             looked_at = workdir / "original"
-            s3.download_file(storage.bucket(), original_key, str(looked_at))
+            storage.download(original_key, looked_at)
         judged = selection.judge(selection.Piece(media_id=str(ref), kind=kind, path=looked_at))
 
     # `false` and not `null` for a frame that passed: null is «the analysis has not looked yet», and

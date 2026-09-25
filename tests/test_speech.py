@@ -50,7 +50,7 @@ def silent_video(path):
 def ready_clip(conn, s3, memory, tmp_path, make=video):
     """A clip as the gallery holds it: the row `ready`, the original in the bucket."""
     item_id, key = add_item(conn, memory, "video", status="ready")
-    s3.upload_file(str(make(tmp_path / "original.mp4")), storage.bucket(), key)
+    s3.upload_file(str(make(tmp_path / "original.mp4")), storage.client().bucket, key)
     return item_id
 
 
@@ -274,7 +274,7 @@ def test_a_video_that_became_ready_queues_its_own_transcription(
     original = (
         video(tmp_path / "original.mp4") if kind == "video" else jpeg(tmp_path / "original.jpg")
     )
-    s3.upload_file(str(original), storage.bucket(), key)
+    s3.upload_file(str(original), storage.client().bucket, key)
     worker.enqueue(conn, "media_preview", item_id)
 
     assert worker.run_once(conn) is True

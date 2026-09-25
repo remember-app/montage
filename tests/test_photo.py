@@ -38,7 +38,7 @@ def test_a_preview_is_made_all_the_same_when_the_reader_dies(conn, s3, memory, r
     gone, ffmpeg gets the original as it did before there was one."""
     reader_script.write_text("import os, signal\nos.kill(os.getpid(), signal.SIGSEGV)\n")
     item_id, key = add_item(conn, memory, "photo")
-    s3.upload_file(str(FIXTURES / "portrait-photo.heic"), storage.bucket(), key)
+    s3.upload_file(str(FIXTURES / "portrait-photo.heic"), storage.client().bucket, key)
     worker.enqueue(conn, "media_preview", item_id)
 
     assert worker.run_once(conn) is True

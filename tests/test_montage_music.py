@@ -41,14 +41,14 @@ def test_a_montage_is_cut_to_the_beat_of_the_track_the_organizer_uploaded(
     moved.
     """
     track_key = f"music/{uuid.uuid4()}.wav"
-    s3.upload_file(str(click_track(tmp_path / "click.wav")), storage.bucket(), track_key)
+    s3.upload_file(str(click_track(tmp_path / "click.wav")), storage.client().bucket, track_key)
     montage_id = order(conn, memory, {"target_seconds": 30, "music_track_key": track_key})
     # The clip first (oldest): its file runs three seconds and the pieces after it are stills.
     _, key = add_item(conn, memory, "video", status="ready", age_hours=5)
-    s3.upload_file(str(video(tmp_path / "clip.mp4")), storage.bucket(), key)
+    s3.upload_file(str(video(tmp_path / "clip.mp4")), storage.client().bucket, key)
     for index in range(3):
         _, key = add_item(conn, memory, "photo", status="ready")
-        s3.upload_file(str(jpeg(tmp_path / f"photo-{index}.jpg")), storage.bucket(), key)
+        s3.upload_file(str(jpeg(tmp_path / f"photo-{index}.jpg")), storage.client().bucket, key)
     worker.enqueue(conn, "montage", montage_id)
 
     assert worker.run_once(conn) is True
@@ -79,7 +79,7 @@ def test_an_uploaded_track_with_no_music_in_it_fails_the_montage_at_once_and_say
         "a photograph": (jpeg, "track.jpg"),
         "a clip shot with the microphone off": (mute_clip, "track.mp4"),
     }[bad_track]
-    s3.upload_file(str(made(tmp_path / name)), storage.bucket(), track_key)
+    s3.upload_file(str(made(tmp_path / name)), storage.client().bucket, track_key)
     montage_id = order(conn, memory, {"music_tracks": ["warm", track_key]})
     ready_material(conn, s3, memory, tmp_path)
     job_id = worker.enqueue(conn, "montage", montage_id)
@@ -142,25 +142,18 @@ def test_an_uploaded_track_the_bucket_did_not_hand_over_is_retried_like_any_othe
     """Трек в бакете есть, а хранилище его не отдало: такой сбой проходит сам, так что это не отказ,
     а обычный повтор очереди — ролик ждёт следующей попытки, а не падает с причиной про трек."""
     track_key = f"music/{uuid.uuid4()}"
-    s3.upload_file(str(tone(tmp_path / "own.wav")), storage.bucket(), track_key)
+    s3.upload_file(str(tone(tmp_path / "own.wav")), storage.client().bucket, track_key)
     montage_id = order(conn, memory, {"music_tracks": ["warm", track_key]})
     ready_material(conn, s3, memory, tmp_path)
     job_id = worker.enqueue(conn, "montage", montage_id)
-    real = storage.client
+    download = storage.download
 
-    def flaky():
-        client = real()
-        download = client.download_file
+    def flaky(key, into):
+        if key == track_key:
+            raise failure
+        return download(key, into)
 
-        def download_file(bucket, key, *args, **kwargs):
-            if key == track_key:
-                raise failure
-            return download(bucket, key, *args, **kwargs)
-
-        client.download_file = download_file
-        return client
-
-    monkeypatch.setattr(storage, "client", flaky)
+    monkeypatch.setattr(storage, "download", flaky)
     encoded = []
     monkeypatch.setattr(assembly, "assemble", lambda *args, **kwargs: encoded.append(args))
 
@@ -209,15 +202,15 @@ def test_a_montage_under_a_list_of_tracks_is_cut_to_the_beat_of_the_whole_soundt
     которую собрали ролик.
     """
     track_key = f"music/{uuid.uuid4()}.wav"
-    s3.upload_file(str(click_track(tmp_path / "click.wav")), storage.bucket(), track_key)
+    s3.upload_file(str(click_track(tmp_path / "click.wav")), storage.client().bucket, track_key)
     montage_id = order(conn, memory, {"target_seconds": 30, "music_tracks": [track_key, "warm"]})
     # Клип первым (он старше всех). Набирать заказанные тридцать секунд тут нечем — клип и так
     # взят целиком, а фотографии не растягиваются (`selection.stretch`).
     _, key = add_item(conn, memory, "video", status="ready", age_hours=5)
-    s3.upload_file(str(video(tmp_path / "clip.mp4")), storage.bucket(), key)
+    s3.upload_file(str(video(tmp_path / "clip.mp4")), storage.client().bucket, key)
     for index in range(3):
         _, key = add_item(conn, memory, "photo", status="ready")
-        s3.upload_file(str(jpeg(tmp_path / f"photo-{index}.jpg")), storage.bucket(), key)
+        s3.upload_file(str(jpeg(tmp_path / f"photo-{index}.jpg")), storage.client().bucket, key)
     worker.enqueue(conn, "montage", montage_id)
 
     assert worker.run_once(conn) is True
@@ -247,7 +240,7 @@ def test_a_track_shorter_or_longer_than_the_video_plays_exactly_as_long_as_the_p
     never told how long to play, the montage is cut to the material. A tone has no tempo, so the
     pieces stay as chosen: nine seconds either way, and the sound lasts to the last of them."""
     own = f"music/{uuid.uuid4()}.wav"
-    s3.upload_file(str(tone(tmp_path / "own.wav", seconds=seconds)), storage.bucket(), own)
+    s3.upload_file(str(tone(tmp_path / "own.wav", seconds=seconds)), storage.client().bucket, own)
     montage_id = order(conn, memory, {"target_seconds": 30, "music_tracks": [own]})
     ready_material(conn, s3, memory, tmp_path)
     worker.enqueue(conn, "montage", montage_id)
@@ -276,7 +269,7 @@ def test_a_failed_montage_ordered_before_track_lists_is_assembled_again_the_way_
     она
     как собиралась: под тот трек, что в ней назван, и после этого не failed и без старой ошибки."""
     own = f"music/{uuid.uuid4()}.wav"
-    s3.upload_file(str(tone(tmp_path / "own.wav", seconds=7.0)), storage.bucket(), own)
+    s3.upload_file(str(tone(tmp_path / "own.wav", seconds=7.0)), storage.client().bucket, own)
     params = {"target_seconds": 30}
     params.update(
         {"music_track_id": "calm"} if shape == "by a shelf id" else {"music_track_key": own}
@@ -327,9 +320,9 @@ def test_an_order_with_no_music_at_all_keeps_the_live_sound_of_the_videos(
     montage_id = order(conn, memory, {"target_seconds": 30, "music_tracks": []})
     for index in range(3):
         _, key = add_item(conn, memory, "photo", status="ready", age_hours=5 - index)
-        s3.upload_file(str(jpeg(tmp_path / f"photo-{index}.jpg")), storage.bucket(), key)
+        s3.upload_file(str(jpeg(tmp_path / f"photo-{index}.jpg")), storage.client().bucket, key)
     _, key = add_item(conn, memory, "video", status="ready")  # новее всех → последним в ролике
-    s3.upload_file(str(video(tmp_path / "clip.mp4")), storage.bucket(), key)
+    s3.upload_file(str(video(tmp_path / "clip.mp4")), storage.client().bucket, key)
     worker.enqueue(conn, "montage", montage_id)
 
     assert worker.run_once(conn) is True
@@ -363,7 +356,7 @@ def test_the_live_sound_of_a_montage_without_music_fades_at_both_ends_instead_of
         ("last.mp4", "video", 0, long_clip),
     ):
         _, key = add_item(conn, memory, kind, status="ready", age_hours=age)
-        s3.upload_file(str(make(tmp_path / name)), storage.bucket(), key)
+        s3.upload_file(str(make(tmp_path / name)), storage.client().bucket, key)
     worker.enqueue(conn, "montage", montage_id)
 
     assert worker.run_once(conn) is True
@@ -524,7 +517,7 @@ def library_in_the_bucket(s3):
     heads = {}
     for track_id in library.TRACKS:
         try:
-            head = s3.head_object(Bucket=storage.bucket(), Key=library.track_key(track_id))
+            head = s3.head_object(Bucket=storage.client().bucket, Key=library.track_key(track_id))
         except s3.exceptions.ClientError:
             heads[track_id] = None
         else:
@@ -536,9 +529,9 @@ def test_the_library_is_published_to_the_bucket_for_the_app_to_play(s3):
     """The five files are this worker's own disk, and «Послушать» is the api's and the phone's — so
     the library has to be in the bucket too, under the keys the api builds from the same ids."""
     for track_id in library.TRACKS:
-        s3.delete_object(Bucket=storage.bucket(), Key=library.track_key(track_id))
+        s3.delete_object(Bucket=storage.client().bucket, Key=library.track_key(track_id))
 
-    assert sorted(library.publish_tracks(s3)) == sorted(library.TRACKS)
+    assert sorted(library.publish_tracks()) == sorted(library.TRACKS)
 
     landed = library_in_the_bucket(s3)
     assert [track_id for track_id, head in landed.items() if head is None] == []
@@ -548,5 +541,5 @@ def test_the_library_is_published_to_the_bucket_for_the_app_to_play(s3):
     }, "all five, whole, and served as music rather than as bytes of nothing in particular"
 
     # Run on every deploy: five mp3s must not be written over every time.
-    assert library.publish_tracks(s3) == [], "what is already there is not uploaded again"
+    assert library.publish_tracks() == [], "what is already there is not uploaded again"
     assert library_in_the_bucket(s3) == landed, "and the objects themselves were not touched"

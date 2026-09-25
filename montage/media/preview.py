@@ -47,12 +47,11 @@ def media_preview(conn, ref):
         return
     kind, original_key = row
 
-    s3 = storage.client()
     thumbnail_key, preview_key, duration = f"thumbnails/{ref}.jpg", None, None
     with tempfile.TemporaryDirectory() as workdir:
         workdir = pathlib.Path(workdir)
         original, thumbnail = workdir / "original", workdir / "thumbnail.jpg"
-        s3.download_file(storage.bucket(), original_key, str(original))
+        storage.download(original_key, original)
         # Before ffmpeg is pointed at it for anything else: these bytes came off somebody's phone
         # and nothing between there and here has looked inside them.
         ffmpeg.refuse_playlists(original)
@@ -96,7 +95,7 @@ def media_preview(conn, ref):
                 str(preview),
             )
             preview_key = f"previews/{ref}.mp4"
-            storage.upload(s3, preview, preview_key, "video/mp4")
+            storage.upload(preview, preview_key, "video/mp4")
         else:
             # A HEIC goes to ffmpeg already stood up: it does not apply the file's own turn
             # (`photo.stand_up`), and JPEG's EXIF orientation it does.
@@ -118,9 +117,9 @@ def media_preview(conn, ref):
                 str(preview),
             )
             preview_key = f"previews/{ref}.jpg"
-            storage.upload(s3, preview, preview_key, "image/jpeg")
+            storage.upload(preview, preview_key, "image/jpeg")
 
-        storage.upload(s3, thumbnail, thumbnail_key, "image/jpeg")
+        storage.upload(thumbnail, thumbnail_key, "image/jpeg")
 
     # The measured length replaces the one the phone declared at intent, which was only ever a
     # claim. `width`/`height` are not written here but by `media_frame_info` below, which is queued
@@ -141,7 +140,7 @@ def media_preview(conn, ref):
         log.info("media item %s went away mid-preview, taking its derivatives back", ref)
         for key in (thumbnail_key, preview_key):
             if key:
-                s3.delete_object(Bucket=storage.bucket(), Key=key)
+                storage.delete(key)
         return
     log.info("media item %s (%s) is ready", ref, kind)
     # What comes after the copies, queued by hand rather than through `worker.enqueue` — `worker`

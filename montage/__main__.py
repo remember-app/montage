@@ -5,7 +5,7 @@
     python -m montage enqueue <type> [ref]  # put one job in the queue
     python -m montage run                   # the loop, Ctrl-C or SIGTERM to stop
 
-Needs DATABASE_URL — except `tracks`, which needs the four storage variables. See README.md.
+Needs DATABASE_URL — except `tracks`, which needs the storage settings. See README.md.
 """
 
 import contextlib
@@ -29,9 +29,9 @@ def main():
         try:
             published = library.publish_tracks()
         except KeyError as unset:
-            # A storage variable missed on the deploy — `storage.client()` reads the four of them
-            # straight out of the environment. One line saying which, the same answer `connect`
-            # gives for DATABASE_URL, rather than a `KeyError` out of the middle of boto3.
+            # A storage variable missed on the deploy — `storage.client()` reads them straight out
+            # of the environment. One line saying which, the same answer `connect` gives for
+            # DATABASE_URL, rather than a `KeyError` out of the middle of the storage.
             sys.exit(f"{unset.args[0]} is not set — see README.md")
         except Exception as exc:
             # Storage that cannot be reached, the wrong bucket, a key that may not write: what it

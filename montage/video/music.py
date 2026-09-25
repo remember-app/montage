@@ -48,7 +48,7 @@ def ordered(params):
     return named, None
 
 
-def files(named, s3, workdir):
+def files(named, workdir):
     """Те же треки файлами на диске, в том же порядке, — и отказ, если своего файла нет в бакете
     или он не читается.
 
@@ -64,8 +64,8 @@ def files(named, s3, workdir):
             continue
         downloaded = workdir / f"track-{index}"
         try:
-            s3.download_file(storage.bucket(), one, str(downloaded))
-        except s3.exceptions.ClientError as exc:
+            storage.download(one, downloaded)
+        except Exception as exc:
             # Пропавший файл между попытками сам не вернётся. Всё прочее — хранилище не ответило,
             # сеть, таймаут — проходит само, и это обычные повторы очереди.
             if not storage.missing(exc):

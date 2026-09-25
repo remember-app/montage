@@ -34,26 +34,21 @@ def track_key(track_id):
     return f"tracks/{track_id}.mp3"
 
 
-def publish_tracks(s3=None):
+def publish_tracks():
     """The library into the bucket. Returns the ids that were actually uploaded.
 
     What is already there is left alone rather than written over: this runs on deploy, a track's
     file never changes under an id, and re-uploading five mp3s on every run would only spend the
     bucket's write quota. The flip side is that a track *replaced* under an id that is already
     published needs its object deleted first — `docs/jobs/montage.md`, «Треки».
+
+    Storage that refuses or cannot be reached comes out of here as it is, and the one caller
+    (`python -m montage tracks`) turns it into a line rather than a traceback.
     """
-    s3 = s3 or storage.client()
     published = []
     for track_id in TRACKS:
-        try:
-            s3.head_object(Bucket=storage.bucket(), Key=track_key(track_id))
+        if storage.exists(track_key(track_id)):
             continue
-        except s3.exceptions.ClientError:
-            # Nothing under this key — or a bucket that refused to answer, and then the upload
-            # below is refused the same way and says so. Storage that cannot be reached at all is
-            # not a `ClientError` and never gets here: it comes out of `head_object`, and the one
-            # caller (`python -m montage tracks`) turns it into a line rather than a traceback.
-            pass
-        storage.upload(s3, track_file(track_id), track_key(track_id), "audio/mpeg")
+        storage.upload(track_file(track_id), track_key(track_id), "audio/mpeg")
         published.append(track_id)
     return published

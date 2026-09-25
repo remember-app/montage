@@ -67,7 +67,7 @@ def media_understanding(conn, ref):
     with tempfile.TemporaryDirectory() as workdir:
         workdir = pathlib.Path(workdir)
         preview = workdir / "preview"
-        storage.client().download_file(storage.bucket(), preview_key, str(preview))
+        storage.download(preview_key, preview)
         frames = _frames(preview, workdir) if kind == "video" else [_blob(preview)]
         described = brain.describe_media(frames, cast=_cast(conn, memory_id), ref=ref)
 

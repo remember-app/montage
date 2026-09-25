@@ -90,7 +90,7 @@ def ready_media(conn, s3, memory, preview, kind="photo"):
     item_id, _ = add_item(conn, memory, kind, status="ready")
     preview_key = f"previews/{item_id}.{'mp4' if kind == 'video' else 'jpg'}"
     conn.execute("UPDATE media_items SET preview_key = %s WHERE id = %s", (preview_key, item_id))
-    s3.upload_file(str(preview), storage.bucket(), preview_key)
+    s3.upload_file(str(preview), storage.client().bucket, preview_key)
     return item_id
 
 
@@ -251,7 +251,7 @@ def test_a_fresh_item_is_queued_for_understanding_as_soon_as_its_preview_is_made
     """A frame is describable the moment the copies exist, and the director wants it described long
     before anybody orders a video — so the preview job queues the understanding one."""
     item_id, key = add_item(conn, memory, "photo")
-    s3.upload_file(str(jpeg(tmp_path / "original.jpg")), storage.bucket(), key)
+    s3.upload_file(str(jpeg(tmp_path / "original.jpg")), storage.client().bucket, key)
     worker.enqueue(conn, "media_preview", item_id)
 
     assert worker.run_once(conn) is True

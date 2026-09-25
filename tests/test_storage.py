@@ -1,7 +1,8 @@
-"""Хранилище так, как его видит Google: что уходит в запросах и что приходит в ответ.
+"""Драйвер s3 так, как его видит Google: что уходит в запросах и что приходит в ответ.
 
-В проде бакет — Google Cloud Storage по S3-совместимому XML API, локально — MinIO. Протокол один,
-мелочи расходятся, и здесь закреплены те, о которые спотыкается Google:
+Драйвер s3 (он по умолчанию) говорит по S3 с MinIO локально и с Google Cloud Storage по его
+S3-совместимому XML API, если есть HMAC-ключ. Протокол один, мелочи расходятся, и здесь закреплены
+те, о которые спотыкается Google (родной доступ по JSON-ключу — `test_storage_google.py`):
 
 - ни один запрос воркера не несёт контрольных сумм S3 — ни заголовков `x-amz-checksum-*`, ни тела
   `aws-chunked` с трейлером. boto3 шлёт их сам, начиная с 1.36, а Google такую загрузку не берёт;
@@ -9,8 +10,8 @@
   404 `NoSuchKey`, а S3 и MinIO — 204.
 
 Последние два теста ходят в настоящий бакет из R2_* — в прогоне набора это MinIO, а направленные
-на бакет Google для проверок они и есть живой контроль (docs/running.md). Пишут только под своим
-префиксом и за собой убирают.
+на бакет Google с HMAC-ключом они живой контроль этого пути. Пишут только под своим префиксом и за
+собой убирают.
 """
 
 import io
@@ -82,22 +83,23 @@ def test_nothing_the_worker_sends_google_carries_a_checksum(monkeypatch, tmp_pat
     the machine. Google's address and not MinIO's because the scheme decides where the sum would
     go: over HTTPS boto3 puts it in an `aws-chunked` trailer, over plain HTTP in a header — and
     that trailer is exactly what Google turns an upload away over."""
+    monkeypatch.delenv("STORAGE_DRIVER", raising=False)
     monkeypatch.setenv("R2_ENDPOINT", "https://storage.googleapis.com")
     monkeypatch.setenv("R2_BUCKET", "remember")
     monkeypatch.setenv("R2_ACCESS_KEY_ID", "GOOG1EXAMPLE")
     monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "not-a-secret")
-    s3 = storage.client()
+    s3 = storage.client().s3
     sent = listen(s3)
     s3.meta.events.register("before-send.s3", google_answers)
     large, small = tmp_path / "large.mp4", tmp_path / "small.jpg"
     large.write_bytes(os.urandom(LARGE))
     small.write_bytes(b"hello")
 
-    storage.upload(s3, large, "montages/large.mp4", "video/mp4")
-    storage.upload(s3, small, "previews/small.jpg", "image/jpeg")
-    s3.head_object(Bucket=storage.bucket(), Key="previews/small.jpg")
-    s3.download_file(storage.bucket(), "previews/small.jpg", str(tmp_path / "back.jpg"))
-    storage.free(s3, "originals/abandoned", "up")
+    storage.upload(large, "montages/large.mp4", "video/mp4")
+    storage.upload(small, "previews/small.jpg", "image/jpeg")
+    assert storage.exists("previews/small.jpg")
+    storage.download("previews/small.jpg", tmp_path / "back.jpg")
+    storage.free("originals/abandoned", "up")
 
     calls = {(request.method, urllib.parse.urlsplit(request.url).query) for request in sent}
     assert ("PUT", "uploadId=up&partNumber=2") in calls, "the large file did not go up in parts"
@@ -127,12 +129,14 @@ def scratch(s3):
     afterwards, whatever the test left: an abandoned multipart costs a real bucket money."""
     prefix, sent = f"storage-check/{uuid.uuid4()}/", listen(s3)
     yield prefix, sent
-    for upload in s3.list_multipart_uploads(Bucket=storage.bucket(), Prefix=prefix).get(
+    for upload in s3.list_multipart_uploads(Bucket=storage.client().bucket, Prefix=prefix).get(
         "Uploads", []
     ):
-        storage.free(s3, upload["Key"], upload["UploadId"])
-    for listed in s3.list_objects_v2(Bucket=storage.bucket(), Prefix=prefix).get("Contents", []):
-        storage.free(s3, listed["Key"])
+        storage.free(upload["Key"], upload["UploadId"])
+    for listed in s3.list_objects_v2(Bucket=storage.client().bucket, Prefix=prefix).get(
+        "Contents", []
+    ):
+        storage.free(listed["Key"])
 
 
 def test_a_large_file_goes_up_in_parts_and_comes_back_whole(s3, scratch, tmp_path):
@@ -143,18 +147,16 @@ def test_a_large_file_goes_up_in_parts_and_comes_back_whole(s3, scratch, tmp_pat
     key, large, back = f"{prefix}large.mp4", tmp_path / "large.mp4", tmp_path / "back.mp4"
     large.write_bytes(os.urandom(LARGE))
 
-    storage.upload(s3, large, key, "video/mp4")
+    storage.upload(large, key, "video/mp4")
     assert any("partNumber=2" in request.url for request in sent), "it did not go up in parts"
-    head = s3.head_object(Bucket=storage.bucket(), Key=key)
+    head = s3.head_object(Bucket=storage.client().bucket, Key=key)
     assert (head["ContentLength"], head["ContentType"]) == (LARGE, "video/mp4")
-    s3.download_file(storage.bucket(), key, str(back))
+    storage.download(key, back)
     assert back.read_bytes() == large.read_bytes()
 
-    storage.free(s3, key)
-    with pytest.raises(ClientError) as gone:
-        s3.head_object(Bucket=storage.bucket(), Key=key)
-    assert storage.missing(gone.value)
-    storage.free(s3, key)
+    storage.free(key)
+    assert not storage.exists(key)
+    storage.free(key)
 
     assert unfit_for_google(sent) == []
 
@@ -164,15 +166,15 @@ def test_an_upload_nobody_finished_is_aborted_and_one_that_was_finished_is_delet
     of one left half-way are released, an upload already aborted is no error, and one the phone
     finished without telling the api — so the abort is refused as over — loses its object."""
     prefix, sent = scratch
-    bucket = storage.bucket()
+    bucket = storage.client().bucket
 
     abandoned = f"{prefix}abandoned"
     upload_id = s3.create_multipart_upload(Bucket=bucket, Key=abandoned)["UploadId"]
     s3.upload_part(Bucket=bucket, Key=abandoned, UploadId=upload_id, PartNumber=1, Body=b"half")
-    storage.free(s3, abandoned, upload_id)
+    storage.free(abandoned, upload_id)
     live = s3.list_multipart_uploads(Bucket=bucket, Prefix=abandoned).get("Uploads", [])
     assert upload_id not in [upload["UploadId"] for upload in live], "the parts are released"
-    storage.free(s3, abandoned, upload_id)
+    storage.free(abandoned, upload_id)
 
     finished = f"{prefix}finished"
     upload_id = s3.create_multipart_upload(Bucket=bucket, Key=finished)["UploadId"]
@@ -183,9 +185,7 @@ def test_an_upload_nobody_finished_is_aborted_and_one_that_was_finished_is_delet
         UploadId=upload_id,
         MultipartUpload={"Parts": [{"PartNumber": 1, "ETag": part["ETag"]}]},
     )
-    storage.free(s3, finished, upload_id)
-    with pytest.raises(ClientError) as gone:
-        s3.head_object(Bucket=bucket, Key=finished)
-    assert storage.missing(gone.value), "the finished upload's object is still there"
+    storage.free(finished, upload_id)
+    assert not storage.exists(finished), "the finished upload's object is still there"
 
     assert unfit_for_google(sent) == []

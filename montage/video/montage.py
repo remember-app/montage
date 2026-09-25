@@ -128,7 +128,6 @@ def montage(conn, ref):
     layout.write(conn, ref, ())
 
     video_key = f"montages/{ref}.mp4"
-    s3 = storage.client()
     with tempfile.TemporaryDirectory() as workdir:
         workdir = pathlib.Path(workdir)
         judged, originals = [], {}
@@ -138,14 +137,14 @@ def montage(conn, ref):
             original = workdir / f"original-{index}"
             # A download that fails is left fatal on purpose: the bytes may well arrive next time,
             # and swallowing an unreachable bucket would quietly cut a video out of half a memory.
-            s3.download_file(storage.bucket(), original_key, str(original))
+            storage.download(original_key, original)
             originals[str(media_id)] = original
             # A photograph is judged on the large copy and not on the forty megapixels it was
             # uploaded at — the same file the piece will be cut from below (`_back_to_originals`).
             looked_at = original
             if kind == "photo" and preview_key:
                 looked_at = (
-                    storage.large_copy(s3, preview_key, workdir / f"large-{index}.jpg") or original
+                    storage.large_copy(preview_key, workdir / f"large-{index}.jpg") or original
                 )
             looked_over = selection.judge(
                 selection.Piece(
@@ -217,7 +216,7 @@ def montage(conn, ref):
         story.what_was_seen(conn, ref, judged)
 
         # Музыка раньше режиссёра: под что собирают ролик — часть того, из чего он строит план.
-        tracks, refusal = music.files(ordered_music, s3, workdir)
+        tracks, refusal = music.files(ordered_music, workdir)
         if refusal:
             return _give_up_for_good(conn, ref, refusal)
         track = assembly.one_track(tracks, workdir)
@@ -324,7 +323,7 @@ def montage(conn, ref):
         # stepped along by those measured numbers, so they are also where the frames actually are.
         layout.write(conn, ref, clips)
         duration = ffmpeg.duration(assembled)
-        storage.upload(s3, assembled, video_key, "video/mp4")
+        storage.upload(assembled, video_key, "video/mp4")
         # Склейка кончилась там, где ролик лёг в хранилище: сколько склеек в нём и какой он длины.
         # Обложка за этой чертой — кадр из готового файла, и ролику, у которого её не вышло взять,
         # она не стоит ни этапа, ни минуты (ниже).
@@ -358,7 +357,7 @@ def montage(conn, ref):
                 preview.THUMBNAIL_SCALE,
                 str(poster),
             )
-            storage.upload(s3, poster, poster_key, "image/jpeg")
+            storage.upload(poster, poster_key, "image/jpeg")
         except Exception as exc:
             # A video that took minutes to assemble is not thrown away over its cover, and retrying
             # would rebuild the whole thing for one frame. The row stays `ready` with no poster key,
@@ -381,7 +380,7 @@ def montage(conn, ref):
         log.info("montage %s went away mid-assembly, taking its video back", ref)
         for key in (video_key, poster_key):
             if key:
-                s3.delete_object(Bucket=storage.bucket(), Key=key)
+                storage.delete(key)
         return
     log.info("montage %s is ready: %s clips, %.1fs", ref, len(clips), duration or 0)
     _tell_the_api(ref)

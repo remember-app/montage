@@ -65,7 +65,7 @@ def transcribe(conn, ref):
     with tempfile.TemporaryDirectory() as workdir:
         workdir = pathlib.Path(workdir)
         original, sound = workdir / "original", workdir / "speech.m4a"
-        storage.client().download_file(storage.bucket(), original_key, str(original))
+        storage.download(original_key, original)
         # Before ffmpeg is pointed at it: these bytes came off somebody's phone, and a playlist
         # dressed up as a clip would have ffmpeg read this worker's own disk into a prompt.
         ffmpeg.refuse_playlists(original)

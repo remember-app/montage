@@ -38,7 +38,7 @@ def test_a_photo_that_becomes_ready_gets_a_proposal_with_nobody_ordering_a_video
     """The whole point of the job: the organizer opens the gallery and the analysis has already had
     its say, though no video has been ordered and none may ever be."""
     item_id, key = add_item(conn, memory, "photo")
-    s3.upload_file(str(jpeg(tmp_path / "original.jpg")), storage.bucket(), key)
+    s3.upload_file(str(jpeg(tmp_path / "original.jpg")), storage.client().bucket, key)
     worker.enqueue(conn, "media_preview", item_id)
 
     assert worker.run_once(conn) is True, "the preview, which hands the item on"
@@ -54,7 +54,7 @@ def test_a_frame_the_analysis_throws_out_says_why(conn, s3, memory, tmp_path):
     item_id, key = add_item(conn, memory, "photo", status="ready")
     black = tmp_path / "black.jpg"
     draw("-f", "lavfi", "-i", "color=black:size=1200x800", "-frames:v", "1", str(black))
-    s3.upload_file(str(black), storage.bucket(), key)
+    s3.upload_file(str(black), storage.client().bucket, key)
     worker.enqueue(conn, "media_screening", item_id)
 
     assert worker.run_once(conn) is True
@@ -78,8 +78,8 @@ def test_a_photograph_is_judged_on_its_large_copy_and_a_clip_on_its_original(
 
     item_id, key = add_item(conn, memory, "photo", status="ready")
     copy_key = f"previews/{item_id}.jpg"
-    s3.upload_file(str(jpeg(tmp_path / "original.jpg")), storage.bucket(), key)
-    s3.upload_file(str(black), storage.bucket(), copy_key)
+    s3.upload_file(str(jpeg(tmp_path / "original.jpg")), storage.client().bucket, key)
+    s3.upload_file(str(black), storage.client().bucket, copy_key)
     conn.execute("UPDATE media_items SET preview_key = %s WHERE id = %s", (copy_key, item_id))
     worker.enqueue(conn, "media_screening", item_id)
 
@@ -99,8 +99,8 @@ def test_a_photograph_is_judged_on_its_large_copy_and_a_clip_on_its_original(
         "yuv420p",
         str(black_clip),
     )
-    s3.upload_file(str(video(tmp_path / "clip.mp4")), storage.bucket(), clip_key)
-    s3.upload_file(str(black_clip), storage.bucket(), f"previews/{clip_id}.mp4")
+    s3.upload_file(str(video(tmp_path / "clip.mp4")), storage.client().bucket, clip_key)
+    s3.upload_file(str(black_clip), storage.client().bucket, f"previews/{clip_id}.mp4")
     conn.execute(
         "UPDATE media_items SET preview_key = %s WHERE id = %s",
         (f"previews/{clip_id}.mp4", clip_id),
@@ -119,7 +119,7 @@ def test_a_copy_the_bucket_will_not_give_back_leaves_the_original_to_judge(
     item_id, key = add_item(conn, memory, "photo", status="ready")
     black = tmp_path / "black.jpg"
     draw("-f", "lavfi", "-i", "color=black:size=1200x800", "-frames:v", "1", str(black))
-    s3.upload_file(str(black), storage.bucket(), key)
+    s3.upload_file(str(black), storage.client().bucket, key)
     conn.execute(
         "UPDATE media_items SET preview_key = 'previews/never-uploaded.jpg' WHERE id = %s",
         (item_id,),
@@ -137,7 +137,7 @@ def test_a_file_that_does_not_read_is_a_proposal_too(conn, s3, memory, tmp_path)
     item_id, key = add_item(conn, memory, "photo", status="ready")
     broken = tmp_path / "original"
     broken.write_text("это не картинка")
-    s3.upload_file(str(broken), storage.bucket(), key)
+    s3.upload_file(str(broken), storage.client().bucket, key)
     job_id = worker.enqueue(conn, "media_screening", item_id)
 
     assert worker.run_once(conn) is True
@@ -154,7 +154,7 @@ def test_the_sweep_catches_up_material_from_before_the_screening(conn, s3, memor
     """Material that went `ready` before this job existed: nothing else will ever come for it, and
     the original is still in the bucket, so it costs the member nothing."""
     item_id, key = add_item(conn, memory, "photo", status="ready")
-    s3.upload_file(str(jpeg(tmp_path / "original.jpg")), storage.bucket(), key)
+    s3.upload_file(str(jpeg(tmp_path / "original.jpg")), storage.client().bucket, key)
 
     sweeps.sweep_media_without_screening(conn)
     assert only_screening_jobs_for(conn, item_id) == 1

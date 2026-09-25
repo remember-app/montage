@@ -144,7 +144,7 @@ def lay_out(conn, s3, memory, tmp_path, shots, first=1):
         kind = "video" if make in VIDEOS else "photo"
         item_id, key = add_item(conn, memory, kind, status="ready")
         path = make(tmp_path / f"file-{number}.{'mp4' if kind == 'video' else 'jpg'}")
-        s3.upload_file(str(path), storage.bucket(), key)
+        s3.upload_file(str(path), storage.client().bucket, key)
         duration = round(ffmpeg.duration(path), 1) if kind == "video" else None
         conn.execute(
             "UPDATE media_items SET captured_at = %s, duration_seconds = %s WHERE id = %s",

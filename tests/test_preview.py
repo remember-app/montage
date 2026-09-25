@@ -18,7 +18,7 @@ from rows import add_item, fetch, read_item
 def test_a_photo_gets_a_thumbnail_and_a_2048px_copy(conn, s3, memory, tmp_path):
     # Bigger than the cap on both sides, so the copy has to be scaled down to it.
     item_id, key = add_item(conn, memory, "photo")
-    s3.upload_file(str(jpeg(tmp_path / "original.jpg", "3000x2000")), storage.bucket(), key)
+    s3.upload_file(str(jpeg(tmp_path / "original.jpg", "3000x2000")), storage.client().bucket, key)
     worker.enqueue(conn, "media_preview", item_id)
 
     assert worker.run_once(conn) is True
@@ -46,7 +46,7 @@ def test_a_photo_gets_a_thumbnail_and_a_2048px_copy(conn, s3, memory, tmp_path):
 
 def test_a_video_gets_a_poster_and_a_720p_preview(conn, s3, memory, tmp_path):
     item_id, key = add_item(conn, memory, "video")
-    s3.upload_file(str(video(tmp_path / "original.mp4")), storage.bucket(), key)
+    s3.upload_file(str(video(tmp_path / "original.mp4")), storage.client().bucket, key)
     worker.enqueue(conn, "media_preview", item_id)
 
     assert worker.run_once(conn) is True
@@ -71,7 +71,7 @@ def test_a_preview_run_again_queues_what_comes_after_it_once(conn, s3, memory, t
     """The job runs again whenever its worker died after the handler and before the job was marked
     done (`worker.reap`) — and what the first run queued is still waiting then."""
     item_id, key = add_item(conn, memory, "video")
-    s3.upload_file(str(video(tmp_path / "original.mp4")), storage.bucket(), key)
+    s3.upload_file(str(video(tmp_path / "original.mp4")), storage.client().bucket, key)
 
     preview.media_preview(conn, item_id)
     preview.media_preview(conn, item_id)
@@ -119,7 +119,7 @@ def test_a_playlist_dressed_up_as_a_photo_is_refused(conn, s3, memory, tmp_path)
     playlist.write_text(
         "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1.0,\nfile:///etc/hosts\n#EXT-X-ENDLIST\n"
     )
-    s3.upload_file(str(playlist), storage.bucket(), key)
+    s3.upload_file(str(playlist), storage.client().bucket, key)
     worker.enqueue(conn, "media_preview", item_id)
 
     assert worker.run_once(conn) is True
@@ -151,7 +151,7 @@ def test_the_guard_refuses_what_ffmpeg_calls_a_playlist(tmp_path):
 def previewed(conn, s3, memory, tmp_path, original):
     """The thumbnail and the large copy `media_preview` makes of `original`, as Pillow images."""
     item_id, key = add_item(conn, memory, "photo")
-    s3.upload_file(str(original), storage.bucket(), key)
+    s3.upload_file(str(original), storage.client().bucket, key)
     worker.enqueue(conn, "media_preview", item_id)
     assert worker.run_once(conn) is True
     _, thumbnail_key, preview_key, _ = read_item(conn, item_id)

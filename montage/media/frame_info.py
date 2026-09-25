@@ -138,7 +138,7 @@ def media_frame_info(conn, ref):
 
     with tempfile.TemporaryDirectory() as workdir:
         original = pathlib.Path(workdir) / "original"
-        storage.client().download_file(storage.bucket(), original_key, str(original))
+        storage.download(original_key, original)
         # These bytes came off somebody's phone and ffprobe is about to be pointed at them: the
         # same guard the preview puts in front of ffmpeg, for the same reason.
         ffmpeg.refuse_playlists(original)
