@@ -3,6 +3,7 @@
 Warning: these wipe the `jobs` table of whatever DATABASE_URL points at.
 """
 
+import collections
 import logging
 import os
 import pathlib
@@ -69,6 +70,63 @@ def test_a_queued_job_wakes_an_idle_worker(conn):
         assert time.monotonic() - started < 1
 
 
+def test_two_workers_on_one_queue_never_take_the_same_job(conn, monkeypatch):
+    """A rolling deploy or a second replica puts two copies of the worker on the queue: every job
+    still runs exactly once, or a montage would be cut twice and a preview pushed twice."""
+    ran = collections.Counter()
+    monkeypatch.setitem(
+        worker.HANDLERS, "counted", lambda conn, ref: (ran.update([ref]), time.sleep(0.01))
+    )
+    refs = [str(number) for number in range(60)]
+    for ref in refs:
+        worker.enqueue(conn, "counted", ref)
+    start = threading.Barrier(2)
+
+    def drain():
+        with worker.connect() as mine:
+            start.wait()
+            while worker.run_once(mine):
+                pass
+
+    copies = [threading.Thread(target=drain) for _ in range(2)]
+    for copy in copies:
+        copy.start()
+    for copy in copies:
+        copy.join(timeout=60)
+
+    assert sorted(ran.items()) == sorted((ref, 1) for ref in refs)
+    assert conn.execute("SELECT status, attempts, count(*) FROM jobs GROUP BY 1, 2").fetchall() == [
+        ("done", 0, 60)
+    ]
+
+
+def test_init_brings_an_older_queue_up_to_date_and_keeps_its_jobs(conn):
+    """A database the worker ran on before dead workers' jobs were taken back: `init` adds the
+    index that search goes by and the trigger that wakes an idle worker, no job changes, and a
+    second `init` is a no-op."""
+    conn.execute("DROP INDEX jobs_running_idx")
+    conn.execute("DROP TRIGGER jobs_notify ON jobs")
+    for status, attempts in (("queued", 0), ("running", 1), ("done", 0), ("failed", 3)):
+        conn.execute(
+            """INSERT INTO jobs (type, ref, status, attempts, last_error)
+               VALUES ('dummy', %s, %s, %s, 'e')""",
+            (status, status, attempts),
+        )
+    before = conn.execute("SELECT * FROM jobs ORDER BY id").fetchall()
+
+    worker.init_schema(conn)
+    worker.init_schema(conn)
+
+    assert conn.execute("SELECT * FROM jobs ORDER BY id").fetchall() == before
+    assert conn.execute(
+        "SELECT count(*) FROM pg_indexes WHERE indexname = 'jobs_running_idx'"
+    ).fetchone() == (1,)
+    with worker.connect() as idle_worker:
+        idle_worker.execute("LISTEN jobs")
+        worker.enqueue(conn, "dummy")
+        assert next(idle_worker.notifies(timeout=2), None) is not None, "the trigger is back"
+
+
 # --- the one command with no database in it ---------------------------------
 # `python -m montage tracks`, run by hand on a deploy. No fixture here: the point is what the
 # command says when the storage it needs is not there, and neither Postgres nor the bucket is
@@ -110,6 +168,14 @@ def test_publishing_the_library_into_storage_that_does_not_answer_says_so_in_one
     assert done.returncode == 1
     assert "Traceback" not in done.stderr
     assert done.stderr.startswith("the music library was not published:")
+
+
+def test_a_thread_count_that_is_no_count_stops_the_process_before_it_does_anything():
+    """Not at the first montage, minutes into a job: the setting is read when the worker starts."""
+    done = tracks_command(FFMPEG_THREADS="two")
+
+    assert done.returncode != 0
+    assert "FFMPEG_THREADS must be a whole number" in done.stderr
 
 
 # --- a worker that died holding a job ---------------------------------------

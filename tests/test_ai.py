@@ -259,11 +259,12 @@ def test_the_journal_has_the_question_before_the_model_has_answered(conn):
 
     def look(request):
         seen.append(conn.execute("SELECT status FROM ai_requests").fetchall())
+        seen.append(counts(conn))
         return (FIXTURES / "gemini_describe.json").read_bytes()
 
     ai.AI(conn, providers.Gemini("test-key", transport=look)).describe_media([PHOTO])
 
-    assert seen == [[("sent",)]]
+    assert seen == [[("sent",)], [(None, None, None, None)]], "nothing counted before the answer"
 
 
 def test_a_call_that_failed_is_in_the_journal_too(conn):
@@ -429,6 +430,7 @@ def test_without_a_key_nothing_is_asked_and_nothing_is_pretended(conn, monkeypat
     ((provider, model, operation, ref, status, _, response, _, _),) = journalled(conn)
     assert (provider, model, status, response) == ("gemini", None, "skipped", None)
     assert (operation, ref) == ("describe_media", "media-7")
+    assert counts(conn) == [(None, None, None, None)], "no call, nothing counted"
 
 
 def test_the_journal_keeps_neither_the_key_nor_the_material(conn):
