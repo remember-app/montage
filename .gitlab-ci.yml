@@ -1,0 +1,19 @@
+# Образ воркера на каждый пуш в main — в реестр проекта с тегом по SHA коммита. Выкатки здесь нет:
+# писать новый тег в репозиторий инфраструктуры — отдельное решение.
+include:
+  - project: 'nox-labs/internal/devops/ci-templates'
+    ref: main
+    file:
+      - '/jobs/docker.yml'
+
+stages:
+  - build
+
+build:
+  extends: .docker_build
+  stage: build
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
+  script:
+    - docker build -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" .
+    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
