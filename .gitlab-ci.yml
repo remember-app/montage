@@ -34,10 +34,11 @@ dev_deploy:
   environment:
     name: dev
     deployment_tier: development
-  variables:
-    INFRA_REPO: ssh://git@git.dapp-devs.com:2222/nox-labs/infra/stage/nox-infra-dev.git
-    VALUES: ioc-helm/nox/remember/montage/values-dev.yaml
   script:
+    # В скрипте, а не в variables: одноимённая переменная проекта, группы или инстанса GitLab
+    # сильнее variables, и проверки «ровно этот файл» ниже сторожили бы тот, что назвала она.
+    - INFRA_REPO=ssh://git@git.dapp-devs.com:2222/nox-labs/infra/stage/nox-infra-dev.git
+    - VALUES=ioc-helm/nox/remember/montage/values-dev.yaml
     - git clone "$INFRA_REPO" infra
     - cd infra
     - |
