@@ -189,21 +189,14 @@ def sweep_stale_uploads(conn):
             log.info("upload %s finished while the sweep ran, leaving it alone", item_id)
             continue
         try:
-            if upload_id:
-                try:
-                    s3.abort_multipart_upload(
-                        Bucket=storage.bucket(), Key=original_key, UploadId=upload_id
-                    )
-                except s3.exceptions.NoSuchUpload:
-                    pass  # already gone; the row has followed it either way
-            # And whatever landed under the key anyway, for the client that completed its upload in
-            # R2 and never told the api.
-            s3.delete_object(Bucket=storage.bucket(), Key=original_key)
+            # The parts, and whatever landed under the key anyway, for the client that completed
+            # its upload in the bucket and never told the api.
+            storage.free(s3, original_key, upload_id)
         except Exception as exc:
             # The row is already gone, so nothing will ever name these again and the next hour will
             # not find them. The log is the only record left — hence the upload id in it.
             log.warning(
-                "swept %s but could not free it in R2 (upload %s), left behind: %s",
+                "swept %s but could not free it in the bucket (upload %s), left behind: %s",
                 original_key,
                 upload_id,
                 exc,
