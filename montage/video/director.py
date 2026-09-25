@@ -49,26 +49,17 @@ log = logging.getLogger("montage.director")
 
 
 def direct(
-    conn,
-    pieces,
-    target_seconds,
-    include=(),
-    exclude=(),
-    story="",
-    ref=None,
-    brain=None,
-    music=(),
-    music_note="",
+    conn, pieces, target_seconds, include=(), exclude=(), story="", ref=None, brain=None, music=()
 ):
     """The film the model plans out of these pieces and what it said while planning it — or
     `(None, ())`, and then nobody directed anything.
 
     `pieces` are judged (`selection.judge`), `include`/`exclude` are the organizer's two lists from
     the order and `story` is what they said the video is about. `music` is what will play under the
-    video — the tracks in the order they play and how long each runs — and `music_note` is what the
-    organizer asked be done with them, in their own words; the soundtrack itself is assembled from
-    the order's list either way, so both are here to be read and not to be obeyed. `brain` is for
-    the tests; the worker takes the gateway the environment gives it.
+    video — the tracks in the order they play, how long each runs and, on a track the organizer
+    wished something of, that wish in their own words (`music.heard`); the soundtrack itself is
+    assembled from the order's list either way, so it is here to be read and not to be obeyed.
+    `brain` is for the tests; the worker takes the gateway the environment gives it.
 
     Слова режиссёра — вторым, готовыми полями журнала (`journal.COLUMNS`), порядком плана: первой
     мысль о плане в целом, за ней по записи на каждый показанный модели кадр и «мимо» на каждом
@@ -112,7 +103,6 @@ def direct(
             story=story,
             target_seconds=target_seconds,
             music=music,
-            music_note=music_note,
             ref=ref,
         )
         or {}
