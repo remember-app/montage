@@ -144,25 +144,30 @@ def media_preview(conn, ref):
                 s3.delete_object(Bucket=storage.bucket(), Key=key)
         return
     log.info("media item %s (%s) is ready", ref, kind)
-    # Two jobs of the отсев's and speech's own, queued by hand rather than through
-    # `worker.enqueue` — `worker` imports this module, and the import cannot go both ways.
-    # The screening proposal is every kind's (`screening.py`): the organizer meets it in the
-    # gallery long before any video is ordered. Speech is a clip's alone (`speech.py`) — a cloud
-    # model listening to one takes minutes, which the gallery does not wait on.
-    conn.execute("INSERT INTO jobs (type, ref) VALUES ('media_screening', %s)", (ref,))
-    if kind == "video":
-        conn.execute("INSERT INTO jobs (type, ref) VALUES ('media_speech', %s)", (ref,))
-
-    # And what the camera itself wrote into the original — its model, the optics, the place. The
-    # sheet «Сведения о кадре» shows all three long before any video is ordered, and reading them
-    # is `media_frame_info` below.
-    conn.execute("INSERT INTO jobs (type, ref) VALUES ('media_frame_info', %s)", (ref,))
-
-    # And straight on to what is in it: the frame is describable the moment the copies exist, and
-    # the director wants it described long before anybody orders a video (`understanding.py`). The
-    # row is inserted here rather than through `worker.enqueue` because the worker imports this
-    # module and not the other way round — the same one line the api writes to queue this very job.
-    conn.execute("INSERT INTO jobs (type, ref) VALUES ('media_understanding', %s)", (ref,))
+    # What comes after the copies, queued by hand rather than through `worker.enqueue` — `worker`
+    # imports this module, and the import cannot go both ways:
+    #   the screening proposal, every kind's (`screening.py`): the organizer meets it in the gallery
+    #   long before any video is ordered;
+    #   speech, a clip's alone (`speech.py`) — a cloud model listening to one takes minutes, which
+    #   the gallery does not wait on;
+    #   what the camera wrote into the original — its model, the optics, the place — for the sheet
+    #   «Сведения о кадре» (`frame_info.py`);
+    #   and what is in the frame (`understanding.py`): it is describable the moment the copies
+    #   exist, and the director wants it described long before anybody orders a video.
+    # Only what is not already waiting: this job runs again whenever its worker died between here
+    # and marking it done (`worker.reap`), and must not queue each of them twice.
+    follow_ups = ["media_screening", "media_speech", "media_frame_info", "media_understanding"]
+    if kind != "video":
+        follow_ups.remove("media_speech")
+    conn.execute(
+        """INSERT INTO jobs (type, ref)
+           SELECT follow_up, %(ref)s FROM unnest(%(types)s::text[]) follow_up
+           WHERE NOT EXISTS (
+             SELECT 1 FROM jobs job
+             WHERE job.type = follow_up AND job.ref = %(ref)s
+               AND job.status IN ('queued', 'running'))""",
+        {"ref": ref, "types": follow_ups},
+    )
 
 
 def give_up(conn, ref):

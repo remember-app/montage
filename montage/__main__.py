@@ -3,11 +3,12 @@
     python -m montage init                  # create the worker's own tables (idempotent)
     python -m montage tracks                # the music library into the bucket (idempotent)
     python -m montage enqueue <type> [ref]  # put one job in the queue
-    python -m montage run                   # the loop, Ctrl-C to stop
+    python -m montage run                   # the loop, Ctrl-C or SIGTERM to stop
 
 Needs DATABASE_URL — except `tracks`, which needs the four storage variables. See README.md.
 """
 
+import contextlib
 import logging
 import sys
 
@@ -50,10 +51,9 @@ def main():
         elif command == "enqueue" and 1 <= len(args) <= 2:
             print("queued job", worker.enqueue(conn, *args))
         elif command == "run" and not args:
-            try:
+            with contextlib.suppress(KeyboardInterrupt):
                 worker.run(conn)
-            except KeyboardInterrupt:
-                log.info("stopped")
+            log.info("stopped")
         else:
             sys.exit(__doc__)
 

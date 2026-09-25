@@ -67,6 +67,27 @@ def test_a_video_gets_a_poster_and_a_720p_preview(conn, s3, memory, tmp_path):
     assert tracks["video"]["width"] == 640  # 1280×1440 kept in proportion
 
 
+def test_a_preview_run_again_queues_what_comes_after_it_once(conn, s3, memory, tmp_path):
+    """The job runs again whenever its worker died after the handler and before the job was marked
+    done (`worker.reap`) — and what the first run queued is still waiting then."""
+    item_id, key = add_item(conn, memory, "video")
+    s3.upload_file(str(video(tmp_path / "original.mp4")), storage.bucket(), key)
+
+    preview.media_preview(conn, item_id)
+    preview.media_preview(conn, item_id)
+
+    queued = conn.execute(
+        "SELECT type, count(*) FROM jobs WHERE ref = %s GROUP BY type", (item_id,)
+    ).fetchall()
+    assert dict(queued) == {
+        "media_screening": 1,
+        "media_speech": 1,
+        "media_frame_info": 1,
+        "media_understanding": 1,
+    }
+    assert read_item(conn, item_id)[0] == "ready"
+
+
 @pytest.mark.parametrize("started_as, ends_as", [("processing", "failed"), ("ready", "ready")])
 def test_a_preview_that_keeps_failing_fails_the_item(conn, memory, started_as, ends_as):
     """Except when the item is already in the gallery: the catch-up sweep re-runs this job on photos

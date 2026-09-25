@@ -16,8 +16,11 @@ CREATE TABLE IF NOT EXISTS jobs (
     updated_at  timestamptz NOT NULL DEFAULT now()
 );
 
--- The only query the worker runs against this table.
+-- The two queries the worker runs against this table on every turn of its loop: the claim, and the
+-- search for jobs a dead worker left `running` (`reap`). `jobs` keeps a row for every job ever run,
+-- so neither may scan all of it.
 CREATE INDEX IF NOT EXISTS jobs_due_idx ON jobs (run_after) WHERE status = 'queued';
+CREATE INDEX IF NOT EXISTS jobs_running_idx ON jobs (updated_at) WHERE status = 'running';
 
 -- Postgres wakes the idle worker itself instead of it guessing when to look again. On the table,
 -- so it covers everyone who inserts — the API and the worker's own `enqueue` alike. Per statement,
