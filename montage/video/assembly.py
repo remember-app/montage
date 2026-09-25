@@ -284,7 +284,9 @@ def _assemble(clips, track, canvas, workdir, out, max_seconds=None):
                 continue  # past the ceiling, or no stretch of its own
             sound = workdir / f"sound-{index}.wav" if track is None else None
             before = clips[index - 1] if index else None
-            skip = max(begins / FPS - starts[index - 1], 0.0) if index else 0.0
+            # The clip before goes on from the frame its own part stopped at, so neither its
+            # picture nor its sound skips where one part hands over to the next.
+            skip = (begins - cuts[index - 1]) / FPS if index else 0.0
             _part(before, skip, clip, ends - begins, pipe, sound)
             if sound:
                 sounds.append(sound)
@@ -344,16 +346,22 @@ def _part(before, skip, clip, frames, pipe, sound=None):
     """
     inputs, graph, video = ["-protocol_whitelist", "file", "-i", str(clip.path)], [], "0:v"
     if before is not None:
-        tail = ("-ss", f"{skip:.6f}", "-protocol_whitelist", "file", "-i", str(before.path))
-        inputs = [*tail, *inputs]
+        # No more of it than the dissolve: acrossfade plays whatever precedes a track's last half
+        # second ahead of the fade, and that would put `clip`'s sound behind its picture.
+        tail = ("-ss", f"{skip:.6f}", "-t", str(CROSSFADE_SECONDS), "-protocol_whitelist", "file")
+        inputs = [*tail, "-i", str(before.path), *inputs]
         graph.append(f"[0:v][1:v]xfade=transition=fade:duration={CROSSFADE_SECONDS}:offset=0[v]")
         video = "[v]"
     heard = ()
     if sound is not None:
         # acrossfade накладывает конец одной дорожки на начало следующей ровно так, как xfade
-        # накладывает кадры, — поэтому звук и изображение остаются вместе на каждой склейке.
-        joined = "" if before is None else f"[1:a]acrossfade=d={CROSSFADE_SECONDS},"
-        graph.append(f"[0:a]{joined}apad[a]")
+        # накладывает кадры, — поэтому звук и изображение остаются вместе на каждой склейке. Хвост
+        # короче перехлёста он не склеивает, а глушит всю часть, — поэтому хвост добит тишиной.
+        joined = "[0:a]"
+        if before is not None:
+            graph.append(f"[0:a]apad=whole_dur={CROSSFADE_SECONDS}[tail]")
+            joined = f"[tail][1:a]acrossfade=d={CROSSFADE_SECONDS},"
+        graph.append(f"{joined}apad[a]")
         heard = ("-map", "[a]", "-c:a", "pcm_s16le", "-t", f"{frames / FPS:.6f}", str(sound))
     ffmpeg.run(
         *inputs,
