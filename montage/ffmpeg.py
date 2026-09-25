@@ -6,9 +6,12 @@ an exception whose text is worth reading. Nothing here knows what a preview, a p
 is; the callers do.
 """
 
+import contextlib
 import json
 import logging
+import os
 import subprocess
+import tempfile
 
 # Containers that are not media but a list of *other* files to go and fetch. ffmpeg picks its
 # demuxer by probing the bytes, and the api never looks inside an upload — `kind` is the phone's
@@ -24,21 +27,67 @@ PROBE_SECONDS = 60  # ffprobe reads a header; one still at it a minute on is not
 log = logging.getLogger("montage.ffmpeg")
 
 
-def _tool(*args, timeout=None):
+def _threads():
+    """How many threads one ffmpeg may run each decoder, filter graph and encoder on.
+
+    Left to itself ffmpeg takes as many as the node has processors, not as many as the pod was
+    given, and every thread of an encoder or a decoder holds frames of its own: the same montage
+    took 1.1 ГиБ on four processors and 1.45 on ten (running.md, «Образ»). A number here keeps the
+    memory the same on any node.
+    """
+    threads = os.environ.get("FFMPEG_THREADS") or "2"
+    if not threads.isdigit() or int(threads) < 1:
+        raise ValueError(f"FFMPEG_THREADS must be a whole number from 1, not {threads!r}")
+    return threads
+
+
+THREADS = _threads()
+
+
+def _held(args):
+    """`args` with every input's decoder, every filter graph and the encoder held to `THREADS`.
+
+    `-threads` belongs to the input it precedes, or to the output when it is the last option before
+    the file, so it goes in front of every `-i` and in front of the output — the last argument of
+    every call here. The two filter options are global.
+    """
+    *inputs_and_options, output = args
+    held = ["-filter_threads", THREADS, "-filter_complex_threads", THREADS]
+    for arg in inputs_and_options:
+        if arg == "-i":
+            held += ["-threads", THREADS]
+        held.append(arg)
+    return (*held, "-threads", THREADS, output)
+
+
+def _ffmpeg(*args):
+    """The command line of every ffmpeg here: silent unless it fails, deaf to the keyboard and held
+    to `THREADS`."""
+    return ("ffmpeg", "-nostdin", "-loglevel", "error", "-y", *_held(args))
+
+
+def _tool(*args, timeout=None, into=None):
     """A tool, its output, and its stderr in the exception when it fails — that text is what ends
     up in `jobs.last_error`, so it is the only account of what went wrong."""
-    done = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    done = subprocess.run(
+        args,
+        stdout=subprocess.PIPE if into is None else into,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=timeout,
+    )
     if done.returncode != 0:
         raise RuntimeError(f"{args[0]} failed: {done.stderr.strip()[-500:]}")
     return done.stdout
 
 
-def run(*args):
-    """ffmpeg, told to write a file and to say nothing unless it failed."""
+def run(*args, into=None):
+    """ffmpeg, told to write a file and to say nothing unless it failed — or, for an output named
+    `-`, to write it `into` a pipe that `encoding` holds open."""
     # `-protocol_whitelist file`: whatever the input turns out to be, it may not reach the network.
     # Belt to the braces of `refuse_playlists` — that one stops the demuxers that go looking, this
     # one stops where they could look.
-    _tool("ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-protocol_whitelist", "file", *args)
+    _tool(*_ffmpeg("-protocol_whitelist", "file", *args), into=into)
 
 
 def raw(*args):
@@ -47,13 +96,39 @@ def raw(*args):
     For the one caller whose *output* is the point rather than a file — the отсев, which reads the
     pixels it is judging straight off the pipe. `_tool`'s `text=True` would mangle them.
     """
-    done = subprocess.run(
-        ("ffmpeg", "-nostdin", "-loglevel", "error", "-protocol_whitelist", "file", *args),
-        capture_output=True,
-    )
+    done = subprocess.run(_ffmpeg("-protocol_whitelist", "file", *args), capture_output=True)
     if done.returncode != 0:
         raise RuntimeError(f"ffmpeg failed: {done.stderr.decode(errors='replace').strip()[-500:]}")
     return done.stdout
+
+
+@contextlib.contextmanager
+def encoding(frames, *args):
+    """An ffmpeg encoding what is written into it for as long as the block runs: the pipe to write
+    into, for `run(..., into=)`.
+
+    `frames` are the input options that say what is written — its format, size and rate — and
+    `args` what becomes of it, the file last. Leaving the block closes the pipe and waits for the
+    file to be finished. A failure here is raised over anything that broke the block: when the
+    encoder falls over, whatever was writing into it only sees its pipe break.
+    """
+    with tempfile.TemporaryFile() as said:
+        # Its complaints go to a file and not a pipe: a pipe nobody reads until the end would fill
+        # and stop the encoder mid-frame, with the writers stopped behind it.
+        encoder = subprocess.Popen(
+            _ffmpeg("-protocol_whitelist", "pipe", *frames, "-i", "pipe:0", *args),
+            stdin=subprocess.PIPE,
+            stderr=said,
+        )
+        try:
+            yield encoder.stdin
+        finally:
+            encoder.stdin.close()
+            if encoder.wait() != 0:
+                said.seek(0)
+                raise RuntimeError(
+                    f"ffmpeg failed: {said.read().decode(errors='replace').strip()[-500:]}"
+                )
 
 
 def probe(entry, path):
