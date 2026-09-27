@@ -109,10 +109,22 @@ def sweep_media_without_screening(conn):
     moment an item goes `ready` (`preview.media_preview`), and for old material that moment is long
     past. Until the job has run both columns are `null` — «не посчитано», which the gallery shows as
     no opinion at all rather than as a frame the analysis kept.
+
+    So is a frame kept before the job learned to tell retakes apart: it has a verdict and no frame
+    to compare (`media_frames`), and the memory's series are counted without it until it is looked
+    at once more. A kept file always leaves its frame behind, so it is asked about only the once.
     """
-    queued = _catch_up(conn, "media_screening", "item.screening_rejected IS NULL")
+    queued = _catch_up(
+        conn,
+        "media_screening",
+        """(item.screening_rejected IS NULL
+            OR (item.screening_rejected = false AND NOT EXISTS (
+              SELECT 1 FROM media_frames seen WHERE seen.media_id = item.id::text)))""",
+    )
     if queued:
-        log.info("queued a screening proposal for %s ready item(s) that had none", queued)
+        log.info(
+            "queued a screening for %s ready item(s) with no proposal or no frame kept", queued
+        )
     return queued
 
 

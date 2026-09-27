@@ -14,7 +14,7 @@ import pytest
 
 from montage.video import assembly, selection
 
-from pieces import at, clip
+from pieces import at, clip, picture
 
 # --- choosing ---------------------------------------------------------------
 
@@ -25,8 +25,9 @@ def cut(pieces, target_seconds, **marks):
 
 
 def test_a_burst_of_shots_leaves_only_its_sharpest():
-    burst = [at(0, 10), at(1, 90), at(2, 30)]  # three shots inside two seconds — one moment
-    apart = at(30, 20)
+    # Three shots of the same picture inside two seconds — one moment.
+    burst = [at(0, 10, frame=picture(1)), at(1, 90, frame=picture(1)), at(2, 30, frame=picture(1))]
+    apart = at(60, 20, frame=picture(1))
 
     chosen, rejected = selection.choose([*burst, apart], target_seconds=60)
 
@@ -38,25 +39,63 @@ def test_a_burst_of_shots_leaves_only_its_sharpest():
     assert [piece.rejected for piece in rejected] == [selection.DUPLICATE] * 2
 
 
+def test_a_retake_seconds_later_is_the_same_moment():
+    """The shot taken again ten seconds on, to catch the smile: the camera an inch aside and the
+    exposure the phone picked this time, and still the same picture — one moment, which a stopwatch
+    alone called two."""
+    first = at(0, 10, media_id="first", frame=picture(1))
+    retake = at(10, 90, media_id="retake", frame=picture(1, moved=(4, 2), light=0.8))
+
+    chosen, rejected = selection.choose([first, retake], target_seconds=60)
+
+    assert [(piece.media_id, piece.series_size) for piece in chosen] == [("retake", 2)]
+    assert [(piece.media_id, piece.rejected) for piece in rejected] == [
+        ("first", selection.DUPLICATE)
+    ]
+
+
+def test_two_different_pictures_a_second_apart_are_two_moments():
+    """The cake, then the guests a second later: taken as close as a burst, and nothing alike."""
+    cake = at(0, 10, media_id="cake", frame=picture(1))
+    guests = at(1, 90, media_id="guests", frame=picture(2))
+
+    assert cut([cake, guests], target_seconds=60) == [cake, guests]
+
+
+def test_a_retake_is_one_moment_with_other_shots_taken_in_between():
+    """A shot of the cake, one of the guests, and the cake again: the guests are a moment of their
+    own, and they do not split the cake's."""
+    cake = at(0, 10, media_id="cake", frame=picture(1))
+    guests = at(4, 50, media_id="guests", frame=picture(2))
+    cake_again = at(8, 90, media_id="cake again", frame=picture(1, moved=(-3, 1)))
+
+    chosen, rejected = selection.choose([cake, guests, cake_again], target_seconds=60)
+
+    assert [piece.media_id for piece in chosen] == ["guests", "cake again"]
+    assert [(piece.media_id, piece.rejected) for piece in rejected] == [
+        ("cake", selection.DUPLICATE)
+    ]
+
+
 def test_a_long_sequence_stays_several_moments():
-    """Measured from the first of a burst and not from the shot before it: a whole evening of
-    photographs a second apart is not one moment."""
-    every_second = [at(second, 10 + second) for second in range(6)]
+    """Measured from the first of a series and not from the shot before it: a table photographed
+    every ten seconds through the evening is not one moment, however alike it looks."""
+    every_ten = [at(10 * number, 10 + number, frame=picture(1)) for number in range(8)]
 
-    chosen = cut(every_second, target_seconds=60)
+    chosen = cut(every_ten, target_seconds=60)
 
-    # 0-1-2 is one moment and 3-4-5 the next, so the sharpest of each survives — each standing for
-    # the three of its own moment.
+    # 0–30 seconds is one moment and 40–70 the next, so the sharpest of each survives — each
+    # standing for the four of its own moment.
     assert chosen == [
-        dataclasses.replace(every_second[2], series_size=3),
-        dataclasses.replace(every_second[5], series_size=3),
+        dataclasses.replace(every_ten[3], series_size=4),
+        dataclasses.replace(every_ten[7], series_size=4),
     ]
 
 
 def test_a_file_with_no_capture_date_is_never_deduped():
     """Nothing says those two were taken together, and dropping one would drop material over a
-    missing EXIF field."""
-    undated = [at(0, 10, dated=False), at(1, 90, dated=False)]
+    missing EXIF field — however alike they look."""
+    undated = [at(0, 10, dated=False, frame=picture(1)), at(1, 90, dated=False, frame=picture(1))]
 
     assert cut(undated, target_seconds=60) == undated
 
@@ -168,7 +207,11 @@ def test_what_the_organizer_asked_for_is_paid_for_out_of_everyone_elses_time():
 def test_the_shot_the_organizer_asked_for_stands_for_its_own_burst():
     """Three shots of one moment, and the organizer picked the one they wanted. The other two are
     still that same moment, so they go — the burst does not get to be in the video twice."""
-    burst = [at(0, 10, media_id="a"), at(1, 90, media_id="b"), at(2, 30, media_id="c")]
+    burst = [
+        at(0, 10, media_id="a", frame=picture(1)),
+        at(1, 90, media_id="b", frame=picture(1)),
+        at(2, 30, media_id="c", frame=picture(1)),
+    ]
 
     chosen, rejected = selection.choose(burst, target_seconds=60, include=["a"])
 

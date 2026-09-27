@@ -15,6 +15,7 @@ import uuid
 from montage import journal, worker
 from montage.video import director, selection, story
 
+from pieces import picture
 from recorded import planning_over
 from rows import add_item, entries_of, journal_ready, order, read_montage, ready_material, stages_of
 
@@ -64,10 +65,11 @@ def test_the_understanding_stage_tells_what_was_seen_and_who_was_in_frame(conn, 
     }
 
 
-def test_a_series_is_one_entry_and_the_organizer_is_visible_in_the_decisions(conn, memory):
-    """Серия одинаковых кадров — одна запись «взял 1 из 4» на том, кто из неё остался, а не три
-    «мимо, дубль» рядом. Слово организатора видно с обеих сторон: `included` на том, что он велел
-    взять, `excluded` на вычеркнутом.
+def test_every_shot_of_a_series_is_told_and_the_organizer_is_visible_in_the_decisions(conn, memory):
+    """Серия одинаковых кадров — «взял 1 из 4» на том, кто из неё остался, и своё «мимо, дубль» на
+    каждом, кого он собой заменил: описание каждого человек уже видел на этапе разбора, и без
+    записи кадр пропал бы после него молча. Слово организатора видно с обеих сторон: `included` на
+    том, что он велел взять, `excluded` на вычеркнутом.
 
     А смазанного кадра на этом этапе нет вовсе: о нём рассказал отсев своей записью, и второе
     «мимо» с той же причиной — тот же кадр, пропущенный дважды, и завышенный счётчик «Мимо N».
@@ -100,7 +102,10 @@ def test_a_series_is_one_entry_and_the_organizer_is_visible_in_the_decisions(con
     )
 
     written = {one.media_id: one for one in entries_of(conn, montage_id, "directing")}
-    assert swallowed.media_id not in written, "серию рассказала одна запись выше"
+    assert (written[swallowed.media_id].decision, written[swallowed.media_id].reason) == (
+        "skip",
+        selection.DUPLICATE,
+    )
     assert blurred.media_id not in written, "о смазанном рассказал отсев, второго «мимо» нет"
     assert (written[of_a_burst.media_id].decision, written[of_a_burst.media_id].series_size) == (
         "take",
@@ -120,15 +125,16 @@ def test_a_series_is_one_entry_and_the_organizer_is_visible_in_the_decisions(con
     )
 
 
-def test_the_series_the_director_kept_is_one_entry_too(conn, memory):
-    """«Взял 1 из 4» — и на пути с нейросетью: серию прорежает тот же дедуп ещё до вопроса модели
-    (`director.direct`), размер серии едет до журнала на самом куске, и рассказана она одной
-    записью — мыслью режиссёра о том кадре, который из неё остался."""
+def test_the_series_the_director_kept_is_told_the_same_way(conn, memory):
+    """«Взял 1 из 4» и «мимо, дубль» — и на пути с нейросетью: серию прорежает тот же дедуп ещё до
+    вопроса модели (`director.direct`), размер серии едет до журнала на самом куске, а на каждом
+    съеденном им кадре — своя запись, хоть модель его и не видела."""
     journal_ready(conn)
     montage_id = order(conn, memory, {})
     of_a_burst = selection.Piece(media_id=str(uuid.uuid4()), kind="photo", series_size=4)
     alone = selection.Piece(media_id=str(uuid.uuid4()), kind="photo")
-    journal.begin(conn, montage_id, 2, 60)
+    swallowed = str(uuid.uuid4())
+    journal.begin(conn, montage_id, 3, 60)
 
     story.plan(
         conn,
@@ -137,6 +143,7 @@ def test_the_series_the_director_kept_is_one_entry_too(conn, memory):
         [
             {"media_id": of_a_burst.media_id, "thought": "Вносят торт", "decision": "take"},
             {"media_id": alone.media_id, "thought": "Накрывают на стол", "decision": "take"},
+            {"media_id": swallowed, "reason": selection.DUPLICATE, "decision": "skip"},
         ],
         set(),
     )
@@ -147,6 +154,7 @@ def test_the_series_the_director_kept_is_one_entry_too(conn, memory):
         4,
     )
     assert written[alone.media_id].series_size is None, "кадр сам по себе — не серия"
+    assert (written[swallowed].decision, written[swallowed].reason) == ("skip", selection.DUPLICATE)
 
 
 def test_the_director_tells_the_journal_the_plan_it_built(conn, s3, memory, tmp_path, monkeypatch):
@@ -348,12 +356,15 @@ def test_the_journal_takes_the_series_the_dedup_counted():
     остался, и дальше он едет с куском до журнала."""
     when = datetime.datetime(2026, 9, 21, 16, 0, tzinfo=datetime.timezone.utc)
     burst = [
-        selection.Piece(media_id="sharp", sharpness=9.0, when=when, captured_at=when),
+        selection.Piece(
+            media_id="sharp", sharpness=9.0, when=when, captured_at=when, frame=picture(1)
+        ),
         selection.Piece(
             media_id="soft",
             sharpness=1.0,
             when=when,
             captured_at=when + datetime.timedelta(seconds=1),
+            frame=picture(1),
         ),
     ]
 

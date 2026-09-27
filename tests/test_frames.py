@@ -1,4 +1,5 @@
-"""Кадр сам по себе: резкость, экспозиция и лучший момент файла — `montage/video/frames.py`.
+"""Кадр сам по себе: резкость, экспозиция, лучший момент файла и один ли это снимок с другим кадром
+— `montage/video/frames.py`.
 
 Ни базы, ни бакета, ни ffmpeg: крошечные серые кадры собраны здесь руками, ровно того размера,
 какой отдаёт ffmpeg. См. `docs/jobs/montage.md`.
@@ -9,6 +10,8 @@ import random
 import pytest
 
 from montage.video import frames, selection
+
+from pieces import picture
 
 FRAME_SIZE = frames.SAMPLE_WIDTH * frames.SAMPLE_HEIGHT
 
@@ -117,3 +120,34 @@ def test_a_rejected_file_still_says_where_its_best_frame_is():
 
     assert why == selection.EXPOSURE
     assert moment[0] == 1.0, "the one frame in it with anything in it at all"
+
+
+@pytest.mark.parametrize(
+    "retake",
+    [
+        picture(1, moved=(4, 2)),
+        picture(1, light=0.7),
+        picture(1, light=1.3),
+        picture(1, stepped_in=2),
+        picture(1, moved=(2, 1), light=0.8, stepped_in=2),
+    ],
+    ids=["camera moved", "darker", "brighter", "somebody stepped in", "all at once"],
+)
+def test_a_retake_of_the_same_picture_is_alike(retake):
+    """What a second try at the same shot changes: where the camera points by a few per cent of the
+    frame, what exposure the phone picks, somebody moving in a corner of it. None of it makes it
+    another picture."""
+    assert frames.alike(picture(1), retake)
+
+
+@pytest.mark.parametrize("other", [2, 3, 4, 5])
+def test_two_different_pictures_are_not_alike(other):
+    """However close together they were taken — that is the dedup's question, not this one."""
+    assert not frames.alike(picture(1), picture(other))
+
+
+def test_a_frame_that_is_not_there_is_like_nothing():
+    """A piece nobody has looked at yet carries no frame, and nothing can be said to be its twin —
+    not even another piece with no frame."""
+    assert not frames.alike(b"", picture(1))
+    assert not frames.alike(b"", b"")
