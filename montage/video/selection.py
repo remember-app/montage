@@ -80,6 +80,12 @@ class Piece:
     # The sampled frame of the best moment (`frames.sampled`), what `_dedup` tells a retake of the
     # same picture by. Empty until `judge` has looked at the file — and then nothing is like it.
     frame: bytes = dataclasses.field(default=b"", repr=False)
+    # Сколько на куске слышно его собственного звука, долей от 0 до 1: 0 — одна музыка, 1 — один
+    # живой звук, между — смесь, где музыке достаётся остальное. Выбирает режиссёр, кусок за
+    # куском; отсев не выбирает ничего, и под его кусками играет музыка. Кусок, которому нечем
+    # звучать, — фотография, клип без звука — идёт под музыку при любом числе здесь, а ролик без
+    # музыки весь звучит живым звуком (`assembly.assemble`).
+    live: float = 0.0
 
 
 def judge(piece):

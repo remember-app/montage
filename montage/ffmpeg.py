@@ -137,16 +137,21 @@ def encoding(frames, *args):
                 )
 
 
-def probe(entry, path):
-    """One `format=` field as ffprobe reports it, stripped. Empty when it does not say."""
+def probe(entry, path, stream=None):
+    """One `format=` field as ffprobe reports it, stripped — or, named a `stream` (`v:0`), that
+    stream's own field. Empty when it does not say."""
+    asked = (
+        ("-select_streams", stream, "-show_entries", f"stream={entry}")
+        if stream
+        else ("-show_entries", f"format={entry}")
+    )
     return _tool(
         "ffprobe",
         "-v",
         "error",
         "-protocol_whitelist",
         "file",
-        "-show_entries",
-        f"format={entry}",
+        *asked,
         "-of",
         "default=noprint_wrappers=1:nokey=1",
         str(path),
@@ -177,10 +182,11 @@ def format_tags(path):
     )
 
 
-def duration(path):
-    """Seconds as the container reports them, or None when it does not say."""
+def duration(path, stream=None):
+    """Seconds as the container reports them — the longest of its streams — or, named a `stream`,
+    as that one does. None when it does not say."""
     try:
-        return float(probe("duration", path))
+        return float(probe("duration", path, stream))
     except ValueError:
         return None
 

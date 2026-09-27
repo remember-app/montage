@@ -16,9 +16,12 @@ def about(duration, expected):
     return abs(duration - expected) <= RHYTHM_SLACK
 
 
-def loudness(path, at, seconds=1.2):
+def loudness(path, at, seconds=1.2, hz=None):
     """Насколько громко звучит кусочек файла: `mean_volume` в децибелах, как его считает ffmpeg.
-    Тишина — около −91 дБ (или −inf), живой звук и музыка — на десятки децибел громче."""
+    Тишина — около −91 дБ (или −inf), живой звук и музыка — на десятки децибел громче.
+
+    `hz` — только около этой частоты: когда в файле звучат два тона разом, так слышно каждый."""
+    band = f"bandpass=f={hz}:w=50," if hz else ""
     done = subprocess.run(
         (
             "ffmpeg",
@@ -31,7 +34,7 @@ def loudness(path, at, seconds=1.2):
             "-i",
             str(path),
             "-af",
-            "volumedetect",
+            f"{band}volumedetect",
             "-f",
             "null",
             "-",

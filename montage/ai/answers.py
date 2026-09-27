@@ -121,8 +121,9 @@ def counted(number):
 # Ответ модели — недоверенный ввод, а слова режиссёра увидят все участники воспоминания и рамку
 # «куда смотрит» приложение нарисует поверх кадра. Поэтому план разбирается здесь, у самой двери, и
 # выше уходит только то, что выдержало чтение: шаг без куска — не шаг, длина и начало отрезка не
-# конечным числом, часть не номером и рамка не четырьмя долями внутри кадра — их просто нет. Чей
-# кусок назван, здесь не проверить: что показали модели, знает `director`, он и сверяет.
+# конечным числом, часть не номером и рамка не четырьмя долями внутри кадра — их просто нет, а
+# звук, названный не так, — музыка. Чей кусок назван, здесь не проверить: что показали модели,
+# знает `director`, он и сверяет.
 
 
 def planned(answered):
@@ -151,15 +152,16 @@ def planned(answered):
 
 
 def _step(step):
-    """Один шаг плана: чей кусок, с какой секунды файла и сколько секунд, и что режиссёр о нём
-    сказал."""
+    """Один шаг плана: чей кусок, с какой секунды файла и сколько секунд, как он звучит и что
+    режиссёр о нём сказал."""
     media_id = _media_id(step)
     if media_id is None:
         return None
     return {
         "media_id": media_id,
-        "start": seconds(step.get("start")),
-        "seconds": seconds(step.get("seconds")),
+        "start": number(step.get("start")),
+        "seconds": number(step.get("seconds")),
+        "live": _live(step.get("audio"), step.get("level")),
         "thought": said(step.get("thought")) or said(step.get("accent")),
         "part": _part(step.get("part")),
         "part_title": said(step.get("part_title")),
@@ -187,15 +189,30 @@ def said(words):
     return words.strip() or None
 
 
-def seconds(number):
-    """Секунды — длина куска или его начало в файле — конечным числом, иначе никакие. Строку `"NaN"`
-    `float` читает в «не число», а оно проходит сквозь любые `min` и `max`, которыми их потом
+def number(value):
+    """Число — длина куска, его начало в файле, громкость — конечным, иначе никакое. Строку `"NaN"`
+    `float` читает в «не число», а оно проходит сквозь любые `min` и `max`, которыми его потом
     держат."""
     try:
-        number = float(number)
+        value = float(value)
     except (TypeError, ValueError):
         return None
-    return number if math.isfinite(number) else None
+    return value if math.isfinite(value) else None
+
+
+def _live(audio, level):
+    """Сколько на куске слышно его собственного звука, долей от 0 до 1 (`selection.Piece.live`).
+
+    `"music"` — нисколько, `"live"` — целиком, `"mix"` — `level`, втянутый в долю, а без
+    читаемого `level` — поровну: смесь режиссёр попросил, а громкость не назвал. Всё остальное —
+    нет поля, неизвестное слово, не строка — музыка, как звучал любой кусок до выбора звука.
+    """
+    if audio == "live":
+        return 1.0
+    if audio == "mix":
+        level = number(level)
+        return 0.5 if level is None else min(max(level, 0.0), 1.0)
+    return 0.0
 
 
 def _part(number):

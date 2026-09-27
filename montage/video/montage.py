@@ -4,8 +4,9 @@ The organizer orders a video, the api writes a `montages` row and queues `('mont
 `processing` onward the row is this worker's (see the api's migration `020.do.montages.sql`). Here
 the memory's ready material is pulled out of R2 — every original, and beside each photograph the
 large copy the preview already made of it — looked at frame by frame, the good moments are
-cut and crossfaded into one 1080p file under the music that was ordered — or with the clips' own
-live sound, when no music was ordered at all — and the row is left `ready` with its
+cut and crossfaded into one 1080p file under the music that was ordered, each piece heard with
+it, with its own sound or with both, as it was directed — or with the clips' own live sound, when
+no music was ordered at all — and the row is left `ready` with its
 keys on it — the video's and the cover's — then the api is knocked on so the phones get told.
 
 This module is the order and the plumbing around it: it reads the row, downloads the material,

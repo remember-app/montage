@@ -278,6 +278,23 @@ def test_a_photograph_named_twice_is_in_the_film_once_whatever_length_each_step_
     ]
 
 
+def test_the_director_chooses_what_each_piece_is_heard_with(described):
+    """Звук — выбор режиссёра на каждом куске, а не правило на весь ролик: музыка, живой звук
+    самого видео или смесь в названной доле. Смесь без доли — поровну; кусок, о звуке которого
+    не сказано ничего, — под музыку, как любой кусок до выбора звука. Что у фотографии своего
+    звука нет, знает сборка, а не режиссёр (`test_assembly.py`)."""
+    film, _, net = directed(described, "gemini_plan_segments.json", pieces=WITH_LONG_CLIP)
+
+    assert "audio" in asked(net) and "level" in asked(net), "модели не сказали, что звук — её"
+    assert [(piece.media_id, piece.live) for piece in film] == [
+        ("m-1", 0.0),
+        ("m-2", 1.0),
+        ("m-3", 0.0),
+        ("m-2", 0.3),
+        ("m-2", 0.5),
+    ]
+
+
 def test_a_named_stretch_stays_where_it_was_named_when_the_video_is_held_longer(described):
     """Растяжка до заказанной длины режет кусок заново вокруг `best_second` — как и биты, и десять
     минут. Вокруг момента, найденного отсевом (20-я секунда), отрезки съехали бы к нему; вокруг
@@ -421,6 +438,8 @@ def test_what_the_director_made_up_does_not_reach_the_journal(described):
     assert about(thoughts, "m-3")["thought"] is None, "мысль списком — не мысль"
     # Длина, которую нельзя прочитать числом, оставляет кусок таким, каким его отрезал отсев.
     assert [piece.seconds for piece in film] == [3.0, 4.0, selection.PHOTO_SECONDS]
+    # Звук неизвестным словом или списком — музыка, а доля смеси за единицей — единица.
+    assert [piece.live for piece in film] == [0.0, 1.0, 0.0]
 
 
 def test_what_the_database_cannot_hold_costs_the_plan_nothing_but_itself(described):

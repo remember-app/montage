@@ -3,6 +3,7 @@
 См. `docs/jobs/montage.md`, «Треки». Всё живое: настоящий Postgres, бакет и ffmpeg.
 """
 
+import dataclasses
 import json
 import uuid
 
@@ -13,7 +14,18 @@ from montage import ffmpeg, storage, worker
 from montage.video import assembly, library, music, rhythm, selection
 
 from checks import about, loudness
-from material import click_track, hush, jpeg, long_clip, mute_clip, probe, tone, unopenable, video
+from material import (
+    click_track,
+    draw,
+    hush,
+    jpeg,
+    long_clip,
+    mute_clip,
+    probe,
+    tone,
+    unopenable,
+    video,
+)
 from rows import add_item, api_params, fetch, layout_of, order, read_montage, ready_material
 
 
@@ -373,31 +385,39 @@ def test_the_live_sound_of_a_montage_without_music_fades_at_both_ends_instead_of
     )
 
 
-def test_without_music_every_piece_gets_a_track_even_when_it_has_nothing_to_say(tmp_path):
-    """Звук ролика без музыки склеивается тем же перехлёстом, что и картинка, а склеивать
-    что-то с ничем нельзя: дорожка есть у каждого куска — у клипа своя, у фотографии и у клипа,
-    снятого без звука, тишина той же формы и той же длины."""
-    silent_ones = (
-        ("фотография", selection.Piece(kind="photo", seconds=2.0, path=jpeg(tmp_path / "p.jpg"))),
-        (
-            "немой клип",
-            selection.Piece(kind="video", seconds=2.0, path=mute_clip(tmp_path / "mute.mp4")),
-        ),
-        (
-            "клип со звуком",
-            selection.Piece(kind="video", seconds=2.0, path=video(tmp_path / "loud.mp4")),
-        ),
-    )
-    for name, piece in silent_ones:
-        clip = tmp_path / f"clip-{len(name)}.mp4"
-        assembly._normalise(piece, "landscape", clip, live_sound=True)
+def test_every_piece_gets_a_track_even_when_it_has_nothing_to_say(tmp_path):
+    """Живой звук ролика склеивается тем же перехлёстом, что и картинка, — под музыку тоже, её
+    с ним смешивают кусок за куском, — а склеивать что-то с ничем нельзя: дорожка есть у каждого
+    куска — у клипа своя, у фотографии и у клипа, снятого без звука, тишина той же формы и той же
+    длины. Своя она или тишина — сборка знает: кусок без своего звука идёт под музыку.
 
-        normalised = probe(clip)
-        assert {stream["codec_type"] for stream in normalised["streams"]} == {"video", "audio"}, (
+    Картинка куска — ровно того числа кадров, что заказано, чем бы он ни звучал: звук, который
+    кончается раньше картинки, её не укорачивает, а клип в 24 кадра, которому `fps` добирает
+    последний кадр в конце, не теряет его из-за того, что звук кончился первым."""
+    short = tmp_path / "short.mp4"
+    draw(
+        "-f", "lavfi", "-i", "testsrc=size=640x480:rate=24:duration=3", "-f", "lavfi", "-i",
+        "sine=d=1", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(short),
+    )  # fmt: skip
+    pieces = (
+        ("фотография", False, selection.Piece(kind="photo", path=jpeg(tmp_path / "p.jpg"))),
+        ("немой клип", False, selection.Piece(kind="video", path=mute_clip(tmp_path / "m.mp4"))),
+        ("клип со звуком", True, selection.Piece(kind="video", path=video(tmp_path / "l.mp4"))),
+        ("клип в 24 кадра, чей звук короче", True, selection.Piece(kind="video", path=short)),
+    )
+    for index, (name, sounds, piece) in enumerate(pieces):
+        clip = tmp_path / f"clip-{index}.mp4"
+        cut = dataclasses.replace(piece, seconds=2.0, start=0.3 if piece.kind == "video" else 0.0)
+
+        its_own = assembly._normalise(cut, "landscape", clip)
+
+        assert its_own is sounds, f"кусок «{name}» — не тот ответ, свой ли у него звук"
+        streams = {stream["codec_type"]: stream for stream in probe(clip)["streams"]}
+        assert set(streams) == {"video", "audio"}, (
             f"у куска «{name}» нет звуковой дорожки — сборке нечего будет склеивать"
         )
-        assert float(normalised["format"]["duration"]) == pytest.approx(2.0, abs=0.15), (
-            f"кусок «{name}» вышел не той длины, и склейки разъедутся на эту разницу"
+        assert float(streams["video"]["duration"]) == pytest.approx(2.0, abs=0.01), (
+            f"картинка куска «{name}» вышла не той длины, и склейки разъедутся на эту разницу"
         )
 
 
