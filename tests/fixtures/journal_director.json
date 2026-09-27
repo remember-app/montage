@@ -150,49 +150,49 @@
       "stage": "directing",
       "state": "done",
       "started_at": "2026-01-01T00:00:18Z",
-      "finished_at": "2026-01-01T00:00:29Z",
+      "finished_at": "2026-01-01T00:00:30Z",
       "eta_seconds": 0,
       "done_count": 13,
       "total_count": 13,
       "outcome": {
         "of": 13,
         "parts": 3,
-        "frames": 5,
+        "frames": 6,
         "part_titles": [
           "Сборы",
           "Торт",
           "Тосты"
         ]
       },
-      "updated_at": "2026-01-01T00:00:29Z"
+      "updated_at": "2026-01-01T00:00:30Z"
     },
     {
       "stage": "rhythm",
       "state": "done",
-      "started_at": "2026-01-01T00:00:30Z",
-      "finished_at": "2026-01-01T00:00:31Z",
+      "started_at": "2026-01-01T00:00:31Z",
+      "finished_at": "2026-01-01T00:00:32Z",
       "eta_seconds": 0,
-      "done_count": 5,
-      "total_count": 5,
+      "done_count": 6,
+      "total_count": 6,
       "outcome": {
         "cuts": 0,
         "track": []
       },
-      "updated_at": "2026-01-01T00:00:31Z"
+      "updated_at": "2026-01-01T00:00:32Z"
     },
     {
       "stage": "assembly",
       "state": "done",
-      "started_at": "2026-01-01T00:00:32Z",
-      "finished_at": "2026-01-01T00:00:33Z",
+      "started_at": "2026-01-01T00:00:33Z",
+      "finished_at": "2026-01-01T00:00:34Z",
       "eta_seconds": 0,
-      "done_count": 5,
-      "total_count": 5,
+      "done_count": 6,
+      "total_count": 6,
       "outcome": {
-        "cuts": 4,
+        "cuts": 5,
         "seconds": 15.0
       },
-      "updated_at": "2026-01-01T00:00:33Z"
+      "updated_at": "2026-01-01T00:00:34Z"
     }
   ],
   "entries": [
@@ -443,7 +443,7 @@
       "n": 15,
       "stage": "directing",
       "media": null,
-      "thought": "План на четыре части: сборы, торт, тосты — и салют, которому в ролике не хватит места. Собака под столом в эту историю не встала.",
+      "thought": "План на четыре части: сборы, торт, тосты — клип с тостом двумя отрезками — и салют, которому в ролике не хватит места. Собака под столом в эту историю не встала.",
       "decision": null,
       "reason": null,
       "series_size": null,
@@ -496,14 +496,14 @@
       "n": 18,
       "stage": "directing",
       "media": "f3",
-      "thought": "Чокаются — беру середину клипа, там слышен смех.",
+      "thought": "Поднимают бокалы — беру начало клипа.",
       "decision": "take",
       "reason": null,
       "series_size": null,
       "story_part": 3,
       "story_part_title": "Тосты",
-      "source_from_seconds": 1.75,
-      "source_to_seconds": 6.25,
+      "source_from_seconds": 0.5,
+      "source_to_seconds": 3.0,
       "labels": null,
       "focus": null,
       "created_at": "2026-01-01T00:00:22Z"
@@ -532,6 +532,22 @@
     {
       "n": 20,
       "stage": "directing",
+      "media": "f3",
+      "thought": "Чокаются — конец того же клипа, там слышен смех.",
+      "decision": "take",
+      "reason": null,
+      "series_size": null,
+      "story_part": 3,
+      "story_part_title": "Тосты",
+      "source_from_seconds": 5.0,
+      "source_to_seconds": 7.5,
+      "labels": null,
+      "focus": null,
+      "created_at": "2026-01-01T00:00:24Z"
+    },
+    {
+      "n": 21,
+      "stage": "directing",
       "media": "f8",
       "thought": "Салют во дворе — красивый финал, если хватит времени.",
       "decision": "skip",
@@ -543,10 +559,10 @@
       "source_to_seconds": null,
       "labels": null,
       "focus": null,
-      "created_at": "2026-01-01T00:00:24Z"
+      "created_at": "2026-01-01T00:00:25Z"
     },
     {
-      "n": 21,
+      "n": 22,
       "stage": "directing",
       "media": "f10",
       "thought": null,
@@ -559,29 +575,13 @@
       "source_to_seconds": null,
       "labels": null,
       "focus": null,
-      "created_at": "2026-01-01T00:00:25Z"
-    },
-    {
-      "n": 22,
-      "stage": "directing",
-      "media": "f6",
-      "thought": "собака не про этот вечер",
-      "decision": "skip",
-      "reason": "left_out",
-      "series_size": null,
-      "story_part": null,
-      "story_part_title": null,
-      "source_from_seconds": null,
-      "source_to_seconds": null,
-      "labels": null,
-      "focus": null,
       "created_at": "2026-01-01T00:00:26Z"
     },
     {
       "n": 23,
       "stage": "directing",
-      "media": "f7",
-      "thought": null,
+      "media": "f6",
+      "thought": "собака не про этот вечер",
       "decision": "skip",
       "reason": "left_out",
       "series_size": null,
@@ -596,6 +596,22 @@
     {
       "n": 24,
       "stage": "directing",
+      "media": "f7",
+      "thought": null,
+      "decision": "skip",
+      "reason": "left_out",
+      "series_size": null,
+      "story_part": null,
+      "story_part_title": null,
+      "source_from_seconds": null,
+      "source_to_seconds": null,
+      "labels": null,
+      "focus": null,
+      "created_at": "2026-01-01T00:00:28Z"
+    },
+    {
+      "n": 25,
+      "stage": "directing",
       "media": "f9",
       "thought": null,
       "decision": "skip",
@@ -607,7 +623,7 @@
       "source_to_seconds": null,
       "labels": null,
       "focus": null,
-      "created_at": "2026-01-01T00:00:28Z"
+      "created_at": "2026-01-01T00:00:29Z"
     }
   ],
   "layout": [
@@ -624,12 +640,17 @@
     {
       "media": "f3",
       "start_seconds": 6.0,
-      "duration_seconds": 4.5
+      "duration_seconds": 2.5
     },
     {
       "media": "f4",
-      "start_seconds": 10.0,
+      "start_seconds": 8.0,
       "duration_seconds": 3.0
+    },
+    {
+      "media": "f3",
+      "start_seconds": 10.5,
+      "duration_seconds": 2.5
     },
     {
       "media": "f10",

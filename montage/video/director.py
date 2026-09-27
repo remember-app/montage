@@ -4,8 +4,9 @@ The third module of the montage beside отбор and сборка (doc-03, «С
 модулей»). It is handed the same judged pieces `selection` works on and, instead of scoring them,
 asks the cloud model to direct them: it has read what is in every frame (`understanding.py`) and
 what is said in every clip (`speech.py`), and it is given the organizer's own story, the two lists
-and the length that was ordered. What comes back is an order, a length per piece and a note on what
-each is there for.
+and the length that was ordered. What comes back is an order, a length per piece — out of a clip,
+the stretch of it, and as many stretches of one clip as the film wants — and a note on what each is
+there for.
 
 The pieces it hands back are `assembly`'s to lay down, exactly as `selection.choose`'s are — nothing
 downstream knows which of the two cut the video. And `(None, ())` is an answer here: no cloud model
@@ -32,7 +33,8 @@ from montage.video import assembly, selection
 
 # What one piece may be held for, whatever the plan says. Under a second is a flash nobody sees;
 # longer than the ceiling is a photograph that reads as a frozen video. A clip is bounded by itself
-# as well — `selection.cut_to` never asks a file for more than it has.
+# as well — `selection.cut_to` never asks a file for more than it has. The prompt (`ai.PLAN`) names
+# the model the same window, in words.
 MIN_PIECE_SECONDS = 1.0
 MAX_PIECE_SECONDS = 8.0
 
@@ -62,8 +64,9 @@ def direct(
     `brain` is for the tests; the worker takes the gateway the environment gives it.
 
     Слова режиссёра — вторым, готовыми полями журнала (`journal.COLUMNS`), порядком плана: первой
-    мысль о плане в целом, за ней по записи на каждый показанный модели кадр и «мимо» на каждом
-    вычеркнутом организатором.
+    мысль о плане в целом, за ней по записи на каждый кусок плана — у видео их бывает несколько, —
+    «мимо» на каждом показанном модели кадре, которого в плане нет, и на каждом вычеркнутом
+    организатором. «Беру» среди них стоят тем же порядком, что куски ролика.
     """
     brain = brain or ai.AI(conn)
     if brain.provider is None:
@@ -109,16 +112,18 @@ def direct(
     )
     log.info("montage %s: the director's plan is %s", ref, planned)
 
-    # Мысль о плане в целом — первой записью этапа и без кадра: она про фильм, а не про кусок.
-    thoughts = [{"thought": planned["overview"]}] if planned.get("overview") else []
-
+    # Кусок плана — вместе со словами режиссёра о нём: одно видео может стоять в плане несколькими
+    # отрезками, и «беру» или «мимо» решается о каждом отрезке, а не о файле.
     chosen, taken = [], set()
     for step in planned.get("plan") or []:
         piece = candidates.get(step["media_id"])
-        if piece is None or piece.media_id in taken:
-            # A piece the model invented, one it was never shown, or the same one twice. The plan is
-            # the model's; what material there is stays ours — и в журнале ему тоже не место:
-            # рассказ идёт о кадрах воспоминания, а не о том, что модель себе вообразила.
+        if piece is not None:
+            piece = _cut(piece, step["seconds"], step["start"])
+        if piece is None or (piece.media_id, piece.start, piece.seconds) in taken:
+            # A piece the model invented, one it was never shown, or the same stretch of the same
+            # file twice. The plan is the model's; what material there is stays ours — и в журнале
+            # ему тоже не место: рассказ идёт о кадрах воспоминания, а не о том, что модель себе
+            # вообразила.
             log.info(
                 "montage %s: the plan names %s, which is not material of ours or is already "
                 "in the film — skipped",
@@ -126,66 +131,76 @@ def direct(
                 step["media_id"],
             )
             continue
-        taken.add(piece.media_id)
-        chosen.append(_cut(piece, step["seconds"]))
-        thoughts.append(_thought(step))
+        taken.add((piece.media_id, piece.start, piece.seconds))
+        chosen.append((piece, _thought(step)))
 
     # «Включить» is not the model's to refuse. A piece the organizer named and the plan left out
     # goes in at the end of it: the order is the director's, and there is no place inside it that is
     # obviously this piece's own.
+    in_plan = {piece.media_id for piece, _ in chosen}
     for media_id, piece in candidates.items():
-        if media_id in include and media_id not in taken:
+        if media_id in include and media_id not in in_plan:
             log.info(
                 "montage %s: the plan left out %s, which the order asks for — putting it back",
                 ref,
                 media_id,
             )
-            taken.add(media_id)
-            chosen.append(_cut(piece, None))
             # Своих слов у режиссёра об этом кадре нет — он его не брал; чьё это слово, скажет
             # журналом оркестратор.
-            thoughts.append({"media_id": media_id})
-
-    # Остальное, что модели показали: «мимо» с кодом `left_out` и её словами о том, почему, —
-    # мыслью: причину журнал держит кодом, и слова в ней приложение показало бы как
-    # «не подошёл».
-    # Отсеянного и съеденного дедупом модель не видела, и здесь их нет: о первом рассказал отсев,
-    # второй — в «взял 1 из N» оставшегося от серии.
-    for media_id in candidates:
-        if media_id not in taken:
-            thoughts.append(
-                {
-                    "media_id": media_id,
-                    "reason": LEFT_OUT,
-                    "thought": planned.get("left_out", {}).get(media_id),
-                }
-            )
-    # Вычеркнутого модель тоже не видела, но «мимо» у него есть — слово организатора, как на пути
-    # отсева (`selection.choose`): кроме этой записи, о нём в журнале не рассказал бы никто.
-    thoughts += (
-        {"media_id": piece.media_id, "reason": selection.EXCLUDED}
-        for piece in pieces
-        if piece.media_id in exclude and not piece.rejected
-    )
+            chosen.append((_cut(piece), {"media_id": media_id}))
+            in_plan.add(media_id)
 
     fitted = []
-    for piece in chosen:
+    for piece, thought in chosen:
         # The length that was ordered, held to here rather than trusted to the prompt — except over
         # «включить», which is not weighed against anything, and over the first piece, because a
-        # montage shorter than asked for is a montage and an empty one is not.
-        if (
-            fitted
-            and piece.media_id not in include
-            and assembly.length_of(fitted + [piece]) > target_seconds
-        ):
+        # montage shorter than asked for is a montage and an empty one is not. «Включить» asks for
+        # the file, once: a second stretch of the same clip is the director's, weighed like any.
+        # Решение ставится здесь, а не там, где сказаны слова: кусок, который не влез, — это
+        # «мимо» с его же мыслью при нём.
+        spared = not fitted or (
+            piece.media_id in include and piece.media_id not in {one.media_id for one in fitted}
+        )
+        if not spared and assembly.length_of(fitted + [piece]) > target_seconds:
             log.info(
                 "montage %s: the plan runs past the %.0fs ordered, %s is left out of it",
                 ref,
                 target_seconds,
                 piece.media_id,
             )
+            thought.update(decision="skip", reason=selection.NO_ROOM)
             continue
+        thought["decision"] = "take"
         fitted.append(piece)
+
+    # Мысль о плане в целом — первой записью этапа и без кадра: она про фильм, а не про кусок. За
+    # ней — по записи на каждый кусок плана, его порядком: взятые идут тем же порядком, что и куски
+    # ролика, и по нему журнал связывает слова с отрезком (`story.plan`).
+    thoughts = [{"thought": planned["overview"]}] if planned.get("overview") else []
+    thoughts += (thought for _, thought in chosen)
+    # Остальное, что модели показали: «мимо» с кодом `left_out` и её словами о том, почему, —
+    # мыслью: причину журнал держит кодом, и слова в ней приложение показало бы как
+    # «не подошёл».
+    # Отсеянного и съеденного дедупом модель не видела, и здесь их нет: о первом рассказал отсев,
+    # второй — в «взял 1 из N» оставшегося от серии.
+    thoughts += (
+        {
+            "media_id": media_id,
+            "decision": "skip",
+            "reason": LEFT_OUT,
+            "thought": planned.get("left_out", {}).get(media_id),
+        }
+        for media_id in candidates
+        if media_id not in in_plan
+    )
+    # Вычеркнутого модель тоже не видела, но «мимо» у него есть — слово организатора, как на пути
+    # отсева (`selection.choose`): кроме этой записи, о нём в журнале не рассказал бы никто.
+    thoughts += (
+        {"media_id": piece.media_id, "decision": "skip", "reason": selection.EXCLUDED}
+        for piece in pieces
+        if piece.media_id in exclude and not piece.rejected
+    )
+
     if not fitted:
         log.warning(
             "montage %s: the plan had nothing of ours in it, cutting the video by the "
@@ -199,7 +214,7 @@ def direct(
         len(fitted),
         assembly.length_of(fitted),
     )
-    return fitted, _decided(thoughts, {piece.media_id for piece in fitted})
+    return fitted, thoughts
 
 
 def _material(pieces, include, exclude):
@@ -254,16 +269,13 @@ def _shot(piece, known, include):
     return {
         "media_id": piece.media_id,
         "kind": piece.kind,
-        # What this file can actually give. A clip cannot be held longer than it runs, and a plan
-        # that asked for it anyway would be quietly cut back to the truth by `_cut`.
-        "seconds_available": round(_available(piece), 1),
+        # What this file can actually give. A clip — how long it runs, whole: a stretch out of the
+        # middle of it, or two, can only be asked for by a director who knows there is a middle. A
+        # photograph — as long as any piece may be held.
+        "seconds_available": round(piece.duration or MAX_PIECE_SECONDS, 1),
         **known.get(piece.media_id, {}),
         **({"must_include": True} if piece.media_id in include else {}),
     }
-
-
-def _available(piece):
-    return min(MAX_PIECE_SECONDS, piece.duration) if piece.duration else MAX_PIECE_SECONDS
 
 
 def _thought(step):
@@ -281,33 +293,29 @@ def _thought(step):
     }
 
 
-def _decided(thoughts, kept):
-    """Те же слова, с решением по каждому кадру: в ролике — «беру», не в ролике — «мимо».
+def _cut(piece, seconds=None, start=None):
+    """The piece at the length the plan gave it and, out of a clip, from the second the plan named —
+    within what the screen and the file allow.
 
-    Решение ставится здесь, а не там, где сказаны слова: план ужимается по заказанной длине уже
-    после того, как режиссёр всё сказал, и кадр, который в неё не влез, — это «мимо» с его же
-    мыслью при нём. Мысль о плане в целом решения не несёт вовсе — она не про кадр.
-    """
-    for thought in thoughts:
-        if "media_id" not in thought:
-            continue
-        thought["decision"] = "take" if thought["media_id"] in kept else "skip"
-        if thought["decision"] == "skip":
-            thought["reason"] = thought.get("reason") or selection.NO_ROOM
-    return thoughts
-
-
-def _cut(piece, seconds):
-    """The piece at the length the plan gave it — within what the screen and the file allow.
-
-    `seconds` is a finite number or None (`answers.seconds`). None — a step that said nothing about
-    its length, or nothing that is a number — keeps the length отбор cut it at: the plan is about
-    the order of the film first, and a missing number is not a reason to leave a piece out of it.
+    Both are finite numbers or None (`answers.seconds`). No length — a step that said nothing about
+    it, or nothing that is a number — keeps the length отбор cut it at: the plan is about the order
+    of the film first, and a missing number is not a reason to leave a piece out of it. No start
+    keeps the clip cut around its best moment, as отбор cut it; a photograph has no stretch to
+    start anywhere, it is shown whole.
     """
     if seconds is None:
         seconds = piece.seconds
     else:
         seconds = min(max(seconds, MIN_PIECE_SECONDS), MAX_PIECE_SECONDS)
+    if start is not None and piece.kind == "video" and piece.duration:
+        # The stretch the director named, pulled inside the file, becomes the moment the piece is
+        # built around. Every later cut of it — held longer for the ordered length
+        # (`selection.stretch`), to a beat (`rhythm.fit`), at ten minutes (`selection.cap`) — is
+        # centred on `best_second`, and around отбор's moment it would slide off the stretch that
+        # was asked for. The cover of a montage that opens on it is taken from there too.
+        held = min(seconds, piece.duration)
+        start = min(max(start, 0.0), piece.duration - held)
+        piece = dataclasses.replace(piece, best_second=start + held / 2)
     # `rejected` goes with it: the piece is in the film, so nothing about it is turned down — the
     # same thing `selection.choose` does to a piece the organizer overruled it on.
     return dataclasses.replace(selection.cut_to(piece, seconds), rejected=None)
