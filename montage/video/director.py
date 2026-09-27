@@ -119,7 +119,13 @@ def direct(
         piece = candidates.get(step["media_id"])
         if piece is not None:
             piece = _cut(piece, step["seconds"], step["start"])
-        if piece is None or (piece.media_id, piece.start, piece.seconds) in taken:
+            # A photograph has one stretch, the whole of it, whatever length it is held for.
+            key = (
+                (piece.media_id, piece.start, piece.seconds)
+                if piece.kind == "video"
+                else piece.media_id
+            )
+        if piece is None or key in taken:
             # A piece the model invented, one it was never shown, or the same stretch of the same
             # file twice. The plan is the model's; what material there is stays ours — и в журнале
             # ему тоже не место: рассказ идёт о кадрах воспоминания, а не о том, что модель себе
@@ -131,7 +137,7 @@ def direct(
                 step["media_id"],
             )
             continue
-        taken.add((piece.media_id, piece.start, piece.seconds))
+        taken.add(key)
         chosen.append((piece, _thought(step)))
 
     # «Включить» is not the model's to refuse. A piece the organizer named and the plan left out

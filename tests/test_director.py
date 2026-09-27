@@ -264,6 +264,17 @@ def test_the_director_names_the_stretch_of_a_clip_and_may_take_several_of_one(de
     ], "по записи на отрезок, а повтор того же отрезка в рассказ не попал"
 
 
+def test_a_photograph_named_twice_is_in_the_film_once_whatever_length_each_step_asked(described):
+    """У фотографии отрезок один — она вся, — и второй шаг плана с тем же фото и другой длиной
+    (3 и 2 секунды) — не второй отрезок, а повтор: в ролике оно одно, длиной первого шага."""
+    film, thoughts, _ = directed(described, "gemini_plan_segments.json", pieces=WITH_LONG_CLIP)
+
+    assert [piece.seconds for piece in film if piece.media_id == "m-1"] == [3.0]
+    assert [one["thought"] for one in thoughts if one.get("media_id") == "m-1"] == [
+        "Стол накрывают — с этого вечер и начинается."
+    ]
+
+
 def test_a_named_stretch_stays_where_it_was_named_when_the_video_is_held_longer(described):
     """Растяжка до заказанной длины режет кусок заново вокруг `best_second` — как и биты, и десять
     минут. Вокруг момента, найденного отсевом (20-я секунда), отрезки съехали бы к нему; вокруг
