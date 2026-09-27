@@ -107,9 +107,11 @@ def montage(conn, ref):
 
     items = conn.execute(
         # Ordered the way the gallery orders the same rows (api, `src/media/gallery.ts`): the
-        # finished video runs in the order the memory is already read in.
+        # finished video runs in the order the memory is already read in. A frame its owner hid is
+        # not material at all: it never reaches the отбор or the director, so «включить» on it
+        # names nothing and the hiding wins (TASK-424).
         """SELECT id, kind, original_key, preview_key, captured_at, created_at
-           FROM media_items WHERE memory_id = %s AND status = 'ready'
+           FROM media_items WHERE memory_id = %s AND status = 'ready' AND NOT hidden
            ORDER BY coalesce(captured_at, created_at), id""",
         (memory_id,),
     ).fetchall()
