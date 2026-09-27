@@ -1,19 +1,36 @@
-"""Live checks of the отсев's proposal on one file — see README.md.
+"""Live checks of the отсев's proposal on one file, and on the retakes of a memory — see README.md.
 
 Real everything, like `test_media.py`: a real Postgres, a real bucket, real ffmpeg, and fixtures
 ffmpeg draws on the spot. What `judge` makes of a frame with no file behind it is
 `test_selection.py`; these are here for the round trip — an original out of the bucket and a verdict
-onto the row the api hands to the gallery.
+onto the row the api hands to the gallery. Counting a memory's series again is the one thing checked
+over rows alone: frames made up in the test (`pieces.picture`) where the job would have left them.
 
 Warning: these wipe the `jobs` table of whatever DATABASE_URL points at, and write into the bucket
 R2_ENDPOINT points at.
 """
 
+import datetime
+
 from montage import storage, sweeps, worker
+from montage.media import screening
 from montage.video import selection
 
 from material import draw, jpeg, video
-from rows import add_item, order, read_item, read_montage, ready_material
+from pieces import picture
+from rows import (
+    add_item,
+    api_params,
+    entries_of,
+    journal_ready,
+    layout_of,
+    order,
+    read_item,
+    read_montage,
+    ready_material,
+)
+
+EVENING = datetime.datetime(2026, 9, 5, 19, tzinfo=datetime.UTC)
 
 
 def screening_of(conn, item_id):
@@ -21,6 +38,72 @@ def screening_of(conn, item_id):
     return conn.execute(
         "SELECT screening_rejected, screening_reason FROM media_items WHERE id = %s", (item_id,)
     ).fetchone()
+
+
+def shots(tmp_path):
+    """A picture, a softer retake of the same picture, and something else altogether — what a phone
+    leaves after the cake is photographed twice and the guests once in between."""
+    sharp, soft, other = tmp_path / "cake.jpg", tmp_path / "cake-again.jpg", tmp_path / "guests.jpg"
+    jpeg(sharp)
+    draw("-i", str(sharp), "-vf", "gblur=sigma=6", str(soft))
+    draw("-f", "lavfi", "-i", "smptebars=size=1200x800", "-frames:v", "1", str(other))
+    return sharp, soft, other
+
+
+def shot(conn, s3, memory, path, second):
+    """A photograph taken `second` seconds into the evening, uploaded and `ready`, not screened."""
+    item_id, key = add_item(conn, memory, "photo", status="ready")
+    s3.upload_file(str(path), storage.client().bucket, key)
+    conn.execute(
+        "UPDATE media_items SET captured_at = %s WHERE id = %s",
+        (EVENING + datetime.timedelta(seconds=second), item_id),
+    )
+    return item_id
+
+
+def screen(conn, *item_ids):
+    for item_id in item_ids:
+        worker.enqueue(conn, "media_screening", item_id)
+        assert worker.run_once(conn) is True
+
+
+def kept(conn, memory, second, frame, sharpness, *, reason=None, hidden=False):
+    """A ready photograph the job has already looked at: its verdict on the row and its frame where
+    the job leaves it, with no file behind either."""
+    item_id, _ = add_item(conn, memory, "photo", status="ready")
+    conn.execute(
+        """UPDATE media_items
+           SET captured_at = %s, screening_rejected = %s, screening_reason = %s, hidden = %s
+           WHERE id = %s""",
+        (EVENING + datetime.timedelta(seconds=second), reason is not None, reason, hidden, item_id),
+    )
+    conn.execute(
+        "INSERT INTO media_frames (media_id, frame, sharpness) VALUES (%s, %s, %s)",
+        (item_id, frame, sharpness),
+    )
+    return item_id
+
+
+def all_but_the_proposal(conn, item_id):
+    """Every column of the row but the two the proposal is written in and the time it was — what the
+    gallery shows of the frame, and whatever anybody else may ever keep on it."""
+    return conn.execute(
+        """SELECT to_jsonb(item) - 'screening_rejected' - 'screening_reason' - 'updated_at'
+           FROM media_items item WHERE id = %s""",
+        (item_id,),
+    ).fetchone()[0]
+
+
+def proposals(conn, memory):
+    """Every row of the memory: id → `(rejected, why, updated_at)`."""
+    return {
+        str(item_id): rest
+        for item_id, *rest in conn.execute(
+            """SELECT id, screening_rejected, screening_reason, updated_at
+               FROM media_items WHERE memory_id = %s""",
+            (memory[0],),
+        )
+    }
 
 
 def only_screening_jobs_for(conn, item_id):
@@ -215,3 +298,146 @@ def test_the_proposal_does_not_decide_what_goes_into_a_video(conn, s3, memory, t
     status, _, duration, error_text = read_montage(conn, montage_id)
     assert (status, error_text) == ("ready", None)
     assert 8.5 <= duration <= 9.5, "the same video as the one nobody marked at all"
+
+
+def test_a_retake_is_marked_a_duplicate_before_anybody_orders_a_video(conn, s3, memory, tmp_path):
+    """The softer shot of the cake is proposed as a duplicate the moment the sharper one comes in —
+    on its own row, though the job that ran was the other file's — and the order then folds exactly
+    that one into its series.
+
+    Only the proposal changes: the retake stays in the gallery as it was, `ready` and not hidden,
+    with every other column of the row the gallery reads left alone."""
+    journal_ready(conn)
+    sharp, soft, other = shots(tmp_path)
+    retake = shot(conn, s3, memory, soft, 10)
+    guests = shot(conn, s3, memory, other, 4)
+    screen(conn, retake, guests)
+    assert screening_of(conn, retake) == (False, None), "alone, it is nobody's retake"
+
+    before = all_but_the_proposal(conn, retake)
+    first = shot(conn, s3, memory, sharp, 0)
+    screen(conn, first)
+
+    assert screening_of(conn, retake) == (True, selection.DUPLICATE)
+    assert screening_of(conn, first) == (False, None)
+    assert screening_of(conn, guests) == (False, None), "another picture between the two"
+    assert all_but_the_proposal(conn, retake) == before, "still ready, not hidden, the same copies"
+
+    montage_id = order(conn, memory, api_params(target_seconds=10))
+    worker.enqueue(conn, "montage", montage_id)
+    assert worker.run_once(conn) is True
+
+    folded = [
+        entry.media_id
+        for entry in entries_of(conn, montage_id, "directing")
+        if entry.reason == selection.DUPLICATE
+    ]
+    assert folded == [retake], "the order folds the very frame the proposal marked"
+
+
+def test_the_series_are_counted_over_the_memory_from_scratch(conn, memory):
+    """Every count is the whole memory as it is now, and nothing of an earlier count survives it:
+    asked twice of the same material, the answer is the same and not one row is written the second
+    time; a new shot that moves the series moves the marks with it — onto a frame that was kept and
+    off one that was a retake, which is simply kept again.
+
+    What the file alone was turned down for is not the recount's to touch, and it does not take part
+    in it either, however sharp: at the order `selection.choose` puts it aside before its dedup. A
+    hidden frame is not material at all."""
+    cake = kept(conn, memory, 0, picture(1), 50)
+    retake = kept(conn, memory, 10, picture(1, moved=(3, 0)), 30)
+    guests = kept(conn, memory, 15, picture(2), 40)
+    blurred = kept(conn, memory, 12, picture(1), 100, reason=selection.BLUR)
+    hidden = kept(conn, memory, 5, picture(1), 200, hidden=True)
+
+    screening._duplicates(conn, memory[0])
+    counted = proposals(conn, memory)
+    assert {item_id: tuple(verdict[:2]) for item_id, verdict in counted.items()} == {
+        cake: (False, None),
+        retake: (True, selection.DUPLICATE),
+        guests: (False, None),
+        blurred: (True, selection.BLUR),
+        hidden: (False, None),
+    }
+
+    screening._duplicates(conn, memory[0])
+    assert proposals(conn, memory) == counted, "the same material, the same answer, nothing written"
+
+    # Twenty-five seconds before the cake, the same cake, sharper: the series now starts there, and
+    # the retake at ten seconds is thirty-five past its first shot — a moment of its own.
+    earlier = kept(conn, memory, -25, picture(1, moved=(0, 2)), 60)
+    screening._duplicates(conn, memory[0])
+
+    recounted = proposals(conn, memory)
+    assert {item_id: tuple(verdict[:2]) for item_id, verdict in recounted.items()} == {
+        earlier: (False, None),
+        cake: (True, selection.DUPLICATE),
+        retake: (False, None),
+        guests: (False, None),
+        blurred: (True, selection.BLUR),
+        hidden: (False, None),
+    }
+    assert recounted[guests] == counted[guests], "a row whose answer held is not rewritten"
+
+
+def test_the_organizers_word_on_a_duplicate_is_the_orders_and_no_recount_takes_it(
+    conn, s3, memory, tmp_path
+):
+    """The organizer takes a retake back on the step of choosing frames the way they take back a
+    blurred one: «включить», which the app sends with the order (`include_media_ids`) and nothing
+    ever stores on the frame — the api has no route that writes the proposal, and the recount writes
+    nothing else. So a recount, however it falls, has nothing of theirs to undo: a frame arriving
+    between the order and the assembly counts the memory again, the proposal is still a proposal,
+    the order is as it was sent, and the retake is in the video."""
+    sharp, soft, other = shots(tmp_path)
+    first = shot(conn, s3, memory, sharp, 0)
+    guests = shot(conn, s3, memory, other, 4)
+    retake = shot(conn, s3, memory, soft, 10)
+    screen(conn, first, guests, retake)
+    assert screening_of(conn, retake) == (True, selection.DUPLICATE)
+
+    params = api_params(target_seconds=10, include_media_ids=[retake])
+    montage_id = order(conn, memory, params)
+    late = tmp_path / "late.jpg"
+    draw("-f", "lavfi", "-i", "mandelbrot=size=1200x800", "-frames:v", "1", str(late))
+    screen(conn, shot(conn, s3, memory, late, 120))
+
+    assert screening_of(conn, retake) == (True, selection.DUPLICATE)
+    stored = conn.execute("SELECT params FROM montages WHERE id = %s", (montage_id,)).fetchone()[0]
+    assert stored == params, "the recount does not touch the order"
+
+    worker.enqueue(conn, "montage", montage_id)
+    assert worker.run_once(conn) is True
+
+    assert read_montage(conn, montage_id)[0] == "ready"
+    in_the_video = {media_id for media_id, _, _ in layout_of(conn, montage_id)}
+    assert retake in in_the_video
+    assert first not in in_the_video, "«включить» wins its series, as it does at every order"
+
+
+def test_the_sweep_looks_again_at_a_frame_kept_before_its_frame_was(conn, s3, memory, tmp_path):
+    """A frame an older worker kept has a verdict and no frame to compare: until it is looked at
+    once more, the memory's series are counted without it. Once is enough — a kept file leaves its
+    frame behind — and a frame turned down on its own never takes part in a series, so it is not
+    asked."""
+    item_id, key = add_item(conn, memory, "photo", status="ready")
+    s3.upload_file(str(jpeg(tmp_path / "original.jpg")), storage.client().bucket, key)
+    conn.execute("UPDATE media_items SET screening_rejected = false WHERE id = %s", (item_id,))
+    blurred, _ = add_item(conn, memory, "photo", status="ready")
+    conn.execute(
+        "UPDATE media_items SET screening_rejected = true, screening_reason = %s WHERE id = %s",
+        (selection.BLUR, blurred),
+    )
+
+    sweeps.sweep_media_without_screening(conn)
+    queued = conn.execute(
+        "SELECT ref FROM jobs WHERE type = 'media_screening' AND ref = ANY(%s)",
+        ([item_id, blurred],),
+    ).fetchall()
+    assert queued == [(item_id,)]
+    assert only_screening_jobs_for(conn, item_id) == 1
+
+    assert worker.run_once(conn) is True
+    assert screening_of(conn, item_id) == (False, None)
+    sweeps.sweep_media_without_screening(conn)
+    assert only_screening_jobs_for(conn, item_id) == 1, "and it is not asked about again"

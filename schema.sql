@@ -1,6 +1,6 @@
 -- The montage worker's own tables: the shared job queue, the journal of what was asked of the cloud
--- model, and what the model said about each frame. The API only inserts rows into `jobs` and never
--- touches the other two.
+-- model, what the model said about each frame, and the frame the отсев compares retakes by. The API
+-- only inserts rows into `jobs` and never touches the others.
 -- Idempotent on purpose: `python -m montage init` applies it on every start-up of a new database.
 
 CREATE TABLE IF NOT EXISTS jobs (
@@ -113,3 +113,17 @@ CREATE TABLE IF NOT EXISTS media_understandings (
 
 -- «Кого это воспоминание уже назвало» — asked before every description, to be given to the model.
 CREATE INDEX IF NOT EXISTS media_understandings_memory_idx ON media_understandings (memory_id);
+
+-- What the отсев tells two shots of one moment apart by: the sampled frame of a file's best moment
+-- (96×54 grey bytes, `selection.Piece.frame`) and how sharp it is. Written by `media_screening`
+-- beside its verdict, and read by it back for the whole memory every time a file is screened, to
+-- say which frames are retakes of another (`screening.py`). Kept and not read off the files again,
+-- because every new frame asks that of all of them: a memory re-downloaded and re-decoded on each
+-- upload, its clips whole, for five kilobytes a file. One row per media item, replaced whenever
+-- the file is judged again; none for a file with no frame in it. No foreign key, for the reason
+-- `media_speech` has none.
+CREATE TABLE IF NOT EXISTS media_frames (
+    media_id    text             PRIMARY KEY,
+    frame       bytea            NOT NULL,
+    sharpness   double precision NOT NULL
+);
