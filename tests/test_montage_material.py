@@ -149,6 +149,24 @@ def test_a_photo_the_organizer_marked_exclude_stays_out_of_the_video(conn, s3, m
     assert about(duration, 7.0), "one of the four pieces was left out on the order's own word"
 
 
+def test_a_photo_its_owner_hid_stays_out_of_the_video_even_marked_include(
+    conn, s3, memory, tmp_path
+):
+    """Hiding is the owner's word and beats the organizer's «включить» (TASK-424): the hidden photo
+    is named in the order and still is not in the video, nor in its layout."""
+    hidden_id = ready_material(conn, s3, memory, tmp_path)[0]
+    conn.execute("UPDATE media_items SET hidden = true WHERE id = %s", (hidden_id,))
+    montage_id = order(conn, memory, {"target_seconds": 30, "include_media_ids": [hidden_id]})
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    status, _, duration, error_text = read_montage(conn, montage_id)
+    assert (status, error_text) == ("ready", None)
+    assert about(duration, 7.0), "two stills and the clip, the hidden photo left out"
+    assert hidden_id not in {media_id for media_id, _, _ in layout_of(conn, montage_id)}
+
+
 def test_the_order_judges_a_photograph_on_the_same_copy_the_proposal_did(
     conn, s3, memory, tmp_path
 ):
