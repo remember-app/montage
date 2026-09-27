@@ -4,6 +4,7 @@
 ответом из `fixtures/` (`recorded.py`): в сеть здесь не ходит ничто.
 """
 
+import datetime
 import json
 import uuid
 
@@ -11,12 +12,22 @@ import pytest
 
 from montage import ffmpeg, storage, worker
 from montage.media import preview
-from montage.video import assembly, frames, layout, library, montage, selection
+from montage.video import assembly, frames, layout, library, montage, rhythm, selection
 
 from checks import about, loudness
-from material import dark_opening_clip, hush, jpeg, long_clip, probe, tone
+from material import dark_opening_clip, draw, hush, jpeg, long_clip, probe, tone
 from recorded import planning_over
-from rows import add_item, api_params, fetch, layout_of, order, read_montage, ready_material
+from rows import (
+    add_item,
+    api_params,
+    entries_of,
+    fetch,
+    journal_ready,
+    layout_of,
+    order,
+    read_montage,
+    ready_material,
+)
 
 BLACK = 16  # the value `frames._exposed` already counts as black
 
@@ -560,6 +571,115 @@ def test_the_directors_film_is_held_to_the_ordered_length_the_same_way(
     # The plan's own three, four and three seconds come to nine; the seven that are missing all go
     # into the clip, which the plan put first — ten seconds of its twelve.
     assert about(duration, 16.0), "план не дотянули до заказанной длины"
+
+
+def test_a_real_montage_survives_the_whole_milestone_at_once(
+    conn, s3, memory, tmp_path, monkeypatch
+):
+    """The target case an entire milestone was built for — a small memory, a burst of near-identical
+    photos, a clip past a minute — with all five of its changes exercised together, on one real
+    order, not one at a time as their own authors each proved them: a series of near-duplicate
+    photos never reaches the director at all (TASK-447), the one the organizer names by hand comes
+    back in over the algorithm's own pick (TASK-452), one clip is taken as two separate stretches of
+    itself (TASK-449), and the two stretches are heard differently — one live, one under the music
+    (TASK-448).
+    """
+    journal_ready(conn)
+    when = datetime.datetime(2026, 6, 1, 18, tzinfo=datetime.UTC)
+
+    def shot(kind, path, seconds_in):
+        item_id, key = add_item(conn, memory, kind, status="ready")
+        s3.upload_file(str(path), storage.client().bucket, key)
+        conn.execute(
+            "UPDATE media_items SET captured_at = %s WHERE id = %s",
+            (when + datetime.timedelta(seconds=seconds_in), item_id),
+        )
+        return item_id
+
+    # A hall nobody photographed twice, then a cake shot and a softer retake of it five seconds
+    # later — a real visual duplicate, not two files that merely share a timestamp — and a clip with
+    # more in it than the eight seconds a director used to be shown.
+    hall = tmp_path / "hall.jpg"
+    draw("-f", "lavfi", "-i", "smptebars=size=1200x800", "-frames:v", "1", str(hall))
+    cake = jpeg(tmp_path / "cake.jpg")
+    cake_again = tmp_path / "cake-again.jpg"
+    draw("-i", str(cake), "-vf", "gblur=sigma=6", str(cake_again))
+
+    f1 = shot("photo", hall, 0)
+    f2 = shot("photo", cake, 60)
+    f3 = shot("photo", cake_again, 65)
+    f4 = shot("video", long_clip(tmp_path / "toast.mp4", seconds=12), 120)
+
+    for media_id, text in ((f1, "зал"), (f2, "торт"), (f3, "торт, ещё раз"), (f4, "тост")):
+        conn.execute(
+            """INSERT INTO media_understandings (media_id, memory_id, description, cast_labels)
+               VALUES (%s, %s, %s, %s)""",
+            (media_id, str(memory[0]), text, []),
+        )
+
+    planning_over(monkeypatch, [f1, f2, f3, f4], "gemini_plan_intersection.json")
+    # Трек здесь ради самого микса «живой звук / музыка» (TASK-448), а не ради темпа: тон без ритма
+    # librosa не даст восьми битов, и `rhythm.fit` не тронет длины кусков и без подмены — но так
+    # длины отрезков в проверке ниже не зависят от того, что именно услышит librosa в тоне.
+    monkeypatch.setattr(rhythm, "beats", lambda track: ())
+    own_track = f"music/{uuid.uuid4()}.wav"
+    s3.upload_file(
+        str(tone(tmp_path / "music.wav", seconds=5.0, frequency=1320)),
+        storage.client().bucket,
+        own_track,
+    )
+
+    montage_id = order(
+        conn,
+        memory,
+        api_params(
+            target_seconds=9.5,
+            music_tracks=[own_track],
+            story_text="тост и торт",
+            include_media_ids=[f3],
+        ),
+    )
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+    assert read_montage(conn, montage_id)[0] == "ready"
+
+    directing = entries_of(conn, montage_id, "directing")
+    assert all(entry.decision is not None for entry in directing if entry.media_id is not None), (
+        "каждая реплика о кадре — «взял» или «мимо»; пустых решений нет"
+    )
+
+    dropped = next(entry for entry in directing if entry.media_id == f2)
+    assert (dropped.decision, dropped.reason) == ("skip", selection.DUPLICATE), (
+        "проигравший серии рассказан своей строкой, а не молчанием (TASK-447)"
+    )
+    kept = next(entry for entry in directing if entry.media_id == f3 and entry.decision == "take")
+    assert (kept.reason, kept.series_size) == ("included", 2), (
+        "«включить» сильнее дублирования — организатор вернул проигравшего серии (TASK-452)"
+    )
+    segments = sorted(
+        (entry.source_from_seconds, entry.source_to_seconds)
+        for entry in directing
+        if entry.media_id == f4 and entry.decision == "take"
+    )
+    assert segments == [(1.0, 4.0), (8.0, 11.0)], (
+        "один клип, два разных отрезка — каждый со своим source_from/to (TASK-449)"
+    )
+
+    assembled = fetch(s3, read_montage(conn, montage_id)[1], tmp_path / "montage.mp4")
+    laid_out = layout_of(conn, montage_id)
+    assert [media_id for media_id, _, _ in laid_out] == [f1, f3, f4, f4], (
+        "порядок в готовом ролике — порядок плана, не порядок съёмки"
+    )
+    live_at = laid_out[2][1] + assembly.CROSSFADE_SECONDS + 0.1
+    music_at = laid_out[3][1] + assembly.CROSSFADE_SECONDS + 0.1
+    # Живой звук клипа — 440 Гц (`long_clip`), музыка — 1320: не спутать, что из них где звучит.
+    assert loudness(assembled, live_at, 0.6, 440) - loudness(assembled, live_at, 0.6, 1320) > 20, (
+        "первый отрезок тоста — «вживую», а слышна музыка (TASK-448)"
+    )
+    assert (
+        loudness(assembled, music_at, 0.6, 1320) - loudness(assembled, music_at, 0.6, 440) > 20
+    ), "второй отрезок того же тоста — «под музыку», а слышен клип (TASK-448)"
 
 
 def test_too_little_material_fails_the_montage_instead_of_retrying(conn, memory):

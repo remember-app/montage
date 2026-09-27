@@ -1,0 +1,30 @@
+{
+  "id": "interactions/9f3a71c0d8e2b465",
+  "model": "gemini-3.8-flash",
+  "steps": [
+    {
+      "type": "model_output",
+      "content": [
+        {
+          "type": "text",
+          "text": "{\"overview\": \"Пустой зал, торт из серии дублей — организатор попросил именно этот кадр — и один тост двумя разными моментами: сперва вслух, потом тише, под музыку.\", \"plan\": [{\"media_id\": \"m-1\", \"seconds\": 2.5, \"thought\": \"Зал ещё пуст — вечер только начинается.\"}, {\"media_id\": \"m-3\", \"seconds\": 2.5, \"thought\": \"Торт — берём тот кадр серии, который попросил организатор.\"}, {\"media_id\": \"m-4\", \"start\": 1.0, \"seconds\": 3.0, \"audio\": \"live\", \"thought\": \"Тост — поднимают бокалы, слышно вживую.\"}, {\"media_id\": \"m-4\", \"start\": 8.0, \"seconds\": 3.0, \"audio\": \"music\", \"thought\": \"Тот же тост чуть позже — тише, и под музыку.\"}], \"left_out\": []}"
+        }
+      ]
+    }
+  ],
+  "output_text": "{\"overview\": \"Пустой зал, торт из серии дублей — организатор попросил именно этот кадр — и один тост двумя разными моментами: сперва вслух, потом тише, под музыку.\", \"plan\": [{\"media_id\": \"m-1\", \"seconds\": 2.5, \"thought\": \"Зал ещё пуст — вечер только начинается.\"}, {\"media_id\": \"m-3\", \"seconds\": 2.5, \"thought\": \"Торт — берём тот кадр серии, который попросил организатор.\"}, {\"media_id\": \"m-4\", \"start\": 1.0, \"seconds\": 3.0, \"audio\": \"live\", \"thought\": \"Тост — поднимают бокалы, слышно вживую.\"}, {\"media_id\": \"m-4\", \"start\": 8.0, \"seconds\": 3.0, \"audio\": \"music\", \"thought\": \"Тот же тост чуть позже — тише, и под музыку.\"}], \"left_out\": []}",
+  "usage": {
+    "input_tokens_by_modality": [
+      {
+        "modality": "text",
+        "tokens": 520
+      }
+    ],
+    "total_cached_tokens": 0,
+    "total_input_tokens": 520,
+    "total_output_tokens": 210,
+    "total_thought_tokens": 90,
+    "total_tokens": 820,
+    "total_tool_use_tokens": 0
+  }
+}
