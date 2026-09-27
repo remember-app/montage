@@ -17,7 +17,9 @@ caller falls back from (the montage is then cut by the worker's own choosing, as
 it never does is go to the network or let anyone believe a model spoke.
 
 Which company answers is `providers.py`, and what comes back is read in `answers.py`; this file is
-the door itself — what is asked, and the journal row that every question leaves behind.
+the door itself — what is asked, the journal row that every question leaves behind, and how hard
+the model may think about each: a description and a transcript are a look and get the least thinking
+the model allows, the director's plan is a judgement and thinks as long as it likes.
 """
 
 import json
@@ -72,7 +74,7 @@ class AI:
             prompt,
             media,
             ref,
-            lambda provider: provider.generate(DESCRIBE, prompt, media),
+            lambda provider: provider.generate(DESCRIBE, prompt, media, least_thinking=True),
             answers.as_json,
         )
 
@@ -88,7 +90,7 @@ class AI:
             "",
             [audio],
             ref,
-            lambda provider: provider.transcribe(audio),
+            lambda provider: provider.transcribe(audio, least_thinking=True),
         )
 
     def plan_montage(self, shots, story="", target_seconds=None, music=(), ref=None):

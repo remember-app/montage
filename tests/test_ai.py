@@ -456,6 +456,27 @@ ASKED = {
 
 
 @pytest.mark.parametrize(
+    "operation, fixture, thinking",
+    [
+        ("describe_media", "gemini_describe.json", {"thinking_level": "low"}),
+        ("transcribe_speech", "gemini_transcribe.json", {"thinking_level": "low"}),
+        ("plan_montage", "gemini_plan.json", None),
+    ],
+)
+def test_a_look_thinks_the_least_and_the_director_as_long_as_it_likes(
+    conn, operation, fixture, thinking
+):
+    """Thinking is billed at the output rate, and left to itself the model spent up to a thousand
+    tokens of it on a sentence about a photo. `low` is the floor gemini-3.8-flash takes — `minimal`
+    it refuses, and interactions has no budget in tokens; the director's plan is not held back."""
+    net = Recorded(fixture)
+
+    ASKED[operation](ai.AI(conn, providers.Gemini("test-key", transport=net)))
+
+    assert body(net.sent).get("generation_config") == thinking
+
+
+@pytest.mark.parametrize(
     "provider, operation, fixture, counted",
     [
         (providers.Gemini, "describe_media", "gemini_describe.json", (1170, 61, 1231)),
