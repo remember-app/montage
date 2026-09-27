@@ -103,13 +103,16 @@ def plan(conn, ref, chosen, thoughts, include):
     (`selection.stretch`): «беру 0:04–0:07» должно называть тот кусок исходника, который в ролик и
     пойдёт. Слова здесь режиссёра, а куски наши: сколько секунд кадра взято, из какой серии он
     остался и по чьему слову он в ролике, видно отсюда, а не из плана.
+
+    Слово и кусок связаны порядком, а не файлом: «беру» в словах стоят тем же порядком, что куски
+    в `chosen` (`director.direct`), а одно видео может стоять в ролике несколькими отрезками — и у
+    каждого своя мысль и свой кусок исходника.
     """
-    laid = {piece.media_id: piece for piece in chosen}
+    laid = iter(chosen)
     for thought in thoughts:
         fields = dict(thought)
-        piece = laid.get(fields.get("media_id"))
-        if piece is not None:
-            fields.update(_taken(piece, include))
+        if fields.get("decision") == "take":
+            fields.update(_taken(next(laid), include))
         journal.entry(conn, ref, "directing", **fields)
 
 

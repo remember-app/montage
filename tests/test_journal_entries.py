@@ -157,6 +157,45 @@ def test_the_series_the_director_kept_is_told_the_same_way(conn, memory):
     assert (written[swallowed].decision, written[swallowed].reason) == ("skip", selection.DUPLICATE)
 
 
+def test_every_stretch_of_one_clip_is_its_own_entry(conn, memory):
+    """Из одного клипа режиссёр взял два отрезка — и в журнале их два: у каждого своя мысль и свой
+    кусок исходника, «беру 0:04–0:07» и «беру 0:15–0:19», а не последний из кусков на обеих
+    записях. Третий отрезок того же клипа не влез — он «мимо», и куска исходника у него нет."""
+    journal_ready(conn)
+    montage_id = order(conn, memory, {})
+    clip = str(uuid.uuid4())
+    toast = selection.Piece(media_id=clip, kind="video", start=4.0, seconds=3.0, duration=30.0)
+    laughter = dataclasses.replace(toast, start=15.0, seconds=4.0)
+    journal.begin(conn, montage_id, 1, 60)
+
+    story.plan(
+        conn,
+        montage_id,
+        [toast, laughter],
+        [
+            {"thought": "Один тост, два момента."},
+            {"media_id": clip, "thought": "Поднимают бокалы", "decision": "take"},
+            {"media_id": clip, "thought": "Смеются после тоста", "decision": "take"},
+            {
+                "media_id": clip,
+                "thought": "Прощаются у двери",
+                "decision": "skip",
+                "reason": selection.NO_ROOM,
+            },
+        ],
+        set(),
+    )
+
+    assert [
+        (one.thought, one.decision, one.source_from_seconds, one.source_to_seconds)
+        for one in entries_of(conn, montage_id, "directing")[1:]
+    ] == [
+        ("Поднимают бокалы", "take", 4.0, 7.0),
+        ("Смеются после тоста", "take", 15.0, 19.0),
+        ("Прощаются у двери", "skip", None, None),
+    ]
+
+
 def test_the_director_tells_the_journal_the_plan_it_built(conn, s3, memory, tmp_path, monkeypatch):
     """Ролик, который режиссировала нейросеть, рассказывает о себе её словами: первой записью
     этапа — мысль о плане в целом, за ней порядком плана по реплике на каждый кадр, который модели

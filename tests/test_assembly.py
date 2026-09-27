@@ -195,6 +195,29 @@ def test_a_clip_shorter_than_a_dissolve_does_not_push_the_rest_of_the_montage_al
     assert near(pixel_at(out, length - 0.3, 64, 36), (0, 255, 0)), "последний кусок не на месте"
 
 
+def test_two_stretches_of_one_clip_each_show_their_own(tmp_path, monkeypatch):
+    """Один файл стоит в ролике дважды — двумя отрезками, которые назвал режиссёр: каждый кусок
+    режется из файла по своему `start`. Клип красный первые пять секунд и синий следующие пять;
+    отрезок 6–8 стоит первым, 1–3 — вторым, и ролик идёт сперва синим, потом красным."""
+    monkeypatch.setitem(assembly.CANVASES, "landscape", (128, 72))
+    clip = tmp_path / "clip.mp4"
+    draw(
+        "-f", "lavfi", "-i", "color=c=red:s=320x180:r=30:d=10",
+        "-vf", "drawbox=w=iw:h=ih:c=blue:t=fill:enable='gte(t,5)'",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", str(clip),
+    )  # fmt: skip
+    pieces = [
+        selection.Piece(kind="video", path=clip, start=start, seconds=2.0, duration=10.0)
+        for start in (6.0, 1.0)
+    ]
+    out = tmp_path / "montage.mp4"
+
+    assembly.assemble(pieces, "landscape", music(tmp_path, True), tmp_path, out)
+
+    assert near(pixel_at(out, 0.75, 64, 36), COLOURS["blue"]), "первый кусок — не отрезок 6–8"
+    assert near(pixel_at(out, 2.75, 64, 36), COLOURS["red"]), "второй кусок — не отрезок 1–3"
+
+
 def test_every_ffmpeg_of_a_montage_is_held_to_the_threads_it_was_given(
     stills, tmp_path, monkeypatch
 ):

@@ -22,7 +22,7 @@ import pytest
 
 from montage import ai, worker
 from montage.ai import providers
-from montage.video import director, selection
+from montage.video import assembly, director, selection
 
 from pieces import picture
 from recorded import Recorded
@@ -229,6 +229,91 @@ def test_a_plan_longer_than_the_video_that_was_ordered_is_cut_back_to_it(describ
         ("m-1", "take", None),
         ("m-2", "take", None),
         ("m-3", "skip", selection.NO_ROOM),
+    ]
+
+
+# --- отрезки видео ----------------------------------------------------------
+
+# Клип на полминуты, самый чёткий момент которого — на двадцатой секунде: кусок вокруг него (18–22)
+# не совпадает ни с одним отрезком, который называет записанный план (`gemini_plan_segments.json`).
+LONG_CLIP = shot("m-2", 5, kind="video", duration=30.0, best_second=20.0)
+WITH_LONG_CLIP = [MATERIAL[0], LONG_CLIP, MATERIAL[2]]
+
+
+def stretches(film):
+    return [(piece.media_id, piece.start, piece.seconds) for piece in film]
+
+
+def test_the_director_names_the_stretch_of_a_clip_and_may_take_several_of_one(described):
+    """Режиссёр видит, сколько клип идёт на самом деле, а не восемь секунд из него, и называет
+    отрезок сам: с какой секунды и сколько. Из одного клипа — несколько отрезков, у каждого своя
+    мысль; тот же отрезок дважды — один; отрезок за концом файла втягивается внутрь него."""
+    film, thoughts, net = directed(described, "gemini_plan_segments.json", pieces=WITH_LONG_CLIP)
+
+    assert '"seconds_available": 30.0' in asked(net), "у клипа есть середина, и модель это знает"
+    assert stretches(film) == [
+        ("m-1", 0.0, 3.0),
+        ("m-2", 4.0, 3.0),
+        ("m-3", 0.0, 2.5),
+        ("m-2", 15.0, 4.0),
+        ("m-2", 27.0, 3.0),
+    ]
+    assert [(one["media_id"], one["decision"], one["thought"]) for one in thoughts[1:]] == [
+        ("m-1", "take", "Стол накрывают — с этого вечер и начинается."),
+        ("m-2", "take", "Поднимают бокалы — беру начало тоста."),
+        ("m-3", "take", "Собака под столом — пауза между двумя моментами."),
+        ("m-2", "take", "Смеются после тоста — вторая половина того же клипа."),
+        ("m-2", "take", "Прощаются у двери — самый конец клипа."),
+    ], "по записи на отрезок, а повтор того же отрезка в рассказ не попал"
+
+
+def test_a_photograph_named_twice_is_in_the_film_once_whatever_length_each_step_asked(described):
+    """У фотографии отрезок один — она вся, — и второй шаг плана с тем же фото и другой длиной
+    (3 и 2 секунды) — не второй отрезок, а повтор: в ролике оно одно, длиной первого шага."""
+    film, thoughts, _ = directed(described, "gemini_plan_segments.json", pieces=WITH_LONG_CLIP)
+
+    assert [piece.seconds for piece in film if piece.media_id == "m-1"] == [3.0]
+    assert [one["thought"] for one in thoughts if one.get("media_id") == "m-1"] == [
+        "Стол накрывают — с этого вечер и начинается."
+    ]
+
+
+def test_a_named_stretch_stays_where_it_was_named_when_the_video_is_held_longer(described):
+    """Растяжка до заказанной длины режет кусок заново вокруг `best_second` — как и биты, и десять
+    минут. Вокруг момента, найденного отсевом (20-я секунда), отрезки съехали бы к нему; вокруг
+    своей середины каждый остаётся внутри того, чем стал его кусок."""
+    film, *_ = directed(described, "gemini_plan_segments.json", pieces=WITH_LONG_CLIP)
+
+    held = selection.stretch(film, assembly.length_of(film) + 6)
+
+    clips = [piece for piece in held if piece.kind == "video"]
+    assert [piece.seconds for piece in clips] == [5.0, 6.0, 5.0], "каждый клип вырос"
+    for piece, (begin, end) in zip(clips, [(4.0, 7.0), (15.0, 19.0), (27.0, 30.0)]):
+        assert piece.start <= begin and end <= piece.start + piece.seconds, (
+            f"отрезок {begin}–{end} съехал: взято {piece.start}–{piece.start + piece.seconds}"
+        )
+
+
+@pytest.mark.parametrize("include", [[], ["m-2"]], ids=["без отметок", "клип отмечен «включить»"])
+def test_a_stretch_that_does_not_fit_is_left_out_on_its_own(described, include):
+    """Решение — об отрезке, а не о файле: первый отрезок клипа влез в восемь заказанных секунд,
+    второй и третий нет, и «мимо, места нет» стоит только на них. «Включить» просит сам файл, один
+    раз: лишние отрезки отмеченного клипа взвешиваются, как любые."""
+    film, thoughts, _ = directed(
+        described,
+        "gemini_plan_segments.json",
+        pieces=WITH_LONG_CLIP,
+        target_seconds=8,
+        include=include,
+    )
+
+    assert stretches(film) == [("m-1", 0.0, 3.0), ("m-2", 4.0, 3.0), ("m-3", 0.0, 2.5)]
+    assert [(one["media_id"], one["decision"], one.get("reason")) for one in thoughts[1:]] == [
+        ("m-1", "take", None),
+        ("m-2", "take", None),
+        ("m-3", "take", None),
+        ("m-2", "skip", selection.NO_ROOM),
+        ("m-2", "skip", selection.NO_ROOM),
     ]
 
 
