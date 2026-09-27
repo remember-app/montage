@@ -65,6 +65,11 @@ def test_a_memory_of_photos_and_a_clip_becomes_one_playable_video(conn, s3, memo
     assert about(duration, 9.0)
 
     assembled_file = fetch(s3, video_key, tmp_path / "montage.mp4")
+    # «Размер» в сведениях ролика — байты того самого файла, что лежит в хранилище.
+    size_bytes = conn.execute(
+        "SELECT size_bytes FROM montages WHERE id = %s", (montage_id,)
+    ).fetchone()[0]
+    assert size_bytes == assembled_file.stat().st_size
     assembled = probe(assembled_file)
     assert about(float(assembled["format"]["duration"]), 9.0)
     tracks = {stream["codec_type"]: stream for stream in assembled["streams"]}
