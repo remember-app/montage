@@ -112,11 +112,16 @@ class Provider:
     def _answered(self, request):
         return loaded(self.transport(request))
 
-    def generate(self, instruction, prompt, blobs=(), as_json=True):
-        """The model's answer as `Said`, with `blobs` attached to the prompt."""
+    def generate(self, instruction, prompt, blobs=(), as_json=True, least_thinking=False):
+        """The model's answer as `Said`, with `blobs` attached to the prompt.
+
+        `least_thinking` holds the model to the least thinking it allows — for a question with
+        nothing to weigh, like writing down what is said. Thinking is billed at the output rate,
+        and left to itself the model spends hundreds of tokens of it on an answer a line long.
+        """
         raise NotImplementedError
 
-    def transcribe(self, audio):
+    def transcribe(self, audio, least_thinking=False):
         """The speech in one audio file as `Said` plain text; empty when there is none."""
         raise NotImplementedError
 
@@ -133,8 +138,12 @@ class Gemini(Provider):
     name = "gemini"
     ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions"
     DEFAULT_MODEL = "gemini-3.8-flash"
+    # Thinking is set by level, not by a budget of tokens: interactions has no `thinking_budget`
+    # and cannot switch thinking off. `minimal` sits below `low`, but gemini-3.8-flash refuses it
+    # with a 400 (interactions/thinking lists the levels each model takes).
+    LEAST_THINKING = "low"
 
-    def generate(self, instruction, prompt, blobs=(), as_json=True):
+    def generate(self, instruction, prompt, blobs=(), as_json=True, least_thinking=False):
         parts = [{"type": "text", "text": f"{instruction}\n\n{prompt}".strip()}]
         parts += [
             {"type": blob.kind, "mime_type": blob.mime_type, "data": blob.encoded()}
@@ -145,6 +154,8 @@ class Gemini(Provider):
             # Asking for JSON in the prompt alone gets it wrapped in a ```json fence as often as
             # not.
             body["response_format"] = {"type": "text", "mime_type": "application/json"}
+        if least_thinking:
+            body["generation_config"] = {"thinking_level": self.LEAST_THINKING}
         request = urllib.request.Request(
             self.ENDPOINT,
             data=json.dumps(body).encode(),
@@ -153,8 +164,8 @@ class Gemini(Provider):
         )
         return _gemini_said(self._answered(request))
 
-    def transcribe(self, audio):
-        said = self.generate(TRANSCRIBE, "", [audio], as_json=False)
+    def transcribe(self, audio, least_thinking=False):
+        said = self.generate(TRANSCRIBE, "", [audio], as_json=False, least_thinking=least_thinking)
         return replace(said, text=said.text.strip())
 
 
@@ -208,7 +219,10 @@ class OpenAI(Provider):
             os.environ.get("OPENAI_TRANSCRIBE_MODEL") or self.DEFAULT_TRANSCRIBE_MODEL
         )
 
-    def generate(self, instruction, prompt, blobs=(), as_json=True):
+    # ponytail: `least_thinking` is taken and not acted on — the Responses API's own knob
+    # (`reasoning.effort`) and its lowest value for this model are not checked against a live call,
+    # and OpenAI answers nothing in production (decision-10). Map it when OpenAI is switched on.
+    def generate(self, instruction, prompt, blobs=(), as_json=True, least_thinking=False):
         content = [{"type": "input_text", "text": prompt}]
         content += [_openai_image(blob) for blob in blobs]
         body = {
@@ -227,7 +241,8 @@ class OpenAI(Provider):
         payload = self._answered(request)
         return _openai_said(_openai_text(payload), payload)
 
-    def transcribe(self, audio):
+    def transcribe(self, audio, least_thinking=False):
+        """A transcription model does not think: `least_thinking` has nothing to hold back here."""
         content_type, body = _multipart(
             {"model": self.transcribe_model, "response_format": "json"},
             "file",
