@@ -8,17 +8,18 @@
 
 # Postgres и хранилище
 
-Канонная локальная база и бакет — те же, что у API, одной командой:
+Канонная локальная база и бакет — те же, что у API: база — постоянный Postgres на `localhost:5432`
+(`postgres`/`postgres`, как в `.env.example`), его поднимают один раз и не гасят; бакет — MinIO:
 
 ```sh
 cd ../api && docker compose up -d
 ```
 
-Если её ещё нет (или нужна отдельная), сгодится любой Postgres 16:
+Если Postgres ещё нет (или нужен отдельный), сгодится любой 16+ с теми же кредами:
 
 ```sh
 docker run --rm -d --name remember-pg \
-  -e POSTGRES_USER=remember -e POSTGRES_PASSWORD=remember -e POSTGRES_DB=remember \
+  -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=remember \
   -p 5432:5432 postgres:16
 ```
 
