@@ -108,8 +108,8 @@ class AI:
         Returns the plan as it can be read (`answers.planned`) or None:
 
             {"overview": "...",
-             "plan": [{"media_id", "start", "seconds", "thought", "part", "part_title",
-                       "focus"}],
+             "plan": [{"media_id", "start", "seconds", "live", "thought", "part",
+                       "part_title", "focus"}],
              "left_out": {media_id: "почему не взял"}}
 
         The answer itself is kept whole in `ai_requests`; what comes back here is what survived

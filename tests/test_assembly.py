@@ -4,6 +4,8 @@
 кадры на холсте-марке 128×72, и по цвету кадра видно, чей кусок где стоит.
 """
 
+import dataclasses
+import math
 import subprocess
 
 import numpy
@@ -13,7 +15,7 @@ from montage import ffmpeg
 from montage.video import assembly, selection
 
 from checks import loudness, near, pixel_at
-from material import draw, probe, tone
+from material import draw, mute_clip, probe, tone
 
 COLOURS = {
     "red": (255, 0, 0),
@@ -125,15 +127,115 @@ def test_the_clips_own_sound_runs_on_through_every_part_without_a_gap_or_a_jump(
     for index, clip in enumerate(clips):
         assert loudness(out, start + clip.seconds / 2 - 0.2, 0.4) > -40, f"кусок {index} онемел"
         start += clip.seconds - assembly.CROSSFADE_SECONDS
+    steps = jumps(out)
+    own = steps[at(0.6) : at(1.2)].max()  # the first clip alone, faded in by then
+    assert steps.max() < 2 * own, "звук скачет на стыке частей"
+
+
+def jumps(path):
+    """How far the sound of a file moves from one sample to the next, all the way through: a click
+    is one sample far from the one before it, further than any sound the file is made of moves."""
     pcm = subprocess.run(
-        ("ffmpeg", "-loglevel", "error", "-i", str(out), "-ac", "1", "-f", "s16le", "-"),
+        ("ffmpeg", "-loglevel", "error", "-i", str(path), "-ac", "1", "-f", "s16le", "-"),
         capture_output=True,
         check=True,
     ).stdout
-    steps = numpy.abs(numpy.diff(numpy.frombuffer(pcm, "<i2").astype(int)))
-    rate = assembly.SAMPLE_RATE
-    own = steps[int(0.6 * rate) : int(1.2 * rate)].max()  # the first clip alone, faded in by then
-    assert steps.max() < 2 * own, "звук скачет на стыке частей"
+    return numpy.abs(numpy.diff(numpy.frombuffer(pcm, "<i2").astype(int)))
+
+
+def at(second):
+    """The sample of the finished sound at this second."""
+    return int(second * assembly.SAMPLE_RATE)
+
+
+# Живой звук клипов и музыка — два тона, которые не спутать: по частоте видно, что из них звучит.
+LIVE_HZ, MUSIC_HZ = 440, 1320
+
+
+def test_every_piece_is_heard_as_the_director_chose_and_the_sound_turns_over_with_the_picture(
+    tmp_path, monkeypatch
+):
+    """Звук куска — выбор режиссёра: музыка, свой живой звук или смесь в названной доле, и в
+    готовом файле слышно ровно это. Фотография и клип, снятый без звука, идут под музыку, что бы о
+    них ни сказали: своего им сказать нечего, а тишины вместо музыки никто не просил.
+
+    Звук меняется тем же полусекундным перехлёстом, что и картинка: на середине склейки слышно и
+    уходящее, и приходящее, каждое вполовину, — и нигде ни щелчка: ни один шаг от сэмпла к сэмплу не
+    круче, чем у самих тонов там, где они звучат ровно."""
+    monkeypatch.setitem(assembly.CANVASES, "landscape", (128, 72))
+    photo, sounding = tmp_path / "photo.jpg", tmp_path / "sounding.mp4"
+    draw("-f", "lavfi", "-i", "color=c=red:s=320x180", "-frames:v", "1", str(photo))
+    draw(
+        "-f", "lavfi", "-i", "color=c=gray:s=320x180:r=30:d=4", "-f", "lavfi", "-i",
+        f"sine=f={LIVE_HZ}:d=4", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+        "-shortest", str(sounding),
+    )  # fmt: skip
+    silent = mute_clip(tmp_path / "silent.mp4", seconds=4)
+    heard = [  # (кусок, что о нём сказано, что должно звучать: доля живого звука)
+        (selection.Piece(kind="photo", path=photo), 1.0, 0.0),
+        (selection.Piece(kind="video", path=sounding), 1.0, 1.0),
+        (selection.Piece(kind="video", path=sounding), 0.0, 0.0),
+        (selection.Piece(kind="video", path=sounding), 0.5, 0.5),
+        (selection.Piece(kind="video", path=silent), 1.0, 0.0),
+    ]
+    pieces = [dataclasses.replace(piece, seconds=3.0, live=said) for piece, said, _ in heard]
+    track = tone(tmp_path / "track.wav", seconds=20, frequency=MUSIC_HZ)
+    out = tmp_path / "montage.mp4"
+
+    clips = assembly.assemble(pieces, "landscape", track, tmp_path, out)
+
+    starts = [0.0]
+    for clip in clips[:-1]:
+        starts.append(starts[-1] + clip.seconds - assembly.CROSSFADE_SECONDS)
+    # Каждый кусок — там, где он звучит один: после склейки в него и до следующей, в стороне от
+    # фейдов музыки на краях ролика. Громкость полного тона — по кускам, где он звучит один.
+    alone = [starts[1] - 0.7] + [start + assembly.CROSSFADE_SECONDS + 0.1 for start in starts[1:]]
+    live = [loudness(out, second, 0.6, LIVE_HZ) for second in alone]
+    music = [loudness(out, second, 0.6, MUSIC_HZ) for second in alone]
+    full_live, full_music = live[1], music[2]
+    assert full_live > -40 and full_music > -40, "живой звук или музыка не слышны вовсе"
+    for index, (_, said, share) in enumerate(heard):
+        for what, level, full, wanted in (
+            ("живой звук", live[index], full_live, share),
+            ("музыка", music[index], full_music, 1 - share),
+        ):
+            expected = full + 20 * math.log10(wanted) if wanted else full - 30
+            assert abs(level - expected) < 2 if wanted else level < expected, (
+                f"кусок {index} (сказано {said}): {what} {level:.1f} дБ, "
+                f"а при доле {wanted} — {'около' if wanted else 'ниже'} {expected:.1f}"
+            )
+
+    # Посреди склейки, где музыка сменяется живым звуком и обратно, слышно и уходящее, и
+    # приходящее, и ни то ни другое не в полную силу: звук меняется вместе с картинкой, а не до
+    # неё и не после.
+    for index in (1, 2):
+        middle = starts[index] + assembly.CROSSFADE_SECONDS / 2 - 0.05
+        for what, hz, full in (
+            ("живой звук", LIVE_HZ, full_live),
+            ("музыка", MUSIC_HZ, full_music),
+        ):
+            level = loudness(out, middle, 0.1, hz)
+            assert full - 16 < level < full - 3, (
+                f"склейка {index}: {what} {level:.1f} дБ посреди перехлёста — звук сменился не "
+                f"вместе с картинкой"
+            )
+
+    steps = jumps(out)
+    steady = max(steps[at(second) : at(second + 0.6)].max() for second in alone)
+    assert steps.max() < 1.5 * steady, "на стыке звук прыгает — щелчок"
+
+
+def test_a_montage_that_turns_its_sound_at_every_join_is_still_an_expression_ffmpeg_takes():
+    """Парсер выражений ffmpeg уходит на уровень глубже с каждым `+` подряд и отказывается после
+    сотни, а длинный ролик, где звук меняется на каждой склейке, — это сотни смен. Отказ здесь — это
+    упавшая сборка ролика после минут кодирования."""
+    clips = [selection.Piece(live=float(index % 2)) for index in range(400)]
+    share = assembly._live_share(clips, [index * assembly.FPS for index in range(len(clips) + 1)])
+
+    ffmpeg.run(
+        "-f", "lavfi", "-i", "sine=d=1", "-af", f"volume=eval=frame:volume='{share}'",
+        "-f", "null", "-",
+    )  # fmt: skip
 
 
 def test_photographs_and_clips_keep_their_colours_through_the_pipe(tmp_path, monkeypatch):

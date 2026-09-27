@@ -5,8 +5,8 @@ The third module of the montage beside отбор and сборка (doc-03, «С
 asks the cloud model to direct them: it has read what is in every frame (`understanding.py`) and
 what is said in every clip (`speech.py`), and it is given the organizer's own story, the two lists
 and the length that was ordered. What comes back is an order, a length per piece — out of a clip,
-the stretch of it, and as many stretches of one clip as the film wants — and a note on what each is
-there for.
+the stretch of it, and as many stretches of one clip as the film wants — what each piece is heard
+with (the music, its own sound or the two mixed) and a note on what each is there for.
 
 The pieces it hands back are `assembly`'s to lay down, exactly as `selection.choose`'s are — nothing
 downstream knows which of the two cut the video. And `(None, ())` is an answer here: no cloud model
@@ -118,7 +118,11 @@ def direct(
     for step in planned.get("plan") or []:
         piece = candidates.get(step["media_id"])
         if piece is not None:
-            piece = _cut(piece, step["seconds"], step["start"])
+            # Звук — тоже слово режиссёра о куске: чем кусок звучит, решает он, а слышно ли
+            # у куска вообще хоть что-то своё, знает только сборка (`assembly.assemble`).
+            piece = dataclasses.replace(
+                _cut(piece, step["seconds"], step["start"]), live=step["live"]
+            )
         if piece is None or (piece.media_id, piece.start, piece.seconds) in taken:
             # A piece the model invented, one it was never shown, or the same stretch of the same
             # file twice. The plan is the model's; what material there is stays ours — и в журнале
@@ -297,7 +301,7 @@ def _cut(piece, seconds=None, start=None):
     """The piece at the length the plan gave it and, out of a clip, from the second the plan named —
     within what the screen and the file allow.
 
-    Both are finite numbers or None (`answers.seconds`). No length — a step that said nothing about
+    Both are finite numbers or None (`answers.number`). No length — a step that said nothing about
     it, or nothing that is a number — keeps the length отбор cut it at: the plan is about the order
     of the film first, and a missing number is not a reason to leave a piece out of it. No start
     keeps the clip cut around its best moment, as отбор cut it; a photograph has no stretch to
