@@ -15,7 +15,7 @@ from montage import ffmpeg
 from montage.video import assembly, selection
 
 from checks import loudness, near, pixel_at
-from material import draw, mute_clip, probe, tone
+from material import draw, mute_clip, probe, spatial_sound_clip, tone
 
 COLOURS = {
     "red": (255, 0, 0),
@@ -236,6 +236,27 @@ def test_a_montage_that_turns_its_sound_at_every_join_is_still_an_expression_ffm
         "-f", "lavfi", "-i", "sine=d=1", "-af", f"volume=eval=frame:volume='{share}'",
         "-f", "null", "-",
     )  # fmt: skip
+
+
+def test_a_clip_with_a_second_sound_track_the_phone_added_is_taken_by_its_first(
+    tmp_path, monkeypatch
+):
+    """iPhone пишет в MOV рядом с обычной дорожкой вторую, пространственную, чей кодек ffmpeg не
+    знает. Взять из такого файла все дорожки — значит не получить даже куска: ffmpeg отказывает
+    целому вызову, и ролика нет вовсе, что и случилось на живом заказе (TASK-460). Берётся первая, и
+    кусок идёт в ролик своим звуком, а не тишиной. `ffmpeg.has_sound` от этого не спасает и
+    спасти не может: `a:0` в файле есть."""
+    monkeypatch.setitem(assembly.CANVASES, "landscape", (128, 72))
+    piece = selection.Piece(
+        kind="video", path=spatial_sound_clip(tmp_path / "iphone.mov"), seconds=2.0
+    )
+    out = tmp_path / "montage.mp4"
+
+    assembly.assemble([piece], "landscape", None, tmp_path, out)
+
+    kinds = [stream["codec_type"] for stream in probe(out)["streams"]]
+    assert kinds.count("audio") == 1, f"в ролике дорожек: {kinds}"
+    assert loudness(out, 0.6, 0.8) > -40, "кусок онемел: вместо своего звука в ролик ушла тишина"
 
 
 def test_photographs_and_clips_keep_their_colours_through_the_pipe(tmp_path, monkeypatch):
