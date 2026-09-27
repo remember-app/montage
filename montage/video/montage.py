@@ -325,6 +325,9 @@ def montage(conn, ref):
         # stepped along by those measured numbers, so they are also where the frames actually are.
         layout.write(conn, ref, clips)
         duration = ffmpeg.duration(assembled)
+        # С диска, а не у бакета после заливки: в хранилище уходят ровно эти байты, а вопрос
+        # бакету — ещё один запрос, который может не ответить.
+        size_bytes = assembled.stat().st_size
         storage.upload(assembled, video_key, "video/mp4")
         # Склейка кончилась там, где ролик лёг в хранилище: сколько склеек в нём и какой он длины.
         # Обложка за этой чертой — кадр из готового файла, и ролику, у которого её не вышло взять,
@@ -371,10 +374,10 @@ def montage(conn, ref):
     landed = conn.execute(
         """UPDATE montages
            SET status = 'ready', video_key = %s, poster_key = %s, duration_seconds = %s,
-               error_text = null, updated_at = now()
+               size_bytes = %s, error_text = null, updated_at = now()
            WHERE id = %s
            RETURNING id""",
-        (video_key, poster_key, duration, ref),
+        (video_key, poster_key, duration, size_bytes, ref),
     ).fetchone()
     if landed is None:
         # The memory went away mid-assembly and took the row with it. Nothing else will ever name
