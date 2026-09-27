@@ -31,7 +31,10 @@ MAX_SECONDS = 600.0  # the api's `maxSeconds`: ten minutes, as long as a video m
 # worker cannot reach.
 PHOTO_SECONDS = 2.5
 CLIP_SECONDS = 4.0  # «3–5 сек вокруг лучшего момента»
-DEDUP_SECONDS = 2.0  # two shots this close together are one moment, not two
+# How far from the first shot of a series a shot of the same picture is still that moment: a burst,
+# or a few retakes five to ten seconds apart to catch the smile. Past it, the same picture is a new
+# moment in the same place — the table at the start of the dinner and at its end.
+DEDUP_SECONDS = 30.0
 
 # Why a piece is not in the video — one of these on every piece left out. Codes and not sentences:
 # they are read by other code and, in the end, shown to the organizer in their own language, so
@@ -72,9 +75,11 @@ class Piece:
     duration: float | None = None
     rejected: str | None = None  # one of the reasons above, None while the piece is still in
     # Сколько кадров было в серии, за которую этот кусок остался один («взял 1 из 4»). Ставит
-    # `_dedup`, и дальше это едет с куском до журнала монтажа: серия — одна запись в рассказе о
-    # сборке, а не четыре, из которых три «мимо, дубль». Единица — кусок сам по себе.
+    # `_dedup`, и дальше это едет с куском до журнала монтажа. Единица — кусок сам по себе.
     series_size: int = 1
+    # The sampled frame of the best moment (`frames.sampled`), what `_dedup` tells a retake of the
+    # same picture by. Empty until `judge` has looked at the file — and then nothing is like it.
+    frame: bytes = dataclasses.field(default=b"", repr=False)
 
 
 def judge(piece):
@@ -104,7 +109,12 @@ def judge(piece):
         return dataclasses.replace(piece, rejected=UNREADABLE)
     second, sharpness = moment
     looked_at = dataclasses.replace(
-        piece, sharpness=sharpness, best_second=second, duration=duration, rejected=why
+        piece,
+        sharpness=sharpness,
+        best_second=second,
+        frame=looked[round(second * frames.SAMPLE_FPS)],
+        duration=duration,
+        rejected=why,
     )
     return cut_to(looked_at, CLIP_SECONDS if piece.kind == "video" else PHOTO_SECONDS)
 
@@ -135,43 +145,48 @@ def cut_to(piece, seconds):
 
 
 def _dedup(pieces, always=()):
-    """A burst of shots two seconds apart is one moment, and the sharpest of them stands for it —
-    unless the organizer marked one of the burst «включить», and then theirs does, all of them.
+    """A series of shots of one moment, and the sharpest of them stands for it — unless the
+    organizer marked one of the series «включить», and then theirs does, all of them.
 
-    Only the capture date can say that — a file that carries none is left alone, exactly as
-    architecture.md has it: «нет даты съёмки — дедуп по дате пропускаем».
+    One moment is two things at once: taken within `DEDUP_SECONDS` of the first shot of the series,
+    and the same picture as a shot already in it (`frames.alike`). Time alone is not it — two
+    shots a second apart of the cake and of the guests are two moments, and a retake ten seconds
+    later is one, however many other shots were taken between the two. A file with no capture date
+    is left alone, exactly as architecture.md has it: «нет даты съёмки — дедуп по дате пропускаем».
 
-    Returns what is kept and what its burst swallowed, the latter marked for why.
+    Returns what is kept and what its series swallowed, the latter marked for why.
     """
     always = set(always)
     kept = [piece for piece in pieces if piece.captured_at is None]
-    dropped, burst = [], []
-
-    def settle(burst):
-        stands = [piece for piece in burst if piece.media_id in always]
-        stands = stands or [max(burst, key=lambda piece: piece.sharpness)]
-        # By identity: two pieces of one burst can hold equal values and still be two files.
-        held = {id(piece) for piece in stands}
-        # Сколько кадров стояло за оставшимся, на нём самом: журналу монтажа серия — одна запись
-        # «взял 1 из 4», а не четыре, из которых три «дубль» (`montage.py`).
-        kept.extend(dataclasses.replace(piece, series_size=len(burst)) for piece in stands)
-        dropped.extend(
-            dataclasses.replace(piece, rejected=DUPLICATE)
-            for piece in burst
-            if id(piece) not in held
-        )
+    dropped, series = [], []
 
     for piece in sorted((p for p in pieces if p.captured_at), key=lambda p: p.captured_at):
-        # Measured from the first of the burst and not from the one before, so a long sequence of
-        # shots a second apart stays several moments instead of collapsing into one.
-        if burst and (piece.captured_at - burst[0].captured_at).total_seconds() <= DEDUP_SECONDS:
-            burst.append(piece)
-            continue
-        if burst:
-            settle(burst)
-        burst = [piece]
-    if burst:
-        settle(burst)
+        # Measured from the first of a series and not from the one before, so a long sequence of
+        # the same picture stays several moments instead of collapsing into one.
+        ours = next(
+            (
+                one
+                for one in series
+                if (piece.captured_at - one[0].captured_at).total_seconds() <= DEDUP_SECONDS
+                and any(frames.alike(piece.frame, shot.frame) for shot in one)
+            ),
+            None,
+        )
+        if ours:
+            ours.append(piece)
+        else:
+            series.append([piece])
+
+    for one in series:
+        stands = [piece for piece in one if piece.media_id in always]
+        stands = stands or [max(one, key=lambda piece: piece.sharpness)]
+        # By identity: two pieces of one series can hold equal values and still be two files.
+        held = {id(piece) for piece in stands}
+        # Сколько кадров стояло за оставшимся, на нём самом: «взял 1 из 4» в журнале монтажа.
+        kept.extend(dataclasses.replace(piece, series_size=len(one)) for piece in stands)
+        dropped.extend(
+            dataclasses.replace(piece, rejected=DUPLICATE) for piece in one if id(piece) not in held
+        )
     return kept, dropped
 
 

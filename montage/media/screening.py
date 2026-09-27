@@ -12,10 +12,10 @@ the file *alone* — which is exactly what makes it answerable this early. What 
 what actually goes into a video is still `selection.choose`'s answer at the order, honouring
 «включить» and «исключить». Nothing in this module is read by the montage pipeline.
 
-`duplicate` is deliberately not written here. A burst of shots two seconds apart is one moment, and
-which of them stands for it is decided by comparing them with each other (`selection._dedup`, over
-the whole memory at once) — a file is not a duplicate on its own, and a verdict that leaned on its
-neighbours would flip every time somebody else uploaded a shot of the same second. The three reasons
+`duplicate` is deliberately not written here. A series of shots of the same picture is one moment,
+and which of them stands for it is decided by comparing them with each other (`selection._dedup`,
+over the whole memory at once) — a file is not a duplicate on its own, and a verdict that leaned on
+its neighbours would flip every time somebody else uploaded a shot of the same moment. The reasons
 this job can write — `unreadable`, `blur`, `exposure` — are the ones true of the file itself; the
 organizer meets `duplicate` where it is decided, in the order.
 

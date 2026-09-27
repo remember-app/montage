@@ -2,7 +2,8 @@
 
 Один файл, ничего вокруг: сюда не доходит ни заказ, ни слово организатора, ни длина ролика. Эти же
 числа получает отбор, и они же — единственное, что меняется, когда «насколько хорош кадр» начнут
-считать моделью, а не резкостью.
+считать моделью, а не резкостью. Два кадра рядом здесь сравниваются только пикселями (`alike`):
+какие из них серия, решает отбор.
 """
 
 import collections
@@ -27,6 +28,16 @@ SAMPLE_FPS = 1.0  # «семпл кадров ≈1/сек»
 MIN_SHARPNESS = 5.0  # variance of the Laplacian under which a frame is just blur
 LUMA_RANGE = (24, 232)  # mean brightness outside this is a black or a blown-out frame
 CLIPPED_LIMIT = 0.5  # and so is one whose histogram is mostly at either end
+
+# Two frames are one picture when their layouts (`_layout`) differ by less than this, on average,
+# in standard deviations of the frame. Set against 69 real photographs and retakes made of each: the
+# camera moved by 3–6% of the frame, zoomed in by a tenth, tilted by 3°, exposed a quarter darker or
+# a third brighter, somebody stepping into an eighth of the frame, and a bit of all of it at once.
+# At 0.5, 91–100% of each single retake and 84% of the all-at-once one read as the same picture,
+# and 23 of the 2346 pairs of different photographs did — skylines at the same height, two balls on
+# a plain background. Pushed up, more retakes collapse and more different shots with them.
+SAME_PICTURE = 0.5
+LAYOUT_BLOCK = 6  # pixels a side: 96×54 is 16×9 blocks of them
 
 # Почему в кадре нечего показывать — коды, с которыми отбор потом живёт дальше (`selection.py`,
 # там же и остальные его причины).
@@ -90,6 +101,30 @@ def _exposed(frame):
     mean = sum(value * count for value, count in histogram.items()) / pixels
     clipped = sum(count for value, count in histogram.items() if value < 16 or value > 239) / pixels
     return LUMA_RANGE[0] <= mean <= LUMA_RANGE[1] and clipped <= CLIPPED_LIMIT
+
+
+def alike(frame, other):
+    """Whether two sampled frames show the same picture: a retake a few seconds later, the camera
+    moved an inch, the exposure changed, somebody shifted in their seat. A frame that is not there
+    looks like nothing."""
+    if not frame or not other:
+        return False
+    return float(numpy.abs(_layout(frame) - _layout(other)).mean()) < SAME_PICTURE
+
+
+def _layout(frame):
+    """The frame as its rough layout — 16×9 blocks of it averaged, then levelled to its own mean and
+    spread. Averaged, because a camera moved by a few pixels moves every edge in the frame and
+    barely any block; levelled, because the same scene a stop darker is still the same scene. The
+    floor on the spread keeps a flat frame at zeros instead of dividing by nothing."""
+    blocks = (
+        numpy.frombuffer(frame, dtype=numpy.uint8)
+        .reshape(
+            SAMPLE_HEIGHT // LAYOUT_BLOCK, LAYOUT_BLOCK, SAMPLE_WIDTH // LAYOUT_BLOCK, LAYOUT_BLOCK
+        )
+        .mean(axis=(1, 3))
+    )
+    return (blocks - blocks.mean()) / max(blocks.std(), 1.0)
 
 
 def best_moment(frames):

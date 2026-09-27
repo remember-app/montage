@@ -24,6 +24,7 @@ from montage import ai, worker
 from montage.ai import providers
 from montage.video import director, selection
 
+from pieces import picture
 from recorded import Recorded
 
 
@@ -50,7 +51,8 @@ STORY = "день рождения, всё вокруг торта"
 
 
 def shot(media_id, minute=0, kind="photo", **fields):
-    """One piece as `selection.judge` leaves it: readable, with a best moment on it."""
+    """One piece as `selection.judge` leaves it: readable, with a best moment on it — every one the
+    same picture, and a minute or more from any other, so none of them is a retake of another."""
     when = datetime.datetime(2026, 9, 5, 18, minute)
     return selection.Piece(
         media_id=media_id,
@@ -59,6 +61,7 @@ def shot(media_id, minute=0, kind="photo", **fields):
         when=when,
         captured_at=when,
         seconds=selection.CLIP_SECONDS if kind == "video" else selection.PHOTO_SECONDS,
+        frame=picture(1),
         **fields,
     )
 
@@ -379,14 +382,19 @@ def test_a_burst_of_one_moment_reaches_the_director_as_one_shot(described):
     describe(described, "m-9", "собака под столом, кадр секундой позже")
     blurrier = twin_of(MATERIAL[2], "m-9", sharpness=1.0)
 
-    film, _, net = directed(described, pieces=[*MATERIAL, blurrier], story=STORY)
+    film, thoughts, net = directed(described, pieces=[*MATERIAL, blurrier], story=STORY)
 
     assert "m-9" not in asked(net) and "секундой позже" not in asked(net)
     assert "собака под столом" in asked(net), "the sharpest of the burst stands for it"
     assert [piece.media_id for piece in film] == ["m-1", "m-2", "m-3"]
-    # И сколько кадров за ним стояло, кусок несёт на себе — журналу монтажа серия одна запись
-    # «взял 1 из 2», ровно как на пути отсева (`story.plan`).
+    # И сколько кадров за ним стояло, кусок несёт на себе — «взял 1 из 2» в журнале монтажа, ровно
+    # как на пути отсева (`story.plan`), а съеденный серией кадр — своё «мимо, дубль».
     assert [piece.series_size for piece in film] == [1, 1, 2]
+    assert about(thoughts, "m-9") == {
+        "media_id": "m-9",
+        "decision": "skip",
+        "reason": selection.DUPLICATE,
+    }
 
 
 def test_the_question_keeps_the_order_the_memory_is_read_in(described):
