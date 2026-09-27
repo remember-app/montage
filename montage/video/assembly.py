@@ -188,6 +188,15 @@ def _normalise(piece, orientation, out):
     clip shot silent) gets silence. How much of that tape is heard over the music is settled over
     the whole of it, piece by piece, and not here.
 
+    Its own track is the **first** one of the file and only that one — `0:a:0`, never `0:a`,
+    which is every audio stream the file happens to carry. An iPhone 16 Pro writes two into a MOV:
+    what the microphones heard, and a second, spatial one whose codec ffmpeg has no decoder for.
+    Handed both, ffmpeg refuses the whole call («no decoder found for: none») and there is no clip
+    at all, so one such video off one guest's phone took down the entire montage (TASK-460,
+    поймано на живом заказе 2026-09-27). `ffmpeg.has_sound` cannot stand in for this: it asks
+    whether there is an `a:0` at all, and here there is. Every `-map` in this module names one
+    stream for the same reason — a class of streams is whatever the file turns out to hold.
+
     Both streams are cut where they come in, not where they go out: the clip's by the `-t` of its
     own input, the silence by one of its own. Cut on the way out (`-shortest`, an output `-t`), the
     picture loses its last frame whenever `fps` has to make it up at the end of a 24-frame clip,
@@ -227,9 +236,9 @@ def _normalise(piece, orientation, out):
         canvas,
         *cut,
         "-map",
-        "0:v",
+        "0:v:0",
         "-map",
-        "0:a" if its_own else "1:a",
+        "0:a:0" if its_own else "1:a:0",
         "-c:a",
         "aac",
         "-b:a",
@@ -341,7 +350,7 @@ def _assemble(clips, track, canvas, workdir, out, max_seconds=None):
         "-filter_complex",
         f"{mixed}afade=t=in:st=0:d={fade:.3f},afade=t=out:st={total - fade:.3f}:d={fade:.3f}[a]",
         "-map",
-        "0:v",
+        "0:v:0",
         "-map",
         "[a]",
         "-c:v",
@@ -402,7 +411,7 @@ def _part(before, skip, clip, frames, pipe, sound):
     picture's length, so a clip whose sound runs short cannot pull everything after it out of step.
     """
     inputs, graph = ["-protocol_whitelist", "file", "-i", str(clip.path)], []
-    video, joined = "0:v", "[0:a]"
+    video, joined = "0:v:0", "[0:a]"
     if before is not None:
         # No more of it than the dissolve: acrossfade plays whatever precedes a track's last half
         # second ahead of the fade, and that would put `clip`'s sound behind its picture.

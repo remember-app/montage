@@ -230,6 +230,63 @@ def mute_clip(path, seconds=3.0):
     return path
 
 
+def spatial_sound_clip(path, seconds=3.0):
+    """Клип с iPhone 16 Pro: обычная звуковая дорожка и вторая, пространственная, чей кодек ffmpeg
+    не знает. Такие MOV приходят с живых заказов, и `-map 0:a` берёт из них обе дорожки — на второй
+    ffmpeg отказывается от всего вызова («no decoder found for: none»), и выходного файла не
+    остаётся вовсе (TASK-460).
+
+    Нарисовать вторую дорожку нечем: apac ffmpeg не кодирует и с чужим четырёхбуквенным кодом
+    muxer'у дорожку не отдаёт («Tag apac incompatible with output codec id»). Поэтому она пишется
+    как PCM — у него в MOV нет `esds`, из которого демуксер иначе вычитал бы кодек обратно поверх
+    кода, — а её код в `stsd` переписывается здесь на apac. После этого ffmpeg видит ровно то же,
+    что видит в файле с телефона: дорожка есть, кодека к ней нет.
+    """
+    drawn = path.with_name(f"drawn-{path.name}")
+    draw(
+        "-f",
+        "lavfi",
+        "-i",
+        f"testsrc=size=640x480:rate=24:duration={seconds}",
+        "-f",
+        "lavfi",
+        "-i",
+        f"sine=frequency=440:duration={seconds}",
+        "-f",
+        "lavfi",
+        "-i",
+        f"sine=frequency=1760:duration={seconds}",
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-map",
+        "2:a:0",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a:0",
+        "aac",
+        # Вторая дорожка звучать не будет ни при каком исходе, и чем она мельче, тем мельче файл.
+        "-c:a:1",
+        "pcm_s16be",
+        "-ar:a:1",
+        "8000",
+        "-ac:a:1",
+        "1",
+        "-shortest",
+        str(drawn),
+    )
+    data = bytearray(drawn.read_bytes())
+    # Первое вхождение — сама запись о формате дорожки в `stsd`; второй дорожки, кроме PCM, в файле
+    # нет, и больше `twos` взяться в нём негде.
+    twos = data.index(b"twos")
+    data[twos : twos + 4] = b"apac"
+    path.write_bytes(data)
+    return path
+
+
 def dark_opening_clip(path):
     """A clip that opens black for its first 1.5s, then three and a half seconds of a sharp,
     properly exposed pattern — the shape of a real phone clip that takes a moment to find its
