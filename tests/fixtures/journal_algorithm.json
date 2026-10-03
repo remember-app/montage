@@ -156,13 +156,17 @@
       "started_at": "2026-01-01T00:00:24Z",
       "finished_at": "2026-01-01T00:00:25Z",
       "eta_seconds": 0,
-      "done_count": 4,
-      "total_count": 4,
+      "done_count": 3,
+      "total_count": 3,
       "outcome": {
         "bpm": 81,
-        "cuts": 3,
-        "track": [
+        "tracks": [
           "warm"
+        ],
+        "cut_seconds": [
+          2.03,
+          4.23,
+          5.7
         ]
       },
       "updated_at": "2026-01-01T00:00:25Z"
