@@ -175,15 +175,34 @@
       "stage": "assembly",
       "state": "done",
       "started_at": "2026-01-01T00:00:26Z",
-      "finished_at": "2026-01-01T00:00:27Z",
+      "finished_at": "2026-01-01T00:00:31Z",
       "eta_seconds": 0,
       "done_count": 4,
       "total_count": 4,
       "outcome": {
         "cuts": 3,
+        "steps": [
+          {
+            "step": "clips",
+            "state": "done"
+          },
+          {
+            "step": "sound",
+            "state": "done"
+          },
+          {
+            "step": "cover",
+            "state": "done"
+          },
+          {
+            "step": "file",
+            "state": "done"
+          }
+        ],
+        "percent": 100,
         "seconds": 10.0
       },
-      "updated_at": "2026-01-01T00:00:27Z"
+      "updated_at": "2026-01-01T00:00:31Z"
     }
   ],
   "entries": [
@@ -526,6 +545,74 @@
       "focus": null,
       "details": null,
       "created_at": "2026-01-01T00:00:22Z"
+    },
+    {
+      "n": 19,
+      "stage": "assembly",
+      "media": null,
+      "thought": "Склейка 1",
+      "decision": null,
+      "reason": null,
+      "series_size": null,
+      "story_part": null,
+      "story_part_title": null,
+      "source_from_seconds": null,
+      "source_to_seconds": null,
+      "labels": null,
+      "focus": null,
+      "details": null,
+      "created_at": "2026-01-01T00:00:27Z"
+    },
+    {
+      "n": 20,
+      "stage": "assembly",
+      "media": null,
+      "thought": "Склейка 2",
+      "decision": null,
+      "reason": null,
+      "series_size": null,
+      "story_part": null,
+      "story_part_title": null,
+      "source_from_seconds": null,
+      "source_to_seconds": null,
+      "labels": null,
+      "focus": null,
+      "details": null,
+      "created_at": "2026-01-01T00:00:28Z"
+    },
+    {
+      "n": 21,
+      "stage": "assembly",
+      "media": null,
+      "thought": "Склейка 3",
+      "decision": null,
+      "reason": null,
+      "series_size": null,
+      "story_part": null,
+      "story_part_title": null,
+      "source_from_seconds": null,
+      "source_to_seconds": null,
+      "labels": null,
+      "focus": null,
+      "details": null,
+      "created_at": "2026-01-01T00:00:29Z"
+    },
+    {
+      "n": 22,
+      "stage": "assembly",
+      "media": null,
+      "thought": "Склейка 4",
+      "decision": null,
+      "reason": null,
+      "series_size": null,
+      "story_part": null,
+      "story_part_title": null,
+      "source_from_seconds": null,
+      "source_to_seconds": null,
+      "labels": null,
+      "focus": null,
+      "details": null,
+      "created_at": "2026-01-01T00:00:30Z"
     }
   ],
   "layout": [

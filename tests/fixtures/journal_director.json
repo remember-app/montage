@@ -197,15 +197,34 @@
       "stage": "assembly",
       "state": "done",
       "started_at": "2026-01-01T00:00:35Z",
-      "finished_at": "2026-01-01T00:00:36Z",
+      "finished_at": "2026-01-01T00:00:41Z",
       "eta_seconds": 0,
       "done_count": 5,
       "total_count": 5,
       "outcome": {
         "cuts": 4,
+        "steps": [
+          {
+            "step": "clips",
+            "state": "done"
+          },
+          {
+            "step": "sound",
+            "state": "done"
+          },
+          {
+            "step": "cover",
+            "state": "done"
+          },
+          {
+            "step": "file",
+            "state": "done"
+          }
+        ],
+        "percent": 100,
         "seconds": 15.0
       },
-      "updated_at": "2026-01-01T00:00:36Z"
+      "updated_at": "2026-01-01T00:00:41Z"
     }
   ],
   "entries": [
@@ -735,6 +754,91 @@
         "music": 0.0
       },
       "created_at": "2026-01-01T00:00:33Z"
+    },
+    {
+      "n": 28,
+      "stage": "assembly",
+      "media": null,
+      "thought": "Склейка 1: Сборы",
+      "decision": null,
+      "reason": null,
+      "series_size": null,
+      "story_part": null,
+      "story_part_title": null,
+      "source_from_seconds": null,
+      "source_to_seconds": null,
+      "labels": null,
+      "focus": null,
+      "details": null,
+      "created_at": "2026-01-01T00:00:36Z"
+    },
+    {
+      "n": 29,
+      "stage": "assembly",
+      "media": null,
+      "thought": "Склейка 2: Торт",
+      "decision": null,
+      "reason": null,
+      "series_size": null,
+      "story_part": null,
+      "story_part_title": null,
+      "source_from_seconds": null,
+      "source_to_seconds": null,
+      "labels": null,
+      "focus": null,
+      "details": null,
+      "created_at": "2026-01-01T00:00:37Z"
+    },
+    {
+      "n": 30,
+      "stage": "assembly",
+      "media": null,
+      "thought": "Склейка 3: Тосты",
+      "decision": null,
+      "reason": null,
+      "series_size": null,
+      "story_part": null,
+      "story_part_title": null,
+      "source_from_seconds": null,
+      "source_to_seconds": null,
+      "labels": null,
+      "focus": null,
+      "details": null,
+      "created_at": "2026-01-01T00:00:38Z"
+    },
+    {
+      "n": 31,
+      "stage": "assembly",
+      "media": null,
+      "thought": "Склейка 4: Тосты",
+      "decision": null,
+      "reason": null,
+      "series_size": null,
+      "story_part": null,
+      "story_part_title": null,
+      "source_from_seconds": null,
+      "source_to_seconds": null,
+      "labels": null,
+      "focus": null,
+      "details": null,
+      "created_at": "2026-01-01T00:00:39Z"
+    },
+    {
+      "n": 32,
+      "stage": "assembly",
+      "media": null,
+      "thought": "Склейка 5: Тосты",
+      "decision": null,
+      "reason": null,
+      "series_size": null,
+      "story_part": null,
+      "story_part_title": null,
+      "source_from_seconds": null,
+      "source_to_seconds": null,
+      "labels": null,
+      "focus": null,
+      "details": null,
+      "created_at": "2026-01-01T00:00:40Z"
     }
   ],
   "layout": [

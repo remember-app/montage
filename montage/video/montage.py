@@ -124,7 +124,7 @@ def montage(conn, ref):
     if len(items) < MIN_ITEMS:
         # Material may have been deleted between the order and here, so the api's check at the order
         # is not the last word. Not a transient failure — three retries would find the same library.
-        return _give_up_for_good(conn, ref, "недостаточно материала для ролика")
+        return _give_up_for_good(conn, ref, "недостаточно материала для ролика", "no_material")
 
     # Журнал сборки — до первого скачанного байта: пять этапов с оценкой времени стоят на экране с
     # первой секунды, а рассказ о каждом дописывается по ходу (`journal.py`). Повтор того же ролика
@@ -224,7 +224,10 @@ def montage(conn, ref):
         survived = sum(piece.rejected is None and piece.media_id not in exclude for piece in pieces)
         if survived < MIN_ITEMS:
             return _give_up_for_good(
-                conn, ref, "материал не годится для ролика: файлы не читаются или исключены"
+                conn,
+                ref,
+                "материал не годится для ролика: файлы не читаются или исключены",
+                "no_material",
             )
 
         # Разбор кадров — описание каждого, кто ещё не описан, и чтение всего, что уже есть. Кадр,
@@ -236,7 +239,11 @@ def montage(conn, ref):
         # Музыка раньше режиссёра: под что собирают ролик — часть того, из чего он строит план.
         tracks, refusal = music.files(ordered_music, workdir)
         if refusal:
-            return _give_up_for_good(conn, ref, refusal)
+            # Свой трек не нашёлся в хранилище или не читается — на второй попытке будет то же
+            # самое, и на третьей. Идущего этапа в этот момент нет: `prep` и `analysis` уже
+            # кончились, а `music` ещё не начался, — и код ложится на первый незаконченный этап
+            # (`journal.failed`).
+            return _give_up_for_good(conn, ref, refusal, "track_unreadable")
         track = assembly.one_track(tracks, workdir)
 
         # The director first, and the отбор whenever there is no director: no cloud model, nothing
@@ -266,7 +273,9 @@ def montage(conn, ref):
             # Only reachable through the order itself: everything the memory holds is on the
             # organizer's «исключить» list. There is no video to make of nothing, and the same list
             # would be there on a retry.
-            return _give_up_for_good(conn, ref, "в ролик нечего ставить: весь материал исключён")
+            return _give_up_for_good(
+                conn, ref, "в ролик нечего ставить: весь материал исключён", "no_material"
+            )
 
         # Both ways of directing stop at the piece that would not fit the order, so what comes back
         # from either is usually shorter than the length that was asked for. Here the clips already
@@ -326,7 +335,15 @@ def montage(conn, ref):
         chosen = _back_to_originals(chosen, originals, orientation, workdir)
 
         assembled = workdir / "montage.mp4"
-        journal.start(conn, ref, "assembly", total=len(chosen))
+        journal.start(conn, ref, "assembly", total=len(chosen), **journal.assembling("clips"))
+
+        def on_a_clip(done):
+            """Готовый кусок: склейка засчитана, мысль о ней — в журнал, процент — по их счёту."""
+            story.gluing(conn, ref, thoughts, done)
+            journal.progress(
+                conn, ref, "assembly", done, **journal.assembling("clips", done, len(chosen))
+            )
+
         clips = assembly.assemble(
             chosen,
             orientation,
@@ -335,7 +352,12 @@ def montage(conn, ref):
             assembled,
             # По готовому куску, а не по каждому движению ffmpeg: «склеено 12 из 61» — это всё, что
             # сборка может рассказать о себе, пока идёт, и этого хватает.
-            on_clip=lambda done: journal.progress(conn, ref, "assembly", done),
+            on_clip=on_a_clip,
+            # Куски все нарезаны — осталась одна длинная операция: свести их с дорожкой в один
+            # файл. Подшаг «звук» на её месте, и процент ползёт по нему своим весом.
+            on_join=lambda: journal.progress(
+                conn, ref, "assembly", len(chosen), **journal.assembling("sound")
+            ),
             max_seconds=selection.MAX_SECONDS,
         )
         # The same layout again, off the clips as they were really encoded. `assemble` measures
@@ -347,13 +369,13 @@ def montage(conn, ref):
         # С диска, а не у бакета после заливки: в хранилище уходят ровно эти байты, а вопрос
         # бакету — ещё один запрос, который может не ответить.
         size_bytes = assembled.stat().st_size
-        storage.upload(assembled, video_key, "video/mp4")
-        # Склейка кончилась там, где ролик лёг в хранилище: сколько склеек в нём и какой он длины.
-        # Обложка за этой чертой — кадр из готового файла, и ролику, у которого её не вышло взять,
-        # она не стоит ни этапа, ни минуты (ниже).
-        journal.finish(
-            conn, ref, "assembly", cuts=max(len(clips) - 1, 0), seconds=round(duration or 0, 1)
-        )
+
+        # Обложка и загрузка идут **до** закрытия этапа, а не после него, и это правка порядка, а
+        # не добавление ключа: подшаги `cover` и `file` пишутся в итог этапа, и этап, закрытый
+        # раньше, их бы уже не записал — два последних подшага не попали бы никуда. Обложка
+        # вырезается из того же файла на диске, что и уходит в хранилище, так что порядок между
+        # ними ничего не ломает: оба читают один и тот же готовый ролик.
+        journal.progress(conn, ref, "assembly", len(chosen), **journal.assembling("cover"))
 
         # The still the list of videos stands on, cut off the finished file with the same scale a
         # preview thumbnail gets (`preview.media_preview`) — but not off frame zero. The montage
@@ -386,9 +408,24 @@ def montage(conn, ref):
             # A video that took minutes to assemble is not thrown away over its cover, and retrying
             # would rebuild the whole thing for one frame. The row stays `ready` with no poster key,
             # which the api already serves as `poster_url: null` — the same as every montage made
-            # before posters existed.
+            # before posters existed. Ролик без обложки — ролик, а не падение: подшаг `cover` всё
+            # равно закрыт, потому что работа эта сделана и делать больше нечего.
             log.warning("montage %s has no poster, leaving it without one: %s", ref, exc)
             poster_key = None
+
+        # Финальный файл уходит в хранилище последним, и это последний подшаг: после него этапу
+        # больше нечего делать, и он закрывается — всеми четырьмя подшагами сделанными и процентом
+        # ровно на 100.
+        journal.progress(conn, ref, "assembly", len(chosen), **journal.assembling("file"))
+        storage.upload(assembled, video_key, "video/mp4")
+        journal.finish(
+            conn,
+            ref,
+            "assembly",
+            cuts=max(len(clips) - 1, 0),
+            seconds=round(duration or 0, 1),
+            **journal.assembling(None),
+        )
 
     landed = conn.execute(
         """UPDATE montages
@@ -454,29 +491,33 @@ def _back_to_originals(chosen, originals, orientation, workdir):
     return pieces
 
 
-def give_up(conn, ref, error_text):
+def give_up(conn, ref, error_text, stopped="internal"):
     """Out of retries. The montage is failed too, so the organizer stops waiting on it and gets
     «повторить» under it (architecture.md, «Обработка ошибок»).
 
     `error_text` is shown to people — the api hands the whole row to every member of the memory —
     so it is a sentence about the video, never an exception's text.
+
+    `stopped` — кодом в журнал, на упавший этап: что именно остановило сборку, из трёх
+    (`journal.failed`). Словарь закрыт, и `internal` — всё, что не разобрано отдельно: сюда
+    попадает и очередь, исчерпавшая попытки.
     """
     conn.execute(
         "UPDATE montages SET status = 'failed', error_text = %s, updated_at = now() WHERE id = %s",
         (error_text, ref),
     )
     # Журнал остаётся как есть — до какого места ролик дошёл, видно и после падения, — а этап,
-    # который в этот момент шёл, помечается упавшим. Здесь, а не на каждом исключении по дороге:
-    # у ролика, которому очередь даст ещё две попытки, этап честнее оставить идущим, и упавшим он
-    # становится ровно тогда, когда упавшим называют сам ролик.
-    journal.failed(conn, ref)
+    # который в этот момент шёл, помечается упавшим вместе с кодом причины. Здесь, а не на каждом
+    # исключении по дороге: у ролика, которому очередь даст ещё две попытки, этап честнее оставить
+    # идущим, и упавшим он становится ровно тогда, когда упавшим называют сам ролик.
+    journal.failed(conn, ref, stopped)
 
 
-def _give_up_for_good(conn, ref, why):
+def _give_up_for_good(conn, ref, why, stopped="internal"):
     """A refusal rather than an accident: the answer would be the same on all three attempts, so
     the montage is failed here and the job finishes cleanly instead of retrying into it."""
     log.info("montage %s cannot be made: %s", ref, why)
-    give_up(conn, ref, why)
+    give_up(conn, ref, why, stopped)
 
 
 def _tell_the_api(montage_id):

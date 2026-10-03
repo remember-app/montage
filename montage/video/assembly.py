@@ -108,7 +108,9 @@ def length_of(pieces):
     return sum(piece.seconds for piece in pieces) - CROSSFADE_SECONDS * (len(pieces) - 1)
 
 
-def assemble(pieces, orientation, track, workdir, out, on_clip=None, max_seconds=None):
+def assemble(
+    pieces, orientation, track, workdir, out, on_clip=None, on_join=None, max_seconds=None
+):
     """The chosen pieces as one video at `out`, and the normalised clips it was made of.
 
     `track` is a file — the montage's whole soundtrack, however many tracks of whose it was built
@@ -126,8 +128,12 @@ def assemble(pieces, orientation, track, workdir, out, on_clip=None, max_seconds
 
     `on_clip` is called with how many pieces are encoded so far, every time one more is — the one
     thing this module tells anybody while it works, and the montage takes minutes: «склеено 12 из
-    61» on the live screen is that number and nothing else. Nothing is asked of it and nothing is
-    read back, so a caller with nothing to show simply does not pass one.
+    61» on the live screen is that number and nothing else. `on_join` is called once, right before
+    the pieces are joined into the file, and says the same about the other half of the work: the
+    clips are all cut, and what is left is one pass that mixes them with the sound (`_assemble`),
+    which is its own long operation and the only thing the montage does between those two moments.
+    Nothing is asked of either and nothing is read back, so a caller with nothing to show simply
+    passes none.
 
     `max_seconds` is the longest the file may run. The pieces are already planned inside it
     (`selection.cap`), but every clip is encoded to the nearest frame of what it was asked for, and
@@ -155,6 +161,8 @@ def assemble(pieces, orientation, track, workdir, out, on_clip=None, max_seconds
                 live=piece.live if its_own else 0.0,
             )
         )
+    if on_join:
+        on_join()
     _assemble(clips, track, CANVASES[orientation], workdir, out, max_seconds)
     return clips
 

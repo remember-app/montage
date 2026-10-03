@@ -341,3 +341,54 @@ def test_a_journal_that_cannot_be_written_does_not_cost_the_montage(conn):
     journal.entry(conn, gone, "prep", nonsense="колонки с таким именем в журнале нет")
 
     assert stages_of(conn, gone) == {} and entries_of(conn, gone) == []
+
+
+# --- подшаги сборки и причина остановки --------------------------------------
+
+
+def test_the_assembly_says_where_it_is_by_substeps_and_a_percent_that_only_grows():
+    """Процент и подшаги — единственное, чем сборка говорит о себе по ходу, и оба должны быть
+    правдой в каждую секунду: процент не уезжает назад, все четыре подшага написаны всегда, и
+    ровно один из них `running` — тот, что приложение рисует под процентом.
+
+    Замолчать нельзя: список без идущего подшага рисуется пустым, и ролик выглядит сломанным при
+    воркере, который молчит. На закрытом этапе идущего подшага нет вовсе, и это верно — ждать
+    больше нечего, все галочки стоят, а процент ровно 100.
+    """
+    walked = (
+        [journal.assembling("clips", done, 4) for done in range(5)]
+        + [journal.assembling(step) for step in ("sound", "cover", "file")]
+        + [journal.assembling(None)]
+    )
+
+    percents = [one["percent"] for one in walked]
+    assert percents == sorted(percents), "процент сборки не уезжает назад"
+    assert percents[0] == 0 and percents[-1] == 100, "от нуля и до ста"
+    assert sum(journal.ASSEMBLY_WEIGHTS.values()) == 100, "подшаги делят процент нацело"
+
+    for came in walked:
+        assert [one["step"] for one in came["steps"]] == list(journal.ASSEMBLY_STEPS)
+        assert len([one for one in came["steps"] if one["state"] == "running"]) in (0, 1)
+    assert walked[-1]["steps"] == [
+        {"step": code, "state": "done"} for code in journal.ASSEMBLY_STEPS
+    ], "закрытый этап — все подшаги сделаны"
+
+
+def test_a_refusal_between_stages_still_names_the_reason_on_a_stage(conn, memory):
+    """Отказ между этапами приходит, когда идущего нет: предыдущий уже `done`, следующий ещё не
+    начался. Код причины всё равно должен лечь на этап — иначе на экране вместо «годных кадров
+    меньше трёх» было бы пустое место, а именно это отказ и значит.
+    """
+    journal_ready(conn)
+    montage_id = order(conn, memory, {})
+    journal.begin(conn, montage_id, 5, 60)
+    journal.start(conn, montage_id, "prep", total=5)
+    journal.finish(conn, montage_id, "prep", photos_done=5)
+
+    montage.give_up(conn, montage_id, "материал не годится для ролика", "no_material")
+
+    stages = stages_of(conn, montage_id)
+    fell = [name for name in journal.STAGES if stages[name]["state"] == "failed"]
+    assert fell == ["analysis"], "упал первый незаконченный этап, а не тот, что уже сделан"
+    assert stages["analysis"]["outcome"]["stopped"] == "no_material"
+    assert stages["prep"]["state"] == "done", "сделанное до отказа остаётся сделанным"

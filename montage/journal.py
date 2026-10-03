@@ -53,6 +53,21 @@ ESTIMATE = {
 # Этапы в порядке пайплайна — тот же, в котором их рисует экран, и тот же, что в контракте.
 STAGES = tuple(ESTIMATE)
 
+# Подшаги сборки в том же порядке, в котором идёт работа над роликом (контракт api, «assembly»).
+ASSEMBLY_STEPS = ("clips", "sound", "cover", "file")
+
+# Вес каждого подшага в процентах, какую долю сборки он занимает. Склейка кусков — три четверти:
+# она идёт минутами, а три остальных подшага — это одна вырезанная картинка и одна загрузка.
+# Остаток делится между ними и поровну не делится (25 на три — это 8, 8 и 9), поэтому считается
+# здесь, а не набирается руками: подшагов больше одного, и набрать их так, чтобы в сумме вышло
+# ровно 100, с первого раза не выходит — а `percent` обязан расти от 0 до 100.
+ASSEMBLY_WEIGHTS = dict(
+    zip(
+        ASSEMBLY_STEPS,
+        (75, *[8] * (len(ASSEMBLY_STEPS) - 2), 100 - 75 - 8 * (len(ASSEMBLY_STEPS) - 2)),
+    )
+)
+
 # Колонки записи, которые заполняет воркер (README API, «Запись журнала»).
 COLUMNS = (
     "media_id",
@@ -219,18 +234,85 @@ def _outcome(values):
     return json.dumps({name: value for name, value in values.items() if value is not None})
 
 
-@quiet
-def failed(conn, ref):
-    """Ролик не собрался: этап, который шёл, так и помечен — упавшим.
+def assembling(running, done=0, of=0):
+    """Итог этапа «Собираем»: четыре подшага и примерный процент, каким идёт сборка.
 
-    Какой именно, спрашивать не надо: идущий этап всегда один. Остальные остаются как есть —
-    сделанное сделано, и упавший ролик показывает, до какого места он дошёл.
+    `running` — код подшага, который идёт сейчас, а `None` — сборка кончена и все четыре закрыты.
+    `done` из `of` — сколько кусков склеено, и по ним процент ползёт внутри подшага `clips`,
+    единственного, который вообще считается.
+
+    Все состояния пишутся всегда и целиком: приложение берёт из списка тот, что `running`, и
+    рисует его под процентом — список без идущего подшага рисуется пустым, и ролик выглядит
+    сломанным при воркере, который на самом деле молчит. На закрытом этапе идущего подшага нет
+    вовсе, и это верно: ждать больше нечего, все галочки стоят, а процент — ровно 100.
+
+    Процент — примерный, по подшагам (design/spec.md, «Сводка»): каждому свой вес, и идущий
+    подшаг стоит на начале своего веса, пока не дойдёт до конца. Растёт монотонно от 0 до 100.
+    """
+    if running is None:
+        before, share = ASSEMBLY_STEPS, 0.0
+    else:
+        before = ASSEMBLY_STEPS[: ASSEMBLY_STEPS.index(running)]
+        share = min(max(done / of, 0.0), 1.0) if of else 0.0
+    return {
+        "steps": [
+            {"step": code, "state": "done" if code in before else _state(code, running)}
+            for code in ASSEMBLY_STEPS
+        ],
+        "percent": min(
+            round(
+                sum(ASSEMBLY_WEIGHTS[code] for code in before) + ASSEMBLY_WEIGHTS[running] * share
+            )
+            if running
+            else 100,
+            100,
+        ),
+    }
+
+
+def _state(code, running):
+    """Состояние подшага, который ещё не начат: `running`, если он идёт сейчас, иначе `pending`."""
+    return "running" if code == running else "pending"
+
+
+@quiet
+def failed(conn, ref, stopped="internal"):
+    """Ролик не собрался: этап, на котором это случилось, помечен упавшим — и вот почему.
+
+    Какой именно, спрашивать не надо: идущий этап всегда один, и он виден по `state`. Идущего
+    иногда нет вовсе — отказ между этапами (материала не хватило, трек не открылся) приходит
+    ровно тогда, когда предыдущий уже `done`, а следующий ещё не начался. Тогда упавшим становится
+    первый незаконченный этап: иначе код причины не лёг бы ни на одну строку, и на экране вместо
+    «годных кадров меньше трёх» было бы пустое место. Сделанное до него остаётся сделанным.
+
+    `stopped` — кодом, а не текстом исключения: его читает приложение и строит из него фразу на
+    своём языке (контракт api, «Остановка»). Словарь закрыт и короток — годных кадров меньше
+    трёх (`no_material`), свой трек не открылся (`track_unreadable`), всё прочее, попытки кончились
+    (`internal`). Кода вне таблицы приложение не назовёт и скажет общей фразой, поэтому лишних
+    кодов здесь не заводится, а `internal` — умолчание для всего, что не разобрано отдельно.
     """
     conn.execute(
         """UPDATE montage_stages
-              SET state = 'failed', finished_at = now(), eta_seconds = null, updated_at = now()
+              SET state = 'failed', finished_at = now(), eta_seconds = null,
+                  outcome = outcome || %s::jsonb, updated_at = now()
             WHERE montage_id = %s AND state = 'running'""",
-        (ref,),
+        (_outcome({"stopped": stopped}), ref),
+    )
+    # Идущего этапа могло не быть вовсе — отказ между этапами приходит, когда предыдущий уже
+    # `done`, а следующий ещё не начался. Тогда упавшим становится первый незаконченный этап: иначе
+    # код причины не лёг бы ни на одну строку и приложению было бы нечего показать.
+    conn.execute(
+        """UPDATE montage_stages
+              SET state = 'failed', finished_at = now(), eta_seconds = null,
+                  outcome = outcome || %s::jsonb, updated_at = now()
+            WHERE montage_id = %s AND stage = (
+                  SELECT stage FROM montage_stages
+                  WHERE montage_id = %s AND state <> 'done'
+                  ORDER BY array_position(%s::text[], stage) LIMIT 1)
+              AND NOT EXISTS (
+                  SELECT 1 FROM montage_stages
+                  WHERE montage_id = %s AND state = 'failed')""",
+        (_outcome({"stopped": stopped}), ref, ref, list(STAGES), ref),
     )
 
 
