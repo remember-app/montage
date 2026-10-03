@@ -30,7 +30,7 @@ from rows import add_item, order, read_montage
 GOLDEN = pathlib.Path(__file__).with_name("fixtures")
 UPDATE = "MONTAGE_UPDATE_GOLDEN"
 
-FORMAT = 1
+FORMAT = 2
 EPOCH = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
 FIRST_SHOT = datetime.datetime(2026, 6, 1, 18, 0, tzinfo=datetime.timezone.utc)
 

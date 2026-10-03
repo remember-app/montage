@@ -7,7 +7,7 @@
 
 from montage import journal
 from montage.media import understanding
-from montage.video import selection
+from montage.video import layout, selection
 
 # Как воспоминание само называет тех, кого узнало на кадрах: «человек-1», «животное-2»
 # (`montage.ai`, промпт описания). Журналу они нужны только чтобы сказать, скольких этап разобрал.
@@ -148,26 +148,48 @@ def plan(conn, ref, chosen, thoughts):
         journal.entry(conn, ref, "directing", **fields)
 
 
-def parts(thoughts):
-    """На какие части режиссёр разложил историю — итогом этапа: сколько их и как они называются.
+def parts(pieces, thoughts):
+    """На какие части режиссёр разложил историю — итогом этапа: части по порядку, с названием и
+    тем местом в ролике, где часть стоит (контракт api, `docs/journal.md`, «directing»).
 
     По самим репликам, а не отдельным полем плана: часть у кадра уже названа, и второй счёт рядом с
-    первым разошёлся бы с ним. И только по взятым: «3 части, 61 кадр» — про ролик, и часть, ни один
-    кадр которой не влез в заказанную длину, в нём не стоит. Частей нет вовсе — ролик резал отсев,
-    или в плане их не было, — и итог о них молчит: отсутствующий ключ экран просто не рисует.
+    первым разошёлся бы с ним. И только по взятым: итог — про ролик, и часть, ни один кадр которой
+    не влез в заказанную длину, в нём не стоит. Частей нет вовсе — ролик резал отбор, или в плане их
+    не было, — и итог о них молчит: отсутствующий ключ экран просто не рисует.
+
+    Секунды — по кускам, которые действительно стоят в ролике, тем же счётом, каким раскладку
+    кладёт `layout`: кусок, у которого `story_part` нет, ни в какую часть не входит.
 
     Названия — слова модели, и в итог они идут той же чисткой и тем же потолком, что в реплику
     (`journal.fit`): итог — `jsonb` без `CHECK`, и держать их там больше некому.
     """
-    parts = {}
-    for thought in thoughts:
-        if thought.get("story_part") and thought.get("decision") == "take":
-            parts.setdefault(thought["story_part"], journal.fit(thought).get("story_part_title"))
-    if not parts:
+    # Секунды части — те, где она стоит в ролике: с начала первого своего куска до начала того,
+    # что стоит за ней, а у последней — до конца ролика. Считаются так же, как раскладка
+    # (`layout.starts`): это одни и те же секунды, какими приложение рисует полосу под роликом.
+    stood, spans = layout.starts(pieces), {}
+    for thought, at, after in zip(
+        (one for one in thoughts if one.get("decision") == "take"),
+        stood,
+        [*stood[1:], stood[-1] + pieces[-1].seconds],
+    ):
+        # Кусок, которому модель части не дала, в ролике стоит и ни в какую часть не входит:
+        # придумывать ему номер нечем.
+        if thought.get("story_part"):
+            spans.setdefault(
+                thought["story_part"],
+                {"title": journal.fit(thought).get("story_part_title"), "from_seconds": at},
+            )["to_seconds"] = after
+    if not spans:
         return {}
     return {
-        "parts": len(parts),
-        "part_titles": [parts[number] for number in sorted(parts) if parts[number]] or None,
+        "parts": [
+            {
+                "title": span["title"],
+                "from_seconds": round(span["from_seconds"], 1),
+                "to_seconds": round(span["to_seconds"], 1),
+            }
+            for span in spans.values()
+        ]
     }
 
 

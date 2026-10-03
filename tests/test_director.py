@@ -22,6 +22,7 @@ import pytest
 
 from montage import ai, worker
 from montage.ai import providers
+from montage.media import understanding
 from montage.video import assembly, director, selection
 
 from pieces import picture
@@ -207,6 +208,45 @@ def test_what_is_said_in_a_clip_goes_to_the_director_too(conn):
     assert "Ну что, все собрались?" in asked(net)
 
 
+def test_the_director_reads_the_frame_as_it_was_described_not_as_a_captions_line(described):
+    """Описание кадра полями (`media_understandings.details`) уходит режиссёру так же, как уходит
+    разбору кадров: строить историю по одной выжимке — значит выбросить половину того, что в кадре
+    сказано, а модель, спросившая об этом однажды, отвечала на все поля."""
+    described.execute(
+        """UPDATE media_understandings SET details = '{"place": "Гостиная", "mood": "Спокойно",
+              "text": "Двое накрывают на стол: тарелки, свечи, торт ещё на кухне."}'::jsonb
+           WHERE media_id = 'm-1'"""
+    )
+
+    _, _, net = directed(described, story=STORY)
+
+    question = asked(net)
+    assert "Гостиная" in question and "Спокойно" in question
+    assert "Двое накрывают на стол: тарелки, свечи, торт ещё на кухне." in question
+
+
+def test_what_the_participants_wrote_about_a_frame_reaches_the_director(described, monkeypatch):
+    """Комментарии участников — их собственные слова о кадре, и режиссёр их читает (doc-14).
+
+    Хранилища у них ещё нет (m-32), и шов честно отдаёт пусто; здесь он подменён, чтобы было видно,
+    что читающий код готов к непустому ответу, а не только к пустому."""
+    monkeypatch.setattr(
+        understanding, "frame_comments", lambda _conn, _ids: {"m-2": ["Это бабушка, не Лиза"]}
+    )
+
+    _, _, net = directed(described, story=STORY)
+
+    assert "Это бабушка, не Лиза" in asked(net)
+
+
+def test_no_comments_to_read_is_no_reason_to_ask_the_director_about_them(described):
+    """Пока комментариев нет ни у кого, в вопросе нет и пустого места под них: модель не должна
+    гадать, что «comments» — это что-то, чего она не видит."""
+    _, _, net = directed(described, story=STORY)
+
+    assert '"comments"' not in asked(net), "поля под пустое в вопросе нет"
+
+
 def test_a_clip_is_never_held_longer_than_it_actually_runs(described):
     """The plan asks for four seconds of a two-second clip. What it gets is the two there are —
     booked in at four, the crossfade chain would walk off the end of the montage."""
@@ -228,7 +268,7 @@ def test_a_plan_longer_than_the_video_that_was_ordered_is_cut_back_to_it(describ
     assert [(one["media_id"], one["decision"], one.get("reason")) for one in thoughts] == [
         ("m-1", "take", None),
         ("m-2", "take", None),
-        ("m-3", "skip", selection.NO_ROOM),
+        ("m-3", "skip", selection.LEFT_OUT),
     ]
 
 
@@ -323,8 +363,8 @@ def test_a_stretch_that_does_not_fit_is_left_out_on_its_own(described):
         ("m-1", "take", None),
         ("m-2", "take", None),
         ("m-3", "take", None),
-        ("m-2", "skip", selection.NO_ROOM),
-        ("m-2", "skip", selection.NO_ROOM),
+        ("m-2", "skip", selection.LEFT_OUT),
+        ("m-2", "skip", selection.LEFT_OUT),
     ]
 
 
@@ -375,7 +415,7 @@ def test_the_director_says_what_it_sees_which_part_it_is_and_where_to_look(descr
     assert about(thoughts, "m-3") == {
         "media_id": "m-3",
         "decision": "skip",
-        "reason": director.LEFT_OUT,
+        "reason": selection.LEFT_OUT,
         "thought": "собака не про этот вечер",
     }, "причина — кодом, как везде в журнале, а слова модели о ней — мыслью: их и покажут людям"
 
@@ -490,7 +530,7 @@ def test_a_burst_of_one_moment_reaches_the_director_whole(described):
     assert about(thoughts, "m-9") == {
         "media_id": "m-9",
         "decision": "skip",
-        "reason": director.LEFT_OUT,
+        "reason": selection.LEFT_OUT,
         "thought": None,
     }
 

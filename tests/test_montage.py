@@ -12,7 +12,7 @@ import pytest
 
 from montage import ffmpeg, storage, worker
 from montage.media import preview
-from montage.video import assembly, director, frames, layout, library, montage, rhythm, selection
+from montage.video import assembly, frames, layout, library, montage, rhythm, selection
 
 from checks import about, loudness
 from material import dark_opening_clip, draw, hush, jpeg, long_clip, probe, tone
@@ -645,7 +645,7 @@ def test_a_real_montage_survives_the_whole_milestone_at_once(
     )
 
     dropped = next(entry for entry in directing if entry.media_id == f2)
-    assert (dropped.decision, dropped.reason) == ("skip", director.LEFT_OUT), (
+    assert (dropped.decision, dropped.reason) == ("skip", selection.LEFT_OUT), (
         "проигравший серии рассказан своей строкой, а не молчанием (TASK-447) — и решение о нём "
         "теперь у режиссёра, а не у отсева"
     )

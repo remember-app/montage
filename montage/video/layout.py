@@ -12,6 +12,17 @@ from montage.video import assembly
 log = logging.getLogger("montage.video.layout")
 
 
+def starts(pieces):
+    """Where each piece stands in the video, in seconds from its start — the same count `write`
+    lays the chain out by, so anything that names a place in the finished video (a part of the
+    story in the journal's stage outcome) says where that piece actually stands."""
+    at, stood = 0.0, []
+    for piece in pieces:
+        stood.append(at)
+        at += piece.seconds - assembly.CROSSFADE_SECONDS
+    return stood
+
+
 def write(conn, ref, pieces):
     """Where each piece stands in this montage, into `montage_frames` — in place of whatever an
     earlier assembly of the same order left there.
@@ -33,10 +44,7 @@ def write(conn, ref, pieces):
     the frame sheet would then show this montage under none of its frames, which is a montage
     missing from a list and not a montage missing.
     """
-    at, rows = 0.0, []
-    for piece in pieces:
-        rows.append((ref, piece.media_id, at, piece.seconds))
-        at += piece.seconds - assembly.CROSSFADE_SECONDS
+    rows = [(ref, piece.media_id, at, piece.seconds) for piece, at in zip(pieces, starts(pieces))]
     try:
         # Both statements or neither, on a connection that otherwise commits each on its own: this
         # layout is read while the video is still being assembled, and between the two an emptied

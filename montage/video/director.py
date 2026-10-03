@@ -31,6 +31,7 @@ import dataclasses
 import logging
 
 from montage import ai
+from montage.media import understanding
 from montage.video import assembly, selection
 
 # What one piece may be held for, whatever the plan says. Under a second is a flash nobody sees;
@@ -45,9 +46,9 @@ MAX_PIECE_SECONDS = 8.0
 # of it is paid for.
 SPEECH_CHARACTERS = 400
 
-# Почему кадр остался за бортом, когда своих слов об этом у модели не нашлось: она просто не взяла
-# его в план. Остальные коды словаря причин — отсева (`selection`), этот берётся только здесь.
-LEFT_OUT = "left_out"
+# «Не ложилось в историю» — код из словаря причин (`selection.LEFT_OUT`), и единственный, который
+# ставит режиссёр: отсева в ролике нет, а чужой кадр он не видит. Свой на этот случай у него нет,
+# и не должен появляться: словарь закрыт контрактом api.
 
 log = logging.getLogger("montage.director")
 
@@ -152,7 +153,7 @@ def direct(conn, pieces, target_seconds, exclude=(), story="", ref=None, brain=N
                 target_seconds,
                 piece.media_id,
             )
-            thought.update(decision="skip", reason=selection.NO_ROOM)
+            thought.update(decision="skip", reason=selection.LEFT_OUT)
             continue
         thought["decision"] = "take"
         fitted.append(piece)
@@ -170,7 +171,7 @@ def direct(conn, pieces, target_seconds, exclude=(), story="", ref=None, brain=N
         {
             "media_id": media_id,
             "decision": "skip",
-            "reason": LEFT_OUT,
+            "reason": selection.LEFT_OUT,
             "thought": planned.get("left_out", {}).get(media_id),
         }
         for media_id in candidates
@@ -211,28 +212,41 @@ def _known(conn, media_ids):
     """What the pipeline has already learned about these pieces, out of its own two tables.
 
     Nothing is asked of a model here: the description of a frame and the words in a clip are written
-    once and read ever after (doc-03), and the director is the reader they were written for. A piece
-    nobody has described yet simply has nothing under it — it is offered to the director as a file
-    and not as a scene.
+    once and read ever after (doc-03), and the director is the reader they were written for. It
+    reads the description whole — одной фразой и полями (`media_understandings.details`: место,
+    свет, настроение, план, движение камеры, подробный текст, лучшие моменты клипа — те же поля,
+    что в журнале), потому что строить историю по одной выжимке значит выбросить половину того,
+    что в кадре сказано. Комментарии участников — их собственные слова о кадре, и режиссёру они
+    нужны не меньше model's. A piece nobody has described yet simply has nothing under it — it is
+    offered to the director as a file and not as a scene.
+
+    Комментарии приходят из `understanding.frame_comments` — того же места, что и у разбора кадров.
+    Сегодня там пусто (хранилища ещё нет, m-32), и это «пока никто ничего не написал», а не
+    «комментариев не бывает»: у кадра с комментарием они появятся сами, без правки тут.
     """
-    return {
+    known = {
         media_id: {
             name: value
             for name, value in (
                 ("description", description or ""),
                 ("cast", cast or []),
                 ("speech", (transcript or "")[:SPEECH_CHARACTERS]),
+                *((details or {}).items()),
             )
             if value
         }
-        for media_id, description, cast, transcript in conn.execute(
-            """SELECT mine.id, u.description, u.cast_labels, s.transcript
+        for media_id, description, cast, transcript, details in conn.execute(
+            """SELECT mine.id, u.description, u.cast_labels, s.transcript, u.details
                FROM unnest(%s::text[]) AS mine(id)
                LEFT JOIN media_understandings u ON u.media_id = mine.id
                LEFT JOIN media_speech s ON s.media_id = mine.id""",
             (list(media_ids),),
         ).fetchall()
     }
+    for media_id, said in understanding.frame_comments(conn, list(media_ids)).items():
+        if said:
+            known.setdefault(media_id, {})["comments"] = said
+    return known
 
 
 def _shot(piece, known):

@@ -97,7 +97,9 @@ def test_the_journal_tells_the_whole_assembly_stage_by_stage(conn, s3, memory, t
     assert {one.media_id: one.decision for one in directing} == {
         one: "take" for one in (*ids[1:], dark)
     }
-    assert stages["directing"]["outcome"]["frames"] == 4
+    # Частей истории у отбора нет — он их не придумывает, — и итог этапа о них молчит: ролик резал
+    # не режиссёр, а счётчики «взял / мимо» считает API по записям (контракт api, «directing»).
+    assert stages["directing"]["outcome"] == {}
     clip = next(one for one in directing if one.media_id == ids[3])
     assert clip.source_to_seconds > clip.source_from_seconds >= 0, "кусок клипа — секундами"
     still = next(one for one in directing if one.media_id == ids[1])

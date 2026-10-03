@@ -1,5 +1,5 @@
 {
-  "format": 1,
+  "format": 2,
   "scenario": "algorithm",
   "montage": {
     "status": "ready",
@@ -147,10 +147,7 @@
       "eta_seconds": 0,
       "done_count": 12,
       "total_count": 12,
-      "outcome": {
-        "of": 12,
-        "frames": 4
-      },
+      "outcome": {},
       "updated_at": "2026-01-01T00:00:23Z"
     },
     {
@@ -430,7 +427,7 @@
       "media": "f4",
       "thought": null,
       "decision": "skip",
-      "reason": "no_room",
+      "reason": "left_out",
       "series_size": null,
       "story_part": null,
       "story_part_title": null,
@@ -447,7 +444,7 @@
       "media": "f6",
       "thought": null,
       "decision": "skip",
-      "reason": "no_room",
+      "reason": "left_out",
       "series_size": null,
       "story_part": null,
       "story_part_title": null,
@@ -464,7 +461,7 @@
       "media": "f7",
       "thought": null,
       "decision": "skip",
-      "reason": "no_room",
+      "reason": "left_out",
       "series_size": null,
       "story_part": null,
       "story_part_title": null,
@@ -481,7 +478,7 @@
       "media": "f9",
       "thought": null,
       "decision": "skip",
-      "reason": "no_room",
+      "reason": "left_out",
       "series_size": null,
       "story_part": null,
       "story_part_title": null,
@@ -498,7 +495,7 @@
       "media": "f10",
       "thought": null,
       "decision": "skip",
-      "reason": "no_room",
+      "reason": "left_out",
       "series_size": null,
       "story_part": null,
       "story_part_title": null,
@@ -515,7 +512,7 @@
       "media": "f12",
       "thought": null,
       "decision": "skip",
-      "reason": "no_room",
+      "reason": "left_out",
       "series_size": null,
       "story_part": null,
       "story_part_title": null,

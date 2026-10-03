@@ -1,5 +1,5 @@
 {
-  "format": 1,
+  "format": 2,
   "scenario": "director",
   "montage": {
     "status": "ready",
@@ -154,13 +154,22 @@
       "done_count": 13,
       "total_count": 13,
       "outcome": {
-        "of": 13,
-        "parts": 3,
-        "frames": 5,
-        "part_titles": [
-          "Сборы",
-          "Торт",
-          "Тосты"
+        "parts": [
+          {
+            "title": "Сборы",
+            "to_seconds": 2.5,
+            "from_seconds": 0.0
+          },
+          {
+            "title": "Торт",
+            "to_seconds": 6.0,
+            "from_seconds": 2.5
+          },
+          {
+            "title": "Тосты",
+            "to_seconds": 15.0,
+            "from_seconds": 6.0
+          }
         ]
       },
       "updated_at": "2026-01-01T00:00:29Z"
@@ -549,7 +558,7 @@
       "media": "f8",
       "thought": "Салют во дворе — красивый финал, если хватит времени.",
       "decision": "skip",
-      "reason": "no_room",
+      "reason": "left_out",
       "series_size": null,
       "story_part": 4,
       "story_part_title": "Салют",

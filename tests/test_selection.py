@@ -63,7 +63,7 @@ def test_only_what_fits_the_asked_for_length_gets_in_and_it_gets_in_in_order():
     # would be 8.5, further past seven than 6.5 is short of it.
     assert assembly.length_of(chosen) == 6.5
     assert chosen == [pieces[1], pieces[3], pieces[4]], "the sharpest three, back in date order"
-    assert [piece.rejected for piece in rejected] == [selection.NO_ROOM] * 2
+    assert [piece.rejected for piece in rejected] == [selection.LEFT_OUT] * 2
 
 
 def test_the_first_piece_is_taken_however_long_it_is():
@@ -331,7 +331,7 @@ def test_a_still_does_not_run_past_the_order_while_the_clips_can_make_up_the_res
     video = selection.stretch(chosen, 11)
 
     assert [piece.media_id for piece in video] == ["v0", "v1", "p0"]
-    assert [(piece.media_id, piece.rejected) for piece in rejected] == [("p1", selection.NO_ROOM)]
+    assert [(piece.media_id, piece.rejected) for piece in rejected] == [("p1", selection.LEFT_OUT)]
     assert assembly.length_of(video) == 11.0
 
 

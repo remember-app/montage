@@ -16,7 +16,7 @@ from psycopg.types.json import Jsonb
 
 from montage import journal, worker
 from montage.media import understanding
-from montage.video import director, selection, story
+from montage.video import selection, story
 
 from pieces import picture
 from recorded import planning_over
@@ -265,8 +265,8 @@ def test_every_decision_of_the_selection_is_told_with_its_reason(conn, memory):
     # с причиной с самого первого этапа.
     struck_out = selection.Piece(media_id=str(uuid.uuid4()))
     unreadable = selection.Piece(media_id=str(uuid.uuid4()), rejected=selection.UNREADABLE)
-    no_room = selection.Piece(media_id=str(uuid.uuid4()))
-    judged = [of_a_burst, clip, struck_out, unreadable, no_room]
+    did_not_fit = selection.Piece(media_id=str(uuid.uuid4()))
+    judged = [of_a_burst, clip, struck_out, unreadable, did_not_fit]
     journal.begin(conn, montage_id, len(judged), 60)
 
     story.choices(
@@ -276,15 +276,15 @@ def test_every_decision_of_the_selection_is_told_with_its_reason(conn, memory):
         [
             dataclasses.replace(struck_out, rejected=selection.EXCLUDED),
             unreadable,
-            dataclasses.replace(no_room, rejected=selection.NO_ROOM),
+            dataclasses.replace(did_not_fit, rejected=selection.LEFT_OUT),
         ],
         judged,
     )
 
     written = {one.media_id: one for one in entries_of(conn, montage_id, "directing")}
-    assert (written[no_room.media_id].decision, written[no_room.media_id].reason) == (
+    assert (written[did_not_fit.media_id].decision, written[did_not_fit.media_id].reason) == (
         "skip",
-        selection.NO_ROOM,
+        selection.LEFT_OUT,
     )
     assert unreadable.media_id not in written, "о непрочитанном рассказала подготовка"
     assert struck_out.media_id not in written, "исключённый организатором в журнале не упоминается"
@@ -318,7 +318,7 @@ def test_the_series_the_director_kept_is_told_the_same_way(conn, memory):
         [
             {"media_id": of_a_burst.media_id, "thought": "Вносят торт", "decision": "take"},
             {"media_id": alone.media_id, "thought": "Накрывают на стол", "decision": "take"},
-            {"media_id": left_out, "reason": director.LEFT_OUT, "decision": "skip"},
+            {"media_id": left_out, "reason": selection.LEFT_OUT, "decision": "skip"},
         ],
     )
 
@@ -328,7 +328,7 @@ def test_the_series_the_director_kept_is_told_the_same_way(conn, memory):
         4,
     )
     assert written[alone.media_id].series_size is None, "кадр сам по себе — не серия"
-    assert (written[left_out].decision, written[left_out].reason) == ("skip", director.LEFT_OUT)
+    assert (written[left_out].decision, written[left_out].reason) == ("skip", selection.LEFT_OUT)
 
 
 def test_every_stretch_of_one_clip_is_its_own_entry(conn, memory):
@@ -354,7 +354,7 @@ def test_every_stretch_of_one_clip_is_its_own_entry(conn, memory):
                 "media_id": clip,
                 "thought": "Прощаются у двери",
                 "decision": "skip",
-                "reason": selection.NO_ROOM,
+                "reason": selection.LEFT_OUT,
             },
         ],
     )
@@ -406,8 +406,8 @@ def test_the_director_tells_the_journal_the_plan_it_built(conn, s3, memory, tmp_
     assert [(one.media_id, one.decision, one.reason) for one in directing[1:]] == [
         (ids[0], "take", None),
         (ids[1], "take", None),
-        (ids[2], "skip", director.LEFT_OUT),
-        (ids[3], "skip", director.LEFT_OUT),
+        (ids[2], "skip", selection.LEFT_OUT),
+        (ids[3], "skip", selection.LEFT_OUT),
     ], "порядком плана, а причина — кодом, который приложение называет своими словами"
     assert (directing[3].thought, directing[4].thought) == ("собака не про этот вечер", None), (
         "а слова модели о ней — мыслью там, где она их сказала"
@@ -419,11 +419,11 @@ def test_the_director_tells_the_journal_the_plan_it_built(conn, s3, memory, tmp_
     assert tort.focus == (0.3, 0.05, 0.25, 0.5), "рамка «куда смотрит» — долями кадра"
     assert directing[1].focus is None, "о чём модель не сказала, того в журнале нет"
     assert stages_of(conn, montage_id)["directing"]["outcome"] == {
-        "frames": 2,
-        "of": 4,
-        "parts": 2,
-        "part_titles": ["Сборы", "Торт"],
-    }
+        "parts": [
+            {"title": "Сборы", "from_seconds": 0.0, "to_seconds": 2.5},
+            {"title": "Торт", "from_seconds": 2.5, "to_seconds": 6.5},
+        ]
+    }, "часть стоит там, где стоит её кусок, а последняя идёт до конца ролика"
 
 
 def test_a_plan_carrying_what_the_database_cannot_hold_is_still_a_video_and_a_journal(
@@ -463,8 +463,14 @@ def test_a_plan_carrying_what_the_database_cannot_hold_is_still_a_video_and_a_jo
 
 
 def test_the_parts_of_the_story_are_the_parts_the_video_has():
-    """«3 части, 61 кадр» — про ролик: часть, ни один кадр которой не влез в заказанную длину, в
-    итоге не считается, как не считаются в `frames` её кадры."""
+    """Части истории в итоге этапа — по порядку в ролике, с названием и с тем местом, где часть
+    стоит: приложение рисует по ним полосу под роликом. Часть, ни один кадр которой не влез в
+    заказанную длину, в итоге не стоит вовсе — её кадр ушёл «мимо», и полоса без неё не врёт."""
+    pieces = [
+        selection.Piece(media_id="a", seconds=3.0),
+        selection.Piece(media_id="b", seconds=4.0),
+        selection.Piece(media_id="d", seconds=2.0),
+    ]
     thoughts = [
         {"thought": "Три части: сборы, торт, прощание."},
         {"media_id": "a", "decision": "take", "story_part": 1, "story_part_title": "Сборы"},
@@ -472,13 +478,27 @@ def test_the_parts_of_the_story_are_the_parts_the_video_has():
         {
             "media_id": "c",
             "decision": "skip",
-            "reason": selection.NO_ROOM,
+            "reason": selection.LEFT_OUT,
             "story_part": 3,
             "story_part_title": "Прощание",
         },
+        {"media_id": "d", "decision": "take", "story_part": 3, "story_part_title": "Прощание"},
     ]
 
-    assert story.parts(thoughts) == {"parts": 2, "part_titles": ["Сборы", "Торт"]}
+    assert story.parts(pieces, thoughts) == {
+        "parts": [
+            {"title": "Сборы", "from_seconds": 0.0, "to_seconds": 2.5},
+            {"title": "Торт", "from_seconds": 2.5, "to_seconds": 6.0},
+            {"title": "Прощание", "from_seconds": 6.0, "to_seconds": 8.0},
+        ]
+    }
+
+
+def test_a_plan_without_parts_leaves_the_directors_outcome_silent():
+    """План без частей вовсе (записанный ответ, снятый до того, как режиссёра спросили говорить):
+    итог молчит — отсутствующий ключ экран просто не рисует, а ноль частей был бы враньём."""
+    one = selection.Piece(media_id="a")
+    assert story.parts([one], [{"media_id": "a", "decision": "take"}]) == {}
 
 
 def test_the_titles_in_the_directors_outcome_are_cleaned_like_the_entries():
@@ -490,13 +510,13 @@ def test_the_titles_in_the_directors_outcome_are_cleaned_like_the_entries():
             "media_id": "a",
             "decision": "take",
             "story_part": 1,
-            "story_part_title": "Сборы‮\nи\u0007 " + "я" * 200,
+            "story_part_title": "Сборы\u202e\nи\u0007 " + "я" * 200,
         }
     ]
 
-    (title,) = story.parts(thoughts)["part_titles"]
+    (one,) = story.parts([selection.Piece(media_id="a")], thoughts)["parts"]
 
-    assert title.startswith("Сборы и я") and len(title) == journal.TITLE_CHARACTERS
+    assert one["title"].startswith("Сборы и я") and len(one["title"]) == journal.TITLE_CHARACTERS
 
 
 def test_service_characters_in_the_models_words_do_not_reach_the_journal(conn, memory):

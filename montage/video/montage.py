@@ -281,9 +281,9 @@ def montage(conn, ref):
             story.choices(conn, ref, chosen, turned_down, pieces)
         else:
             story.plan(conn, ref, chosen, thoughts)
-        journal.finish(
-            conn, ref, "directing", frames=len(chosen), of=len(pieces), **story.parts(thoughts)
-        )
+        # Итог этапа — части истории с тем местом в ролике, где часть стоит (контракт api,
+        # «directing»). Счётчики «взял N / мимо N» воркер не пишет: их считает API по записям.
+        journal.finish(conn, ref, "directing", **story.parts(chosen, thoughts))
 
         # Музыка: куски выбраны и стоят на своих местах, и всё, что здесь решается, — как долго
         # каждый из них держать, чтобы склейка легла на бит. Дорожки без темпа оставляет куски как

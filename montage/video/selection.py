@@ -45,11 +45,15 @@ DEDUP_SECONDS = 30.0
 # they are read by other code and, in the end, shown to the organizer in their own language, so
 # they must not change with the wording of a screen.
 # Три из них — о самом кадре, и считает их `frames.py`; остальные три о куске в ролике.
+#
+# Словарь закрыт контрактом api (`docs/journal.md`, «Причины "мимо"»): в журнал идут `unreadable`,
+# `duplicate` и `left_out`. Отсева (`blur`, `exposure`) в ролике нет вовсе, кадры равны, а
+# `excluded` — про кусок, а не про запись в журнал: организатор убрал кадр сам, и в журнале его нет.
 UNREADABLE, BLUR, EXPOSURE = frames.UNREADABLE, frames.BLUR, frames.EXPOSURE
 DUPLICATE = "duplicate"  # another shot of the same moment stands for it — только у предложения на
 # экране заказа (`media/screening.py`); в ролике отсева нет и быть не может
-EXCLUDED = "excluded"  # the organizer said no
-NO_ROOM = "no_room"  # good enough, but the video is only so long
+EXCLUDED = "excluded"  # the organizer said no — в журнал не пишется
+LEFT_OUT = "left_out"  # не ложится в историю — в том числе не хватило места в заказанную длину
 
 log = logging.getLogger("montage.selection")
 
@@ -235,11 +239,11 @@ def choose(pieces, target_seconds, exclude=()):
         else:
             candidates.append(piece)
 
-    chosen, no_room = [], []
+    chosen, too_long = [], []
     for piece in sorted(candidates, key=lambda piece: -piece.sharpness):
         if chosen and assembly.length_of(chosen + [piece]) > target_seconds:
             # Too long for what is left, but a shorter cut behind it may still fit.
-            no_room.append(piece)
+            too_long.append(piece)
             continue
         chosen.append(piece)
 
@@ -254,18 +258,20 @@ def choose(pieces, target_seconds, exclude=()):
     extra = next(
         (
             piece
-            for piece in no_room
+            for piece in too_long
             if assembly.length_of(chosen + [piece]) - target_seconds < short
         ),
         None,
     )
     if extra:
-        no_room.remove(extra)
+        too_long.remove(extra)
         past = assembly.length_of(chosen + [extra]) - (
             target_seconds if extra.kind == "video" else MAX_SECONDS
         )
         chosen.append(cut_to(extra, extra.seconds - max(past, 0.0)))
-    rejected += (dataclasses.replace(piece, rejected=NO_ROOM) for piece in no_room)
+    # Не ложилось в заказанную длину — по контракту это `left_out`, а не отдельный код: одна
+    # причина «мимо» на режиссёрском этапе, общая и для отбора, и для режиссёра-нейросети.
+    rejected += (dataclasses.replace(piece, rejected=LEFT_OUT) for piece in too_long)
     return sorted(chosen, key=lambda piece: piece.when), rejected
 
 
