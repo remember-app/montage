@@ -48,7 +48,7 @@ import tempfile
 import urllib.request
 
 from montage import ffmpeg, journal, photo, storage
-from montage.media import preview
+from montage.media import preview, understanding
 from montage.video import assembly, director, layout, music, rhythm, selection, story
 
 MIN_ITEMS = 3  # «Меньше 3 → сразу failed» — the api refuses the order at this number too
@@ -227,9 +227,11 @@ def montage(conn, ref):
                 conn, ref, "материал не годится для ролика: файлы не читаются или исключены"
             )
 
-        # Разбор кадров — то, что о них уже знает пайплайн. Ни о чём никого не спрашивает: описания
-        # пишет `understanding.py` задолго до заказа, и читаются они готовыми.
-        story.what_was_seen(conn, ref, pieces)
+        # Разбор кадров — описание каждого, кто ещё не описан, и чтение всего, что уже есть. Кадр,
+        # описанный раньше, в нейросеть повторно не уходит: `describe_missing` отдаёт его журналу
+        # готовым, помеченным «описан ранее», и по этому же делению считается счёт этапа.
+        earlier = understanding.describe_missing(conn, [piece.media_id for piece in pieces])
+        story.what_was_seen(conn, ref, pieces, earlier)
 
         # Музыка раньше режиссёра: под что собирают ролик — часть того, из чего он строит план.
         tracks, refusal = music.files(ordered_music, workdir)
