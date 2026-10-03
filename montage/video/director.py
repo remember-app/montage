@@ -212,17 +212,17 @@ def _known(conn, media_ids):
     """What the pipeline has already learned about these pieces, out of its own two tables.
 
     Nothing is asked of a model here: the description of a frame and the words in a clip are written
-    once and read ever after (doc-03), and the director is the reader they were written for. It
-    reads the description whole — одной фразой и полями (`media_understandings.details`: место,
-    свет, настроение, план, движение камеры, подробный текст, лучшие моменты клипа — те же поля,
-    что в журнале), потому что строить историю по одной выжимке значит выбросить половину того,
-    что в кадре сказано. Комментарии участников — их собственные слова о кадре, и режиссёру они
-    нужны не меньше model's. A piece nobody has described yet simply has nothing under it — it is
-    offered to the director as a file and not as a scene.
+    once and read ever after (doc-03), and the director is the reader they were written for. The
+    description goes into the plan whole — one sentence and the fields beside it
+    (`media_understandings.details`: place, light, mood, shot, camera, the clip's best moments, the
+    long text — те же поля, что в журнале), because building a story off one summary is throwing
+    away half of what the frame says. A piece nobody has described yet simply has nothing under it —
+    it is offered to the director as a file and not as a scene.
 
-    Комментарии приходят из `understanding.frame_comments` — того же места, что и у разбора кадров.
-    Сегодня там пусто (хранилища ещё нет, m-32), и это «пока никто ничего не написал», а не
-    «комментариев не бывает»: у кадра с комментарием они появятся сами, без правки тут.
+    What the participants wrote about a frame comes from `understanding.frame_comments` — the same
+    place the frame analysis reads, and it is empty today (no storage for them yet, m-32), which
+    means «nobody has written anything yet» and not «a frame has no comments»: on a frame that has
+    them they will appear on their own, with nothing changed here.
     """
     known = {
         media_id: {
