@@ -11,11 +11,15 @@ say, and never pile work on something already on its way:
 
     the uploads nobody finished — a multipart started a day ago and abandoned, which costs the
     bucket until somebody aborts it.
+
+    the retakes counted again — what an organizer does to a frame after it was screened, which
+    moves the series it stands in and never queues a job (`sweep_media_duplicates`).
 """
 
 import logging
 
 from montage import ai, storage
+from montage.media import screening
 
 STALE_UPLOAD_HOURS = 24  # a day in `pending_upload` means the phone is not coming back
 CATCH_UP_AFTER_HOURS = 24  # how long a catch-up that failed is left alone before it is tried again
@@ -128,6 +132,39 @@ def sweep_media_without_screening(conn):
     return queued
 
 
+def sweep_media_duplicates(conn):
+    """Every memory's series counted again over its material as it stands now.
+
+    A `duplicate` is not a verdict about a frame on its own — it is a verdict about a frame *among
+    its neighbours* (`screening._duplicates`), and a neighbour can change without a single new file
+    arriving: the organizer hides a frame or deletes one (`frame.ts`, `gallery.ts`), or corrects the
+    date it was shot on, and any of the three moves the series every other frame of that memory
+    stands in. None of them queues a job — they are the api's, and it queues only `media_preview`
+    at upload and `montage` at the order — so without this sweep a «Дубль» would stand until the
+    next upload into that same memory, and one that never comes would stand for good.
+
+    Counted from scratch by the same `_duplicates` a screened file runs, over the same material, so
+    the answer is the one the order would give: hidden is not material, and a frame that is no
+    longer a retake is simply kept again. Written only where it changed, which for a memory nobody
+    touched is nowhere.
+
+    ponytail: every memory with material, on the hour. What would narrow it is a record of what the
+    api changed, and there is none — a deleted frame leaves no row behind to notice — so the only
+    honest cheapness here is to count what there is and let the write be a no-op. Re-count on the
+    api's own events when it starts saying what it changed.
+    """
+    memories = conn.execute(
+        """SELECT DISTINCT item.memory_id FROM media_items item
+           JOIN media_frames seen ON seen.media_id = item.id::text
+           WHERE item.status = 'ready'"""
+    ).fetchall()
+    for (memory_id,) in memories:
+        screening._duplicates(conn, memory_id)
+    if memories:
+        log.info("counted the retakes again over %s memories", len(memories))
+    return len(memories)
+
+
 def sweep_media_without_ai_answers(conn):
     """Ready media the cloud model was never asked about: frames with no description, clips with no
     transcript.
@@ -227,5 +264,6 @@ SWEEPS = (
     sweep_photos_without_previews,
     sweep_media_without_frame_info,
     sweep_media_without_screening,
+    sweep_media_duplicates,
     sweep_media_without_ai_answers,
 )

@@ -3,6 +3,7 @@
 См. `docs/queue.md`. Всё живое: настоящий Postgres и настоящий бакет.
 """
 
+import datetime
 import logging
 
 import pytest
@@ -10,9 +11,13 @@ from botocore.exceptions import ClientError
 from botocore.stub import Stubber
 
 from montage import storage, sweeps, worker
+from montage.video import selection
 
 from material import FIXTURES, jpeg, probe, sound
+from pieces import picture
 from rows import add_item, fetch, only_jobs_for, read_frame_info, read_item, read_size
+
+EVENING = datetime.datetime(2026, 9, 5, 19, tzinfo=datetime.UTC)
 
 
 def test_the_sweep_takes_an_abandoned_upload_with_its_multipart(conn, s3, memory):
@@ -257,3 +262,107 @@ def test_the_sweep_does_not_go_on_asking_about_a_file_it_cannot_measure(conn, s3
     # A day on, the same file gets its one more go — the sweep is not blind to it for good.
     conn.execute("UPDATE jobs SET updated_at = now() - interval '25 hours'")
     assert sweeps.sweep_media_without_frame_info(conn) == 1
+
+
+def _kept(conn, memory, second, frame, sharpness, *, reason=None, hidden=False):
+    """A ready photograph the screening job has already looked at: its verdict on the row and its
+    frame where the job leaves it, with no file behind either."""
+    item_id, _ = add_item(conn, memory, "photo", status="ready")
+    conn.execute(
+        """UPDATE media_items
+           SET captured_at = %s, screening_rejected = %s, screening_reason = %s, hidden = %s
+           WHERE id = %s""",
+        (EVENING + datetime.timedelta(seconds=second), reason is not None, reason, hidden, item_id),
+    )
+    conn.execute(
+        "INSERT INTO media_frames (media_id, frame, sharpness) VALUES (%s, %s, %s)",
+        (item_id, frame, sharpness),
+    )
+    return item_id
+
+
+def _verdict(conn, item_id):
+    """The proposal as the api serves it: `(rejected, why)`."""
+    return conn.execute(
+        "SELECT screening_rejected, screening_reason FROM media_items WHERE id = %s", (item_id,)
+    ).fetchone()
+
+
+def test_the_sweep_counts_the_series_again_after_a_frame_is_hidden(conn, memory):
+    """The sharp shot of the cake is hidden, and the softer one it stood for is nobody's retake any
+    more — kept again, on the hour, without anybody uploading anything into this memory.
+
+    Hiding queues nothing (the api's `frame.ts` writes the row and stops), so before this sweep the
+    mark stands for good: it was true when it was counted and nothing has counted since."""
+    first = _kept(conn, memory, 0, picture(1), 50)
+    retake = _kept(conn, memory, 10, picture(1, moved=(3, 0)), 30)
+    guests = _kept(conn, memory, 15, picture(2), 40)
+
+    sweeps.sweep_media_duplicates(conn)
+    assert _verdict(conn, retake) == (True, selection.DUPLICATE), "the mark is there to begin with"
+
+    conn.execute("UPDATE media_items SET hidden = true WHERE id = %s", (first,))
+    sweeps.sweep_media_duplicates(conn)
+
+    assert _verdict(conn, retake) == (False, None)
+    assert _verdict(conn, guests) == (False, None)
+
+
+def test_the_sweep_counts_the_series_again_after_a_frame_is_deleted(conn, memory):
+    """The same for a frame the organizer deleted outright, and this is the one nothing could have
+    found by looking: the row is gone, and so is any trace that it was ever part of a series. Only
+    counting the memory as it stands now can answer for what is left of it."""
+    first = _kept(conn, memory, 0, picture(1), 50)
+    retake = _kept(conn, memory, 10, picture(1, moved=(3, 0)), 30)
+    guests = _kept(conn, memory, 15, picture(2), 40)
+
+    sweeps.sweep_media_duplicates(conn)
+    assert _verdict(conn, retake) == (True, selection.DUPLICATE)
+
+    conn.execute("DELETE FROM media_items WHERE id = %s", (first,))
+    sweeps.sweep_media_duplicates(conn)
+
+    assert _verdict(conn, retake) == (False, None)
+    assert _verdict(conn, guests) == (False, None)
+
+
+def test_the_sweep_counts_the_series_again_after_a_shooting_date_is_corrected(conn, memory):
+    """Two shots of the cake a minute apart are two moments of their own; the organizer corrects
+    one date and they are one moment again, so the second becomes the retake of the first — a mark
+    the recount puts on, not only takes off. The api writes `captured_at` and queues nothing."""
+    first = _kept(conn, memory, 0, picture(1), 50)
+    retake = _kept(conn, memory, 120, picture(1, moved=(3, 0)), 30)
+
+    sweeps.sweep_media_duplicates(conn)
+    assert _verdict(conn, retake) == (False, None), "two minutes apart — two moments of their own"
+
+    conn.execute(
+        "UPDATE media_items SET captured_at = captured_at - interval '2 minutes' WHERE id = %s",
+        (retake,),
+    )
+    sweeps.sweep_media_duplicates(conn)
+
+    assert _verdict(conn, retake) == (True, selection.DUPLICATE)
+    assert _verdict(conn, first) == (False, None)
+
+
+def test_the_sweep_writes_nothing_about_a_memory_nobody_touched(conn, memory):
+    """Counted every hour, so it is worth saying that it costs nothing: the same material counted
+    twice in a row rewrites not one row — `_duplicates` writes only where its answer changed, which
+    is what keeps an hourly pass over the library from being a write storm."""
+    _kept(conn, memory, 0, picture(1), 50)
+    retake = _kept(conn, memory, 10, picture(1, moved=(3, 0)), 30)
+
+    assert sweeps.sweep_media_duplicates(conn) == 1
+    written = conn.execute(
+        "SELECT id, updated_at FROM media_items WHERE memory_id = %s ORDER BY id", (memory[0],)
+    ).fetchall()
+
+    assert sweeps.sweep_media_duplicates(conn) == 1
+    assert (
+        conn.execute(
+            "SELECT id, updated_at FROM media_items WHERE memory_id = %s ORDER BY id", (memory[0],)
+        ).fetchall()
+        == written
+    ), "an hour later, not one row rewritten"
+    assert _verdict(conn, retake) == (True, selection.DUPLICATE), "and the mark still stands"
