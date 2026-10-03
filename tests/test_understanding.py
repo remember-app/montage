@@ -245,6 +245,46 @@ def test_without_a_cloud_model_nothing_is_described_and_nobody_is_asked(
     )
 
 
+def test_the_analysis_stage_asks_about_a_frame_only_once(conn, s3, memory, tmp_path, model):
+    """Главное обещание этапа анализа: кадр, описанный раньше, в нейросеть второй раз не уходит.
+
+    Ролик собирается из материала, которое уже месяц лежит описанным (тот же вопрос, что и у задачи
+    из очереди, и тот же ответ). Один кадр описан, другой — нет: модель спрашивается ровно об одном,
+    и в журнале один помечен «описан ранее», а второй описан заново и таким помечен не помечен.
+
+    Без этой проверки тест проходил бы и с тем, что этап спрашивает обоих: «описан ранее» тогда
+    просто рисовалось бы, а второй вызов модели не был бы виден.
+    """
+    net = model("gemini_describe.json", "gemini_describe_again.json")
+    known = ready_media(conn, s3, memory, jpeg(tmp_path / "one.jpg"))
+    fresh = ready_media(conn, s3, memory, jpeg(tmp_path / "two.jpg"))
+    conn.execute(
+        """INSERT INTO media_understandings (media_id, memory_id, description, cast_labels)
+           VALUES (%s, %s, 'Бабушка у окна', %s)""",
+        (known, str(memory[0]), ["человек-1"]),
+    )
+
+    earlier = understanding.describe_missing(conn, [known, fresh])
+
+    assert earlier == {known}, "взято готовым — только то, что уже было описано"
+    assert len(net.requests) == 1, "спрошено ровно об одном кадре — о том, кого ещё не описывали"
+    assert described(conn, fresh) is not None, "и второй кадр описан на этот раз"
+
+
+def test_the_analysis_stage_describes_nothing_when_there_is_no_cloud_model(
+    conn, s3, memory, tmp_path, no_model
+):
+    """Сегодняшнее состояние (decision-10): описать нечем. Этап проходит, ничего не спрашивает и
+    ничего не выдумывает — в журнале не будет ни одной записи об описании, которого не было.
+    """
+    ready_media(conn, s3, memory, jpeg(tmp_path / "preview.jpg"))
+
+    earlier = understanding.describe_missing(conn, [add_item(conn, memory, "photo")[0]])
+
+    assert earlier == set()
+    assert conn.execute("SELECT count(*) FROM ai_requests").fetchone()[0] == 0
+
+
 def test_a_fresh_item_is_queued_for_understanding_as_soon_as_its_preview_is_made(
     conn, s3, memory, tmp_path
 ):

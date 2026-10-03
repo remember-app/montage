@@ -136,7 +136,7 @@ def layout_of(conn, montage_id):
 Entry = collections.namedtuple(
     "Entry",
     "stage media_id thought decision reason series_size labels "
-    "source_from_seconds source_to_seconds story_part story_part_title focus",
+    "source_from_seconds source_to_seconds story_part story_part_title focus details",
 )
 
 
@@ -171,14 +171,15 @@ def entries_of(conn, montage_id, stage=None):
     """Реплики журнала в том порядке, в каком они легли, — `id` и есть курсор приложения.
 
     Рамка «куда смотрит» читается так же, как её отдаёт api, — одним значением из четырёх долей
-    или пустотой: три доли из четырёх база не приняла бы вовсе.
+    или пустотой: три доли из четырёх база не приняла бы вовсе. `details` — как его отдаёт api,
+    объектом или `null`.
     """
     return [
-        Entry(*row[:-4], row[-4:] if row[-4] is not None else None)
+        Entry(*row[:-5], row[-5:-1] if row[-5] is not None else None, row[-1])
         for row in conn.execute(
             """SELECT stage, media_id::text, thought, decision, reason, series_size, labels,
                       source_from_seconds, source_to_seconds, story_part, story_part_title,
-                      focus_x, focus_y, focus_w, focus_h
+                      focus_x, focus_y, focus_w, focus_h, details
                  FROM montage_journal_entries
                 WHERE montage_id = %s AND (%s::text IS NULL OR stage = %s) ORDER BY id""",
             (montage_id, stage, stage),

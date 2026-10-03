@@ -30,13 +30,23 @@ def what_was_seen(conn, ref, judged, earlier):
     сумма меток людей по всем разобранным кадрам; люди и животные — сколько их всего, по разным
     меткам: один и тот же «человек-1» на двадцати кадрах — двадцать лиц и один человек.
     """
-    described = len(judged) - len(earlier)
-    journal.start(conn, ref, "analysis", total=described, described=described, earlier=len(earlier))
     seen = conn.execute(
         """SELECT media_id, description, cast_labels, details FROM media_understandings
            WHERE media_id = ANY(%s)""",
         ([piece.media_id for piece in judged],),
     ).fetchall()
+    # Сколько описано *сейчас* — по тому, что лежит в таблице, а не по тому, сколько кадров
+    # оставалось описать: с ключом от модели не описывается ни один кадр, и «описано 6» на экране
+    # было бы враньём (decision-10, состояние без ключа).
+    described = sum(one[0] not in earlier for one in seen)
+    journal.start(
+        conn,
+        ref,
+        "analysis",
+        total=len(judged) - len(earlier),
+        described=described,
+        earlier=len(earlier),
+    )
     spoken = _spoken(conn, [piece.media_id for piece in judged])
     comments = understanding.frame_comments(conn, [piece.media_id for piece in judged])
     cast, faces = set(), 0
@@ -83,11 +93,10 @@ def _spoken(conn, media_ids):
     return {
         media_id: transcript
         for media_id, transcript in conn.execute(
-            """SELECT id::text, transcript FROM media_speech
-                WHERE id = ANY(%s::uuid[]) AND transcript <> ''""",
+            """SELECT media_id, transcript FROM media_speech
+                WHERE media_id = ANY(%s) AND transcript <> ''""",
             (list(media_ids),),
         )
-        if transcript
     }
 
 

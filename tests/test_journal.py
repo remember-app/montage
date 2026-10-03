@@ -79,10 +79,11 @@ def test_the_journal_tells_the_whole_assembly_stage_by_stage(conn, s3, memory, t
         (one.media_id, one.decision, one.reason) for one in entries_of(conn, montage_id, "prep")
     ] == [(broken, "skip", "unreadable")]
 
-    # Разбор кадров: описаний нет ни у одного файла — этап проходит и честно говорит «0 из 6».
+    # Разбор кадров: описаний нет ни у одного файла — этап проходит и честно говорит «0 описано
+    # сейчас», а счётчик его стоит на шести: столько кадров пришлось бы описать.
     assert stages["analysis"]["outcome"] == {
         "described": 0,
-        "of": 6,
+        "earlier": 0,
         "faces": 0,
         "people": 0,
         "animals": 0,

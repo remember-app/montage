@@ -89,6 +89,7 @@ DETAIL_CHARACTERS = {
     "mood": 120,
     "shot": 120,
     "camera": 120,
+    "speech": 240,
     "text": 1500,
 }
 MOMENTS_COUNT, MOMENT_CHARACTERS = 8, 120
@@ -302,16 +303,23 @@ def _fit_details(details):
     moments = [
         {"seconds": moment["seconds"], "text": _clean(moment.get("text") or "")[:MOMENT_CHARACTERS]}
         for moment in (details.get("moments") or [])[:MOMENTS_COUNT]
-        if isinstance(moment, dict) and moment.get("seconds") is not None
+        if isinstance(moment, dict)
+        and isinstance(moment.get("seconds"), (int, float))
+        and moment["seconds"] >= 0
     ]
     moments = [one for one in moments if one["text"]]
     if moments:
         fitted["moments"] = moments
-    # Кроме полей описания в `details` лежит то, что считает сам воркер: сколько людей в кадре и
-    # «описан ранее». Это его собственные короткие значения, и в потолках контракта им места нет.
+    # Кроме полей описания в `details` лежит то, что кладёт сам воркер: сколько людей в кадре,
+    # «описан ранее» и комментарии участников (doc-14). Это его собственные значения, и в потолках
+    # контракта им места нет.
     for name in ("people", "earlier"):
         if details.get(name) is not None:
             fitted[name] = details[name]
+    if details.get("comments"):
+        fitted["comments"] = [
+            words for words in (_clean(one) for one in details["comments"]) if words
+        ] or None
     return fitted
 
 
