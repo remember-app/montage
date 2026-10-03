@@ -290,26 +290,30 @@ def montage(conn, ref):
         # есть, и так же — ролик без музыки вовсе: биты ищутся по всей собранной дорожке, по всему
         # списку треков разом, — а когда дорожки нет, куски держатся ровно так, как их выбрал
         # режиссёр.
-        journal.start(conn, ref, "music", total=len(chosen))
-        moments, moved = (), 0
+        journal.start(conn, ref, "music", total=max(len(chosen) - 1, 0))
+        moments = ()
         if track:
             moments = rhythm.beats(track)
-            to_the_beat = rhythm.fit(chosen, moments)
-            # Склейки, а не куски: последний добирает длину ролика, и склейки за ним нет.
-            moved = sum(
-                before.seconds != after.seconds for before, after in zip(chosen[:-1], to_the_beat)
-            )
-            chosen = to_the_beat
-        # Под что подогнаны куски: треки в том порядке, в каком они играют (id полки и ключи своих,
-        # ровно как в заказе — называет их приложение), темп дорожки и сколько склеек сдвинулось.
-        # Ролик без музыки говорит это честно: список треков пуст, и подгонять было не подо что.
-        journal.finish(
-            conn, ref, "music", track=ordered_music, bpm=rhythm.tempo(moments), cuts=moved
-        )
-
+            chosen = rhythm.fit(chosen, moments)
         # Десять минут — предел любого ролика, а за него могут вывести и режиссёр, и биты. Держится
-        # он один раз, после всех них: лишнее срезается с хвоста (`selection.cap`).
+        # он один раз, после обоих: лишнее срезается с хвоста (`selection.cap`) — и до того, как
+        # этап расскажет, где стоят склейки, иначе он назвал бы их там, где их в ролике нет.
         chosen = selection.cap(chosen)
+        # Что в каждой части истории слышно, — по одной записи на часть, без кадра и без решения.
+        story.sound(conn, ref, chosen, thoughts, track)
+        # Под что подогнаны куски: треки в том порядке, в каком они играют (id полки и ключи своих,
+        # ровно как в заказе — называет их приложение), темп дорожки — только когда он есть, — и
+        # где в ролике стоят склейки, секундами по возрастанию: теми же, что `layout.starts` кладёт
+        # на раскладку и что приложение рисует штрихами под роликом. Ролик без музыки говорит это
+        # честно: список треков пуст, склейки идут по смыслу, и подгонять было не подо что.
+        journal.finish(
+            conn,
+            ref,
+            "music",
+            tracks=ordered_music,
+            bpm=rhythm.tempo(moments),
+            cut_seconds=[round(at, 2) for at in layout.starts(chosen)[1:]],
+        )
 
         # Which piece stands where in the video is settled by this line and nothing below moves it:
         # `_back_to_originals` swaps a file and `assembly` encodes what it is given. So the layout

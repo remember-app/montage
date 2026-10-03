@@ -10,6 +10,7 @@ Warning: эти тесты чистят таблицу `jobs` той базы, �
 import dataclasses
 import datetime
 import math
+import pathlib
 import uuid
 
 from psycopg.types.json import Jsonb
@@ -492,6 +493,61 @@ def test_the_parts_of_the_story_are_the_parts_the_video_has():
             {"title": "Прощание", "from_seconds": 6.0, "to_seconds": 8.0},
         ]
     }
+
+
+def test_each_part_of_the_story_is_told_what_is_heard_in_it(conn, memory):
+    """Этап «Музыка» — по одной записи на часть истории, без кадра и без решения: мыслью режиссёра
+    о том, с чего часть начинается, и двумя долями звука в `details`. Живой звук — среднее по
+    кускам части (`Piece.live`, решает режиссёр), музыка — под дорожкой слышна под всем роликом.
+
+    Часть без кусков в ролике не стоит, и записи у неё нет: она и на полосе не рисуется.
+    """
+    journal_ready(conn)
+    montage_id = order(conn, memory, {})
+    pieces = [
+        selection.Piece(media_id="a", seconds=3.0, live=1.0),
+        selection.Piece(media_id="b", seconds=4.0, live=0.5),
+        selection.Piece(media_id="d", seconds=2.0, live=0.0),
+    ]
+    thoughts = [
+        {"thought": "Две части."},
+        {"media_id": "a", "decision": "take", "story_part": 1, "story_part_title": "Клятвы",
+         "thought": "Клятвы читают вслух"},
+        {"media_id": "b", "decision": "take", "story_part": 2, "story_part_title": "Тосты",
+         "thought": "Поднимают бокалы"},
+        {"media_id": "c", "decision": "skip", "reason": selection.LEFT_OUT, "story_part": 3,
+         "story_part_title": "Салют"},
+        {"media_id": "d", "decision": "take", "story_part": 3, "story_part_title": "Салют",
+         "thought": "Салют во дворе"},
+    ]
+
+    story.sound(conn, montage_id, pieces, thoughts, pathlib.Path("track.mp3"))
+
+    assert [
+        (one.media_id, one.decision, one.story_part, one.story_part_title, one.thought, one.details)
+        for one in entries_of(conn, montage_id, "music")
+    ] == [
+        (None, None, 1, "Клятвы", "Клятвы читают вслух", {"music": 1.0, "live": 1.0}),
+        (None, None, 2, "Тосты", "Поднимают бокалы", {"music": 1.0, "live": 0.5}),
+        (None, None, 3, "Салют", "Салют во дворе", {"music": 1.0, "live": 0.0}),
+    ], "по одной на часть, доля — среднее по кускам части"
+
+
+def test_a_part_without_a_track_is_heard_whole(conn, memory):
+    """Без дорожки ролик весь звучит живым звуком кадров (`assembly.assemble`), и музыки в части
+    нет вовсе, — а не «доля, которой не хватало до единицы»."""
+    journal_ready(conn)
+    montage_id = order(conn, memory, {})
+    pieces = [selection.Piece(media_id="a", seconds=3.0, live=1.0)]
+    thoughts = [
+        {"media_id": "a", "decision": "take", "story_part": 1, "story_part_title": "Тост",
+         "thought": "Тост слышно целиком"}
+    ]
+
+    story.sound(conn, montage_id, pieces, thoughts, None)
+
+    (one,) = entries_of(conn, montage_id, "music")
+    assert one.details == {"music": 0.0, "live": 1.0}
 
 
 def test_a_plan_without_parts_leaves_the_directors_outcome_silent():

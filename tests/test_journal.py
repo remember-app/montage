@@ -107,9 +107,13 @@ def test_the_journal_tells_the_whole_assembly_stage_by_stage(conn, s3, memory, t
         "у фотографии куска исходника нет — она идёт в ролик целиком"
     )
 
-    # Музыка: подо что подогнаны куски.
-    assert stages["music"]["outcome"]["track"] == ["warm"]
-    assert stages["music"]["outcome"]["cuts"] >= 0
+    # Музыка: подо что подогнаны куски и где в ролике стоят склейки — треки в порядке заказа, а
+    # секунды те же, что на раскладке, только без первой (перед началом ролика склейки нет).
+    music = stages["music"]["outcome"]
+    assert music["tracks"] == ["warm"]
+    assert music["cut_seconds"] == pytest.approx(
+        [start for _media, start, _seconds in layout_of(conn, montage_id)[1:]], abs=0.2
+    )
 
     # Склейка: сколько склеек и какая длина.
     assert (stages["assembly"]["done"], stages["assembly"]["total"]) == (4, 4)
@@ -141,8 +145,9 @@ def test_a_frame_the_algorithm_disliked_reaches_the_video_all_the_same(conn, s3,
 
 
 def test_a_montage_without_music_says_so_where_the_music_would_be(conn, s3, memory, tmp_path):
-    """Ролик с живым звуком: этап музыки всё равно проходит, и итог у него честный — дорожки нет,
-    подгонять было не подо что, ни один кусок не сдвинут."""
+    """Ролик с живым звуком: этап музыки всё равно проходит, и итог у него честный — дорожки нет и
+    подгонять было не подо что, а склейки стоят там, где встали по смыслу: приложение по ним и
+    рисует ленту под роликом."""
     journal_ready(conn)
     montage_id = order(conn, memory, {"target_seconds": 10, "music_tracks": []})
     for index in range(3):
@@ -154,7 +159,11 @@ def test_a_montage_without_music_says_so_where_the_music_would_be(conn, s3, memo
 
     stages = stages_of(conn, montage_id)
     assert stages["music"]["state"] == "done"
-    assert stages["music"]["outcome"] == {"track": [], "cuts": 0}
+    assert stages["music"]["outcome"] == {
+        "tracks": [],
+        "cut_seconds": [round(start, 2) for _m, start, _s in layout_of(conn, montage_id)[1:]],
+    }
+    assert "bpm" not in stages["music"]["outcome"], "темпа без дорожки нет — и строки нет"
 
 
 # --- вживую, а не пачкой в конце ---------------------------------------------

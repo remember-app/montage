@@ -94,6 +94,10 @@ DETAIL_CHARACTERS = {
 }
 MOMENTS_COUNT, MOMENT_CHARACTERS = 8, 120
 
+# Доли звука в части истории (контракт api, «details» у музыки) — числа, а не слова, и потолок у
+# них один: доля, 0..1. Больше единицы или меньше нуля на полосе под роликом рисуется некуда.
+SHARES = ("music", "live")
+
 log = logging.getLogger("montage.journal")
 
 
@@ -316,6 +320,10 @@ def _fit_details(details):
     for name in ("people", "earlier"):
         if details.get(name) is not None:
             fitted[name] = details[name]
+    for name in SHARES:
+        share = details.get(name)
+        if isinstance(share, (int, float)) and not isinstance(share, bool):
+            fitted[name] = round(min(max(float(share), 0.0), 1.0), 2)
     if details.get("comments"):
         fitted["comments"] = [
             words for words in (_clean(one) for one in details["comments"]) if words
