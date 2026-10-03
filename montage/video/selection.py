@@ -1,14 +1,19 @@
-"""Отсев: which of a memory's material goes into a video, and why the rest of it does not.
+"""Отбор: which of a memory's material goes into a video, and why the rest of it does not.
 
 Nothing here encodes anything. One file at a time is looked at frame by frame (`judge`, on what
 `frames.py` reads off it), and out of the judged pieces the ones the video is made of are picked
 (`choose`) — which hands back both halves of the answer, the cuts and, on every piece left out, the
-reason it was. Both halves are the point: the organizer is shown what the algorithm threw away and
-can overrule it in either direction, and those two overrulings — «включить» and «исключить» — are
-honoured here and nowhere else, so no later way of directing a video can get around them.
+reason it was. Both halves are the point: the organizer is shown what did not go into the video and
+why, and the one overruling of theirs honoured here and nowhere else — «исключить» — so no later way
+of directing a video can get around it.
+
+**Отсева внутри сборки нет.** Кадры, оставленные организатором при выборе, равны: смазанный и
+тёмный идут в ролик так же, как резкий и светлый, и решать это не отбору (doc-03, «What it
+doesn't») — брак предлагается убрать на экране заказа (`media/screening.py`), и там решает
+человек. «Включить» больше ничего не закрепляет: режиссёр выбирает из всех оставленных сам.
 
 The pieces handed back carry their own length and their place in the finished video, and `assembly`
-takes them from there knowing nothing about sharpness, exposure or bursts. The one thing borrowed
+takes them from there knowing nothing about sharpness or exposure. The one thing borrowed
 back from it is `length_of`: what the pieces have to fit into is the length of the *assembled*
 video, and the crossfades that eat into it are assembly's own business.
 """
@@ -41,7 +46,8 @@ DEDUP_SECONDS = 30.0
 # they must not change with the wording of a screen.
 # Три из них — о самом кадре, и считает их `frames.py`; остальные три о куске в ролике.
 UNREADABLE, BLUR, EXPOSURE = frames.UNREADABLE, frames.BLUR, frames.EXPOSURE
-DUPLICATE = "duplicate"  # another shot of the same moment stands for it
+DUPLICATE = "duplicate"  # another shot of the same moment stands for it — только у предложения на
+# экране заказа (`media/screening.py`); в ролике отсева нет и быть не может
 EXCLUDED = "excluded"  # the organizer said no
 NO_ROOM = "no_room"  # good enough, but the video is only so long
 
@@ -154,6 +160,10 @@ def _dedup(pieces, always=()):
     """A series of shots of one moment, and the sharpest of them stands for it — unless the
     organizer marked one of the series «включить», and then theirs does, all of them.
 
+    **В ролике этого больше нет:** дедуп сворачивал серию кадров за спиной режиссёра, а кадры,
+    оставленные при выборе, равны (doc-03, «What it doesn't»). Остался он в предложении на
+    экране заказа (`media/screening.py`), где человек решает, что убрать.
+
     One moment is two things at once: taken within `DEDUP_SECONDS` of the first shot of the series,
     and the same picture as a shot already in it (`frames.alike`). Time alone is not it — two
     shots a second apart of the cake and of the guests are two moments, and a retake ten seconds
@@ -196,48 +206,37 @@ def _dedup(pieces, always=()):
     return kept, dropped
 
 
-def choose(pieces, target_seconds, include=(), exclude=()):
+def choose(pieces, target_seconds, exclude=()):
     """The cuts that make the video, in the order they are shown — and everything left out of it,
     each piece carrying the reason it was.
 
-    Dedup, then the best of what is left up to the asked-for length — and one piece more, a clip cut
-    to fit or a still past it by less than a second, when that is nearer to it (below) — then back
-    into chronological order: «отбор по оценке, порядок в ролике — хронологический»
-    (architecture.md). The first piece is taken whatever it costs: a montage shorter than asked for
-    is a montage, an empty one is not.
+    The sharpest of what is left up to the asked-for length — and one piece more, a clip cut to fit
+    or a still past it by less than a second, when that is nearer to it (below) — then back into
+    chronological order: «отбор по оценке, порядок в ролике — хронологический» (architecture.md).
+    The first piece is taken whatever it costs: a montage shorter than asked for is a montage, an
+    empty one is not.
 
-    `include` and `exclude` are the organizer's own two lists of media ids, from the order, and they
-    beat the algorithm in both directions. An excluded file is never in the video, however sharp it
-    is. An included one is always in it, blurred or dark or both — the only things that word cannot
-    overrule are a file with no frame in it at all, which is not a judgement but an absence, and the
-    ten minutes no video runs past, which `cap` holds after every step that could cross it. What the
-    included pieces take is spent before anything else is chosen, so the rest of the material fits
-    into the time left rather than crowding them out.
+    `exclude` is the organizer's own list of media ids from the order, and it beats the algorithm
+    outright: an excluded file is never in the video, however sharp it is. There is no list of the
+    other kind — the frames left at the order are equal, and every one of them is offered here
+    (doc-03, «What it doesn't»). The only thing that takes a piece out on its own is a file with no
+    frame in it at all, which is an absence rather than a judgement, and the ten minutes no video
+    runs past, which `cap` holds after every step that could cross it.
     """
-    include, exclude = {str(one) for one in include}, {str(one) for one in exclude}
-    rejected, wanted, candidates = [], [], []
+    exclude = {str(one) for one in exclude}
+    rejected, candidates = [], []
     for piece in pieces:
         if piece.media_id in exclude:
-            # Named in both lists is the order contradicting itself; the word that keeps material
-            # out of a video is the one that cannot be undone afterwards, so it is the one that
-            # wins.
+            # The word that keeps material out of a video is the one that cannot be undone
+            # afterwards, so where the order names the same file twice it is this one that wins.
             rejected.append(dataclasses.replace(piece, rejected=EXCLUDED))
         elif piece.rejected == UNREADABLE:
-            rejected.append(piece)
-        elif piece.media_id in include:
-            wanted.append(dataclasses.replace(piece, rejected=None))
-        elif piece.rejected:
             rejected.append(piece)
         else:
             candidates.append(piece)
 
-    # The wanted go through the dedup with the rest so that a burst they belong to is still one
-    # moment — theirs, and not also the sharpest shot standing next to it.
-    kept, duplicates = _dedup(candidates + wanted, always=include)
-    rejected += duplicates
-
-    chosen, no_room = [piece for piece in kept if piece.media_id in include], []
-    for piece in sorted((p for p in kept if p.media_id not in include), key=lambda p: -p.sharpness):
+    chosen, no_room = [], []
+    for piece in sorted(candidates, key=lambda piece: -piece.sharpness):
         if chosen and assembly.length_of(chosen + [piece]) > target_seconds:
             # Too long for what is left, but a shorter cut behind it may still fit.
             no_room.append(piece)

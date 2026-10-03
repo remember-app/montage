@@ -6,11 +6,7 @@
 """
 
 from montage import journal
-
-# Код причины, по которой кусок стоит в ролике не по чьей-то оценке, а по слову организатора:
-# «включить» из заказа. Словарь причин в журнале — воркера (README api, «Запись журнала»), и это
-# единственный код, которым отмечено взятое, а не пропущенное.
-ORGANIZER_ASKED = "included"
+from montage.video import selection
 
 # Как воспоминание само называет тех, кого узнало на кадрах: «человек-1», «животное-2»
 # (`montage.ai`, промпт описания). Журналу они нужны только чтобы сказать, скольких этап разобрал.
@@ -33,7 +29,7 @@ def what_was_seen(conn, ref, judged):
     сумма меток людей по всем разобранным кадрам; люди и животные — сколько их всего, по разным
     меткам: один и тот же «человек-1» на двадцати кадрах — двадцать лиц и один человек.
     """
-    journal.start(conn, ref, "understanding", total=len(judged))
+    journal.start(conn, ref, "analysis", total=len(judged))
     seen = conn.execute(
         """SELECT media_id, description, cast_labels FROM media_understandings
            WHERE media_id = ANY(%s)""",
@@ -43,13 +39,11 @@ def what_was_seen(conn, ref, judged):
     for media_id, description, labels in seen:
         cast.update(labels or ())
         faces += sum(label.startswith(PEOPLE_LABEL) for label in labels or ())
-        journal.entry(
-            conn, ref, "understanding", media_id=media_id, thought=description, labels=labels
-        )
+        journal.entry(conn, ref, "analysis", media_id=media_id, thought=description, labels=labels)
     journal.finish(
         conn,
         ref,
-        "understanding",
+        "analysis",
         described=len(seen),
         of=len(judged),
         faces=faces,
@@ -58,51 +52,41 @@ def what_was_seen(conn, ref, judged):
     )
 
 
-def choices(conn, ref, chosen, turned_down, include, judged):
-    """Решения отсева в журнал: что взято в ролик, что мимо и почему.
+def choices(conn, ref, chosen, turned_down, judged):
+    """Решения отбора в журнал: что взято в ролик, что мимо и почему.
 
     Пишется после набора заказанной длины (`selection.stretch`): «беру 0:04–0:07» должно называть
     тот кусок исходника, который в ролик и пойдёт, а не тот, что был до растяжки.
 
-    Серия одинаковых кадров — «взял 1 из N» на том, кто из неё остался (размер серии несёт сам
-    кусок, `selection._dedup`), и «мимо, дубль» на каждом из остальных: описание каждого из них
-    человек уже видел на этапе разбора, и молча пропасть после него кадр не должен. Слово
-    организатора видно с обеих сторон: `excluded` на вычеркнутом, `included` на том, что он велел
-    взять.
+    О чём уже рассказала подготовка, режиссёрский этап молчит: `selection.choose` возвращает
+    **всё**, чего в ролике нет, и у файла, который взять нельзя, своё место — первый этап, на
+    котором он и назван. Второе «мимо» с той же причиной — один кадр, пропущенный дважды, и
+    завышенный счётчик «Мимо N» на экране.
 
-    О чём уже рассказал отсев, режиссёрский этап молчит: `selection.choose` возвращает **всё**, чего
-    в ролике нет, вместе со смазанным и тёмным, а у тех «мимо» своё место — первый этап, на котором
-    их и отсеяли. Второе «мимо» с той же причиной — один кадр, пропущенный дважды, и завышенный
-    счётчик «Мимо N» на экране. Причины этого этапа — только его собственные: дубль серии, не влез,
-    вычеркнут.
+    Исключённого организатором в журнале нет вовсе: он убрал его сам, и напоминать о нём не о чем
+    (контракт api, «Этапы»). Причины этого этапа — только его собственные: не влез.
     """
     told = {piece.media_id for piece in judged if piece.rejected}
     for piece in chosen:
         journal.entry(
-            conn,
-            ref,
-            "directing",
-            media_id=piece.media_id,
-            decision="take",
-            **_taken(piece, include),
+            conn, ref, "directing", media_id=piece.media_id, decision="take", **_taken(piece)
         )
     for piece in turned_down:
-        if piece.media_id in told:
-            continue  # отсеянный рассказан на своём этапе
+        if piece.media_id in told or piece.rejected == selection.EXCLUDED:
+            continue  # первый этап рассказал, либо организатор убрал кадр сам
         journal.entry(
             conn, ref, "directing", media_id=piece.media_id, decision="skip", reason=piece.rejected
         )
 
 
-def plan(conn, ref, chosen, thoughts, include):
+def plan(conn, ref, chosen, thoughts):
     """Рассказ режиссёра-нейросети в журнал: мысль о плане в целом, а за ней — что он сказал о
-    каждом кадре, который видел, порядком плана, и «мимо» на тех, кого ему не показали: дубли серий
-    и вычеркнутое организатором.
+    каждом кадре, который видел, порядком плана, и «мимо» на тех, кого он сам не взял.
 
-    Пишется там же, где решения отсева, и по той же причине — после набора заказанной длины
+    Пишется там же, где решения отбора, и по той же причине — после набора заказанной длины
     (`selection.stretch`): «беру 0:04–0:07» должно называть тот кусок исходника, который в ролик и
-    пойдёт. Слова здесь режиссёра, а куски наши: сколько секунд кадра взято, из какой серии он
-    остался и по чьему слову он в ролике, видно отсюда, а не из плана.
+    пойдёт. Слова здесь режиссёра, а куски наши: сколько секунд кадра взято и какой кусок исходника
+    пойдёт в ролик, видно отсюда, а не из плана.
 
     Слово и кусок связаны порядком, а не файлом: «беру» в словах стоят тем же порядком, что куски
     в `chosen` (`director.direct`), а одно видео может стоять в ролике несколькими отрезками — и у
@@ -112,7 +96,7 @@ def plan(conn, ref, chosen, thoughts, include):
     for thought in thoughts:
         fields = dict(thought)
         if fields.get("decision") == "take":
-            fields.update(_taken(next(laid), include))
+            fields.update(_taken(next(laid)))
         journal.entry(conn, ref, "directing", **fields)
 
 
@@ -139,16 +123,15 @@ def parts(thoughts):
     }
 
 
-def _taken(piece, include):
-    """Что о взятом куске знаем мы, а не режиссёр, — одинаково на обоих путях: по чьему слову он в
-    ролике (`included`, поверх любой мысли модели), из какой серии остался («взял 1 из 4», размер
-    едет на самом куске) и какой кусок исходника пойдёт в ролик, секундами от начала файла. У
-    фотографии куска исходника нет — в ролик идёт вся.
+def _taken(piece):
+    """Что о взятом куске знаем мы, а не режиссёр, — одинаково на обоих путях: из какой серии он
+    остался («взял 1 из 4», размер едет на самом куске) и какой кусок исходника пойдёт в ролик,
+    секундами от начала файла. У фотографии куска исходника нет — в ролик идёт вся.
+
+    Чьим словом кусок в ролике, не пишется: кадры, оставленные при выборе, равны, и «включить»
+    больше ничего не закрепляет (doc-03, «What it doesn't»).
     """
-    fields = {
-        "reason": ORGANIZER_ASKED if piece.media_id in include else None,
-        "series_size": piece.series_size if piece.series_size > 1 else None,
-    }
+    fields = {"series_size": piece.series_size if piece.series_size > 1 else None}
     if piece.kind == "video":
         fields.update(
             source_from_seconds=round(piece.start, 2),

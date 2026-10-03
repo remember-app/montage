@@ -134,8 +134,8 @@ def begin(conn, ref, files, target_seconds):
 def start(conn, ref, stage, total=None, **outcome):
     """Этап пошёл: из ожидания в работу, и сколько ему считать (`total_count`).
 
-    Итог можно писать уже здесь — счётчики, которые известны до первого кадра («фото 168, видео 46»),
-    идут в журнал с началом этапа, а не появляются вместе с его концом.
+    Итог можно писать уже здесь — счётчики, известные до первого кадра («фото 168, видео 46»), идут
+    в журнал с началом этапа, а не появляются вместе с его концом.
     """
     conn.execute(
         """UPDATE montage_stages
@@ -168,13 +168,7 @@ def progress(conn, ref, stage, done, total=None, **outcome):
                       ELSE eta_seconds END,
                   updated_at = now()
             WHERE montage_id = %(ref)s AND stage = %(stage)s""",
-        {
-            "done": done,
-            "total": total,
-            "outcome": _outcome(outcome),
-            "ref": ref,
-            "stage": stage,
-        },
+        {"done": done, "total": total, "outcome": _outcome(outcome), "ref": ref, "stage": stage},
     )
 
 

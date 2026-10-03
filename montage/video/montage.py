@@ -26,6 +26,12 @@ The first two of the middle three answer the same question and hand back the sam
 director is asked first and the отбор cuts the video whenever it answers None, which is every
 montage made today.
 
+**Отсева внутри сборки нет** (doc-03, «What it doesn't», человек 2026-10-01): кадры, оставленные
+организатором при выборе, равны, и «обязательно включить» больше нет — выбирает режиссёр, из всех.
+Взять нельзя только файл, в котором нет ни кадра, ни звука. Живёт это в журнале так: этапы ролика —
+`prep`, `analysis`, `directing`, `music`, `assembly` (контракт api, `docs/journal.md`), и говорит о
+них `journal.py`.
+
 The steps are architecture.md, «Montage-пайплайн», with one departure: selection (its step 4) runs
 before normalisation (its step 3), so only the pieces that made the cut are ever encoded to 1080p
 instead of every file the memory holds. `montages` and `media_items` belong to the api's migrations;
@@ -96,11 +102,9 @@ def montage(conn, ref):
         # else is a contract that moved on one side only — and it would be no better on a retry.
         return _give_up_for_good(conn, ref, f"неизвестная ориентация ролика «{orientation}»")
     # The organizer's own word on the material, marked before the order (doc-03, «Выбор медиа для
-    # ролика»): two optional lists of `media_items` ids. Nothing is decided about them here — each
-    # way of directing a video honours them in its own file, and both of them do (`selection.choose`
-    # and `director.direct`), by the same rule: never the excluded, always the included. «Включить»
-    # and «исключить» are both read as text ids here, because the floor below has to ask them too.
-    include = {str(one) for one in params.get("include_media_ids") or ()}
+    # ролика»): one optional list of `media_items` ids — те, что он убрал. Оставленные кадры равны:
+    # «обязательно включить» больше нет, и выбирает из них режиссёр (doc-03, «What it doesn't»).
+    # Список читается как текстовые id, потому что нижний порог должен спрашивать его же.
     exclude = {str(one) for one in params.get("exclude_media_ids") or ()}
     # What the organizer said the video is about, in their own words. Nobody but the director has
     # anything to do with it: the algorithm cannot read.
@@ -109,9 +113,10 @@ def montage(conn, ref):
     items = conn.execute(
         # Ordered the way the gallery orders the same rows (api, `src/media/gallery.ts`): the
         # finished video runs in the order the memory is already read in. A frame its owner hid is
-        # not material at all: it never reaches the отбор or the director, so «включить» on it
-        # names nothing and the hiding wins (TASK-424).
-        """SELECT id, kind, original_key, preview_key, captured_at, created_at
+        # not material at all: it never reaches the отбор or the director, so neither the choice nor
+        # the hiding can pull it into the video — and the hiding wins (TASK-424).
+        """SELECT id, kind, original_key, preview_key, captured_at, created_at, size_bytes,
+                  uploaded_by
            FROM media_items WHERE memory_id = %s AND status = 'ready' AND NOT hidden
            ORDER BY coalesce(captured_at, created_at), id""",
         (memory_id,),
@@ -133,10 +138,34 @@ def montage(conn, ref):
     video_key = f"montages/{ref}.mp4"
     with tempfile.TemporaryDirectory() as workdir:
         workdir = pathlib.Path(workdir)
-        judged, originals = [], {}
-        journal.start(conn, ref, "screening", total=len(items))
+        pieces, originals = [], {}
+        # Подготовка: скачать каждый файл заказа и сказать в журнал, если взять его нельзя.
+        # Счётчики идут в итог этапа с самого начала и растут по ходу — «фото 98 из 168» видно
+        # в тот же момент, когда идёт скачивание (контракт api, «prep»).
+        photos = sum(one[1] == "photo" for one in items)
+        ready = {"photos_done": 0, "videos_done": 0}
+        journal.start(
+            conn,
+            ref,
+            "prep",
+            total=len(items),
+            photos=photos,
+            videos=len(items) - photos,
+            bytes=sum(one[6] for one in items),
+            senders=dict(collections.Counter(str(one[7]) for one in items)),
+        )
+        video_seconds = 0.0
         for index, item in enumerate(items):
-            media_id, kind, original_key, preview_key, captured_at, created_at = item
+            (
+                media_id,
+                kind,
+                original_key,
+                preview_key,
+                captured_at,
+                created_at,
+                _size_bytes,
+                _uploaded_by,
+            ) = item
             original = workdir / f"original-{index}"
             # A download that fails is left fatal on purpose: the bytes may well arrive next time,
             # and swallowing an unreachable bucket would quietly cut a video out of half a memory.
@@ -149,7 +178,7 @@ def montage(conn, ref):
                 looked_at = (
                     storage.large_copy(preview_key, workdir / f"large-{index}.jpg") or original
                 )
-            looked_over = selection.judge(
+            prepared = selection.judge(
                 selection.Piece(
                     media_id=str(media_id),
                     kind=kind,
@@ -158,65 +187,49 @@ def montage(conn, ref):
                     captured_at=captured_at,
                 )
             )
-            judged.append(looked_over)
-            if looked_over.rejected:
-                # Запись на каждый отсеянный файл: «мимо» и код причины. Прошедшие считает итог
-                # этапа — строка на каждый годный кадр рассказу ничего не добавляет.
+            # Отсева внутри сборки нет: смазанный и тёмный кадр в ролик идёт так же, как резкий и
+            # светлый — брак предлагается убрать при выборе кадров, и там решает человек (doc-03,
+            # «What it doesn't»). Взять нельзя только файл, в котором нет ни кадра, ни звука: это
+            # отсутствие, а не оценка, и о нём журнал говорит словами.
+            if prepared.rejected == selection.UNREADABLE:
                 journal.entry(
                     conn,
                     ref,
-                    "screening",
-                    media_id=looked_over.media_id,
+                    "prep",
+                    media_id=prepared.media_id,
                     decision="skip",
-                    reason=looked_over.rejected,
+                    reason=selection.UNREADABLE,
                 )
+            else:
+                prepared = dataclasses.replace(prepared, rejected=None)
+            pieces.append(prepared)
+            ready[f"{kind}s_done"] += 1
+            if kind == "video":
+                video_seconds += prepared.duration or 0.0
             # По файлу, а не по всей папке разом: этап идёт минутами, и «61 из 212» на экране
             # должно двигаться, пока он идёт.
-            journal.progress(conn, ref, "screening", index + 1)
-        no_good = collections.Counter(piece.rejected for piece in judged if piece.rejected)
-        journal.finish(
-            conn,
-            ref,
-            "screening",
-            kept=len(judged) - sum(no_good.values()),
-            of=len(judged),
-            reasons=dict(no_good),
-        )
+            journal.progress(conn, ref, "prep", index + 1, **ready)
+        journal.finish(conn, ref, "prep", video_seconds=round(video_seconds, 1), **ready)
 
-        # The floor again, now against what survived. The count above was of rows; files drop out
-        # here for being unreadable or having no usable frame in them, and three rows that come to
-        # one still would otherwise be assembled into a three-second «ролик» against a sixty-second
-        # order — the very thing the floor is there to refuse.
-        #
-        # A piece the organizer asked for by name counts among the survivors even when the отсев
-        # turned it down: «включить» beats the algorithm in `selection.choose` and in
-        # `director.direct` alike, and a floor that did not know the word would quietly overrule the
-        # person before either of them was reached (doc-03, «Кадры, отмеченные включить, есть в
-        # ролике»). The one thing it cannot overrule is the same one they cannot: a file with no
-        # frame in it at all, which is an absence and not a judgement.
+        # The floor again, now against what the download brought. The count above was of rows;
+        # files drop out here for being unreadable or having no usable frame in them, and three
+        # rows that come to one still would otherwise be assembled into a three-second «ролик»
+        # against a sixty-second order — the very thing the floor is there to refuse.
         #
         # A piece struck out of the video counts for nothing here, for the same reason: the floor is
         # what can actually end up on screen, and «исключить» is honoured by everything below this
         # line. Four good files with two of them struck out are two pieces, and a two-piece montage
-        # against a minute-long order is exactly what the floor refuses.
-        survived = sum(
-            piece.media_id not in exclude
-            and (
-                piece.rejected is None
-                or (piece.rejected != selection.UNREADABLE and piece.media_id in include)
-            )
-            for piece in judged
-        )
+        # against a minute-long order is exactly what the floor refuses. Everything else counts
+        # equally: ни один оставленный кадр не выпадает из счёта за резкость или за свет.
+        survived = sum(piece.rejected is None and piece.media_id not in exclude for piece in pieces)
         if survived < MIN_ITEMS:
             return _give_up_for_good(
-                conn,
-                ref,
-                "материал не годится для ролика: файлы не читаются, кадры испорчены или исключены",
+                conn, ref, "материал не годится для ролика: файлы не читаются или исключены"
             )
 
         # Разбор кадров — то, что о них уже знает пайплайн. Ни о чём никого не спрашивает: описания
         # пишет `understanding.py` задолго до заказа, и читаются они готовыми.
-        story.what_was_seen(conn, ref, judged)
+        story.what_was_seen(conn, ref, pieces)
 
         # Музыка раньше режиссёра: под что собирают ролик — часть того, из чего он строит план.
         tracks, refusal = music.files(ordered_music, workdir)
@@ -226,14 +239,13 @@ def montage(conn, ref):
 
         # The director first, and the отбор whenever there is no director: no cloud model, nothing
         # described for it to read, or an answer with nothing of ours in it (`director.direct`).
-        journal.start(conn, ref, "directing", total=len(judged))
+        journal.start(conn, ref, "directing", total=len(pieces))
         # Вторым — слова режиссёра-нейросети о том, что он планировал: мысль о плане в целом и по
         # записи на каждый показанный ему кадр. Ролик они не меняют, они и есть рассказ о нём.
         chosen, thoughts = director.direct(
             conn,
-            judged,
+            pieces,
             target_seconds,
-            include,
             exclude,
             story=story_text,
             ref=ref,
@@ -241,7 +253,7 @@ def montage(conn, ref):
         )
         turned_down = None
         if chosen is None:
-            chosen, turned_down = selection.choose(judged, target_seconds, include, exclude)
+            chosen, turned_down = selection.choose(pieces, target_seconds, exclude)
             log.info(
                 "montage %s takes %s piece(s) and leaves out %s",
                 ref,
@@ -261,22 +273,22 @@ def montage(conn, ref):
         # ролик набирает заказанную длину и под дорожку, и с живым звуком.
         chosen = selection.stretch(chosen, target_seconds)
 
-        # Кто резал ролик, тот о нём и рассказывает: отсев — своими решениями, режиссёр-нейросеть —
+        # Кто резал ролик, тот о нём и рассказывает: отбор — своими решениями, режиссёр-нейросеть —
         # своими словами. Итог этапа один на обоих, частями истории его наполняет только второй.
         if turned_down is not None:
-            story.choices(conn, ref, chosen, turned_down, include, judged)
+            story.choices(conn, ref, chosen, turned_down, pieces)
         else:
-            story.plan(conn, ref, chosen, thoughts, include)
+            story.plan(conn, ref, chosen, thoughts)
         journal.finish(
-            conn, ref, "directing", frames=len(chosen), of=len(judged), **story.parts(thoughts)
+            conn, ref, "directing", frames=len(chosen), of=len(pieces), **story.parts(thoughts)
         )
 
-        # The pieces are chosen and in their places by now — all that is settled here is how long
-        # each is held, so that the join lands on a beat. A track with no tempo leaves them as they
-        # are, and so does a montage with no music at all: биты ищутся по всей собранной дорожке —
-        # по всему списку треков разом, — а когда дорожки нет, куски держатся ровно так, как их
-        # выбрали отсев или режиссёр.
-        journal.start(conn, ref, "rhythm", total=len(chosen))
+        # Музыка: куски выбраны и стоят на своих местах, и всё, что здесь решается, — как долго
+        # каждый из них держать, чтобы склейка легла на бит. Дорожки без темпа оставляет куски как
+        # есть, и так же — ролик без музыки вовсе: биты ищутся по всей собранной дорожке, по всему
+        # списку треков разом, — а когда дорожки нет, куски держатся ровно так, как их выбрал
+        # режиссёр.
+        journal.start(conn, ref, "music", total=len(chosen))
         moments, moved = (), 0
         if track:
             moments = rhythm.beats(track)
@@ -290,11 +302,11 @@ def montage(conn, ref):
         # ровно как в заказе — называет их приложение), темп дорожки и сколько склеек сдвинулось.
         # Ролик без музыки говорит это честно: список треков пуст, и подгонять было не подо что.
         journal.finish(
-            conn, ref, "rhythm", track=ordered_music, bpm=rhythm.tempo(moments), cuts=moved
+            conn, ref, "music", track=ordered_music, bpm=rhythm.tempo(moments), cuts=moved
         )
 
-        # Десять минут — предел любого ролика, а за него могут вывести и «включить», и режиссёр, и
-        # биты. Держится он один раз, после всех них: лишнее срезается с хвоста (`selection.cap`).
+        # Десять минут — предел любого ролика, а за него могут вывести и режиссёр, и биты. Держится
+        # он один раз, после всех них: лишнее срезается с хвоста (`selection.cap`).
         chosen = selection.cap(chosen)
 
         # Which piece stands where in the video is settled by this line and nothing below moves it:
@@ -403,8 +415,7 @@ def _back_to_originals(chosen, originals, orientation, workdir):
     assumed — the cap is on the long side, so a panorama's copy can come back shorter than the
     canvas, and a photo smaller than 2048 to begin with was never enlarged. Anything under the
     canvas in either direction would have to be blown up, and then the original is the sharper file
-    to cut from — even though the отсев's own verdict on it was made on the copy, which is a
-    judgement about the picture and not about how many pixels it is stored in.
+    to cut from.
 
     Videos are never on a copy to begin with: their preview is a 720p re-encode, which is half the
     height the montage is assembled at and smoothed over exactly where sharpness is measured.

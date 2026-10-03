@@ -1,12 +1,13 @@
 """Режиссёр: in what order the material makes a film, how long each piece is held and what for.
 
 The third module of the montage beside отбор and сборка (doc-03, «Сервис монтажа собран из отдельных
-модулей»). It is handed the same judged pieces `selection` works on and, instead of scoring them,
+модулей»). It is handed the same prepared pieces `selection` works on and, instead of scoring them,
 asks the cloud model to direct them: it has read what is in every frame (`understanding.py`) and
-what is said in every clip (`speech.py`), and it is given the organizer's own story, the two lists
-and the length that was ordered. What comes back is an order, a length per piece — out of a clip,
-the stretch of it, and as many stretches of one clip as the film wants — what each piece is heard
-with (the music, its own sound or the two mixed) and a note on what each is there for.
+what is said in every clip (`speech.py`), and it is given the organizer's own story, the list of
+frames left out by hand and the length that was ordered. What comes back is an order, a length per
+piece — out of a clip, the stretch of it, and as many stretches of one clip as the film wants —
+what each piece is heard with (the music, its own sound or the two mixed) and a note on what each is
+there for.
 
 The pieces it hands back are `assembly`'s to lay down, exactly as `selection.choose`'s are — nothing
 downstream knows which of the two cut the video. And `(None, ())` is an answer here: no cloud model
@@ -22,7 +23,8 @@ the worker while there is no key (decision-10).
 
 The organizer beats the director exactly as it beats the algorithm, and for the same reason it is
 written in one place: a struck-out piece is never *shown* to the model — the surest way for it not
-to come back — and a piece marked «включить» is in the film whether the plan asked for it or not.
+to come back. There is no overruling in the other direction: the frames left at the order are equal,
+so the director picks out of all of them and nobody tells it which one matters more.
 """
 
 import dataclasses
@@ -50,23 +52,21 @@ LEFT_OUT = "left_out"
 log = logging.getLogger("montage.director")
 
 
-def direct(
-    conn, pieces, target_seconds, include=(), exclude=(), story="", ref=None, brain=None, music=()
-):
+def direct(conn, pieces, target_seconds, exclude=(), story="", ref=None, brain=None, music=()):
     """The film the model plans out of these pieces and what it said while planning it — or
     `(None, ())`, and then nobody directed anything.
 
-    `pieces` are judged (`selection.judge`), `include`/`exclude` are the organizer's two lists from
-    the order and `story` is what they said the video is about. `music` is what will play under the
-    video — the tracks in the order they play, how long each runs and, on a track the organizer
+    `pieces` are prepared (`selection.judge`), `exclude` is the organizer's own list of media ids
+    from the order and `story` is what they said the video is about. `music` is what will play under
+    the video — the tracks in the order they play, how long each runs and, on a track the organizer
     wished something of, that wish in their own words (`music.heard`); the soundtrack itself is
     assembled from the order's list either way, so it is here to be read and not to be obeyed.
     `brain` is for the tests; the worker takes the gateway the environment gives it.
 
     Слова режиссёра — вторым, готовыми полями журнала (`journal.COLUMNS`), порядком плана: первой
     мысль о плане в целом, за ней по записи на каждый кусок плана — у видео их бывает несколько, —
-    «мимо» на каждом показанном модели кадре, которого в плане нет, и на каждом съеденном дедупом и
-    вычеркнутом организатором. «Беру» среди них стоят тем же порядком, что куски ролика.
+    и «мимо» на каждом показанном модели кадре, которого в плане нет. «Беру» среди них стоят тем
+    же порядком, что куски ролика.
     """
     brain = brain or ai.AI(conn)
     if brain.provider is None:
@@ -75,20 +75,10 @@ def direct(
         log.info("no cloud model: montage %s is cut by the worker's own choosing", ref)
         return None, ()
 
-    include, exclude = {str(one) for one in include}, {str(one) for one in exclude}
-    material = list(_material(pieces, include, exclude))
-    # One shot per moment, by the отбор's own дедуп: a director shown a whole burst can put two
-    # frames of the same second next to each other in the plan, and every duplicate in the question
-    # is paid for as well. «Включить» wins its burst here exactly as it does in `selection.choose`.
-    kept, duplicates = selection._dedup(material, always=include)
-    kept = {piece.media_id: piece for piece in kept}
-    # Оставшийся от серии кадр несёт её размер (`_dedup`), и дальше он едет с куском до журнала:
-    # «взял 1 из 4» на режиссёрском этапе — та же одна запись, что и на пути отсева. Порядок вопроса
-    # при этом наш, а не дедупа: спрашивается тот же материал и в том же порядке, в каком читается
-    # воспоминание, — дедуп возвращает кадры своим (кто без даты съёмки, тот первым).
-    candidates = {
-        piece.media_id: kept[piece.media_id] for piece in material if piece.media_id in kept
-    }
+    # Порядок вопроса — наш: спрашивается тот же материал и в том же порядке, в каком читается
+    # воспоминание. Режиссёру показывается всё, что осталось после заказа, серия одинаковых кадров
+    # в том числе: свёртывать её за его спиной было бы тем же отсевом, только тише.
+    candidates = {piece.media_id: piece for piece in _material(pieces, exclude)}
     known = _known(conn, candidates)
     if not any(what.get("description") for what in known.values()):
         # Nothing has been described yet — the memory became ready before there was a key, and the
@@ -103,7 +93,7 @@ def direct(
 
     planned = (
         brain.plan_montage(
-            [_shot(piece, known, include) for piece in candidates.values()],
+            [_shot(piece, known) for piece in candidates.values()],
             story=story,
             target_seconds=target_seconds,
             music=music,
@@ -145,34 +135,17 @@ def direct(
         taken.add(key)
         chosen.append((piece, _thought(step)))
 
-    # «Включить» is not the model's to refuse. A piece the organizer named and the plan left out
-    # goes in at the end of it: the order is the director's, and there is no place inside it that is
-    # obviously this piece's own.
     in_plan = {piece.media_id for piece, _ in chosen}
-    for media_id, piece in candidates.items():
-        if media_id in include and media_id not in in_plan:
-            log.info(
-                "montage %s: the plan left out %s, which the order asks for — putting it back",
-                ref,
-                media_id,
-            )
-            # Своих слов у режиссёра об этом кадре нет — он его не брал; чьё это слово, скажет
-            # журналом оркестратор.
-            chosen.append((_cut(piece), {"media_id": media_id}))
-            in_plan.add(media_id)
 
     fitted = []
     for piece, thought in chosen:
-        # The length that was ordered, held to here rather than trusted to the prompt — except over
-        # «включить», which is not weighed against anything, and over the first piece, because a
-        # montage shorter than asked for is a montage and an empty one is not. «Включить» asks for
-        # the file, once: a second stretch of the same clip is the director's, weighed like any.
+        # The length that was ordered, held to here rather than trusted to the prompt — and except
+        # over the first piece, because a montage shorter than asked for is a montage and an empty
+        # one is not. Every other piece is weighed like any: кадры заказа равны, и «включить» больше
+        # ничего не закрепляет (doc-03, «What it doesn't»).
         # Решение ставится здесь, а не там, где сказаны слова: кусок, который не влез, — это
         # «мимо» с его же мыслью при нём.
-        spared = not fitted or (
-            piece.media_id in include and piece.media_id not in {one.media_id for one in fitted}
-        )
-        if not spared and assembly.length_of(fitted + [piece]) > target_seconds:
+        if fitted and assembly.length_of(fitted + [piece]) > target_seconds:
             log.info(
                 "montage %s: the plan runs past the %.0fs ordered, %s is left out of it",
                 ref,
@@ -191,7 +164,8 @@ def direct(
     thoughts += (thought for _, thought in chosen)
     # Остальное, что модели показали: «мимо» с кодом `left_out` и её словами о том, почему, —
     # мыслью: причину журнал держит кодом, и слова в ней приложение показало бы как
-    # «не подошёл». Отсеянного модель не видела, и здесь его нет: о нём рассказал отсев.
+    # «не подошёл». Ни вычеркнутого, ни непрочитанного модель не видела: первый убрал сам
+    # организатор, второй назван на подготовке, и в журнале их нет.
     thoughts += (
         {
             "media_id": media_id,
@@ -201,17 +175,6 @@ def direct(
         }
         for media_id in candidates
         if media_id not in in_plan
-    )
-    # Съеденного дедупом и вычеркнутого модель тоже не видела, но «мимо» у них есть, как на пути
-    # отсева (`selection.choose`): кроме этой записи, о них в журнале не рассказал бы никто.
-    thoughts += (
-        {"media_id": piece.media_id, "decision": "skip", "reason": piece.rejected}
-        for piece in duplicates
-    )
-    thoughts += (
-        {"media_id": piece.media_id, "decision": "skip", "reason": selection.EXCLUDED}
-        for piece in pieces
-        if piece.media_id in exclude and not piece.rejected
     )
 
     if not fitted:
@@ -230,21 +193,16 @@ def direct(
     return fitted, thoughts
 
 
-def _material(pieces, include, exclude):
+def _material(pieces, exclude):
     """What the model is allowed to build out of, in the order the memory is read in.
 
     Struck-out material is not filtered out of the answer, it never goes into the question. A file
     with no frame in it at all is out for the reason `selection.choose` keeps it out: there is no
-    picture to put on screen and «включить» cannot conjure one. What отбор merely disliked — blur,
-    exposure — is out unless the organizer asked for it by name, so the director is offered what a
-    person would be offered. A burst of shots of one moment is thinned to one by `direct`
-    afterwards, for the same reason: the offer is what a person would look through, not the whole
-    camera roll.
+    picture to put on screen. Everything else goes in — смазанный, тёмный и повторяющиеся кадры
+    серии в том числе: кадры, оставленные при выборе, равны, и решение по каждому — у режиссёра.
     """
     for piece in pieces:
         if piece.media_id in exclude or piece.rejected == selection.UNREADABLE:
-            continue
-        if piece.rejected and piece.media_id not in include:
             continue
         yield piece
 
@@ -277,7 +235,7 @@ def _known(conn, media_ids):
     }
 
 
-def _shot(piece, known, include):
+def _shot(piece, known):
     """One piece as the model is shown it: what is in it, and what may be done with it."""
     return {
         "media_id": piece.media_id,
@@ -287,7 +245,6 @@ def _shot(piece, known, include):
         # photograph — as long as any piece may be held.
         "seconds_available": round(piece.duration or MAX_PIECE_SECONDS, 1),
         **known.get(piece.media_id, {}),
-        **({"must_include": True} if piece.media_id in include else {}),
     }
 
 
