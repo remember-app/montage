@@ -1,10 +1,16 @@
-"""Отсев on its own — see README.md.
+"""Отбор on its own — see README.md.
 
 Needs nothing at all: no database, no bucket, no ffmpeg. `choose` is a function over scored pieces
 and the frame judging is arithmetic over bytes, so what either of them does with a burst of shots, a
-length it cannot fit, a frame of pure blur or an organizer who overrules it is checked here without
-a frame being decoded. `judge` itself, which puts ffmpeg between the two, is checked by the live
-montages in `test_montage.py`.
+length it cannot fit, a frame the algorithm disliked or a frame the organizer struck out is checked
+here without a frame being decoded. `judge` itself, which puts ffmpeg between the two, is checked by
+the live montages in `test_montage.py`.
+
+**Отсева внутри сборки нет** (doc-03, «What it doesn't»): кадры, оставленные организатором при
+выборе, равны, и «обязательно включить» больше нет. Что осталось от прежних правил — «исключить»,
+длина ролика и единственный отказ, который нельзя переиграть: в файле нет ни кадра, ни звука.
+Дедуп серии уехал в предложение на экране заказа (`media/screening.py`) и проверяется здесь
+отдельно — он больше не часть выбора в ролик.
 """
 
 import dataclasses
@@ -24,80 +30,28 @@ def cut(pieces, target_seconds, **marks):
     return selection.choose(pieces, target_seconds, **marks)[0]
 
 
-def test_a_burst_of_shots_leaves_only_its_sharpest():
-    # Three shots of the same picture inside two seconds — one moment.
+def test_a_burst_of_shots_stays_three_equal_pieces():
+    """Три снимка одного кадра подряд — и ни один из них не выпадает из выбора за повтор: кадры,
+    оставленные при выборе, равны, и решает режиссёр (doc-03, «What it doesn't»)."""
     burst = [at(0, 10, frame=picture(1)), at(1, 90, frame=picture(1)), at(2, 30, frame=picture(1))]
     apart = at(60, 20, frame=picture(1))
 
     chosen, rejected = selection.choose([*burst, apart], target_seconds=60)
 
-    # The sharpest of the burst stands for all three — and carries how many it stands for, which
-    # is what the journal of the montage tells the organizer as «взял 1 из 3».
-    assert chosen == [dataclasses.replace(burst[1], series_size=3), apart]
-    # And the two it stands for come back saying so, rather than quietly disappearing: this is what
-    # the organizer is shown before an order, and what they can put back.
-    assert [piece.rejected for piece in rejected] == [selection.DUPLICATE] * 2
+    assert chosen == [*burst, apart], "все четыре, в порядке съёмки"
+    assert rejected == []
 
 
-def test_a_retake_seconds_later_is_the_same_moment():
-    """The shot taken again ten seconds on, to catch the smile: the camera an inch aside and the
-    exposure the phone picked this time, and still the same picture — one moment, which a stopwatch
-    alone called two."""
-    first = at(0, 10, media_id="first", frame=picture(1))
-    retake = at(10, 90, media_id="retake", frame=picture(1, moved=(4, 2), light=0.8))
+def test_a_frame_the_algorithm_disliked_is_offered_like_any_other():
+    """Отбор считал кадр браком — тёмным, смазанным. В ролике он стоит наравне с остальными, и
+    «включить» больше не нужно, чтобы он туда попал: решение человека уже было — он его оставил."""
+    dark = dataclasses.replace(at(0, 90, media_id="dark"), rejected=selection.EXPOSURE)
+    blurry = dataclasses.replace(at(30, 10, media_id="blurry"), rejected=selection.BLUR)
 
-    chosen, rejected = selection.choose([first, retake], target_seconds=60)
+    chosen, rejected = selection.choose([dark, blurry], target_seconds=60)
 
-    assert [(piece.media_id, piece.series_size) for piece in chosen] == [("retake", 2)]
-    assert [(piece.media_id, piece.rejected) for piece in rejected] == [
-        ("first", selection.DUPLICATE)
-    ]
-
-
-def test_two_different_pictures_a_second_apart_are_two_moments():
-    """The cake, then the guests a second later: taken as close as a burst, and nothing alike."""
-    cake = at(0, 10, media_id="cake", frame=picture(1))
-    guests = at(1, 90, media_id="guests", frame=picture(2))
-
-    assert cut([cake, guests], target_seconds=60) == [cake, guests]
-
-
-def test_a_retake_is_one_moment_with_other_shots_taken_in_between():
-    """A shot of the cake, one of the guests, and the cake again: the guests are a moment of their
-    own, and they do not split the cake's."""
-    cake = at(0, 10, media_id="cake", frame=picture(1))
-    guests = at(4, 50, media_id="guests", frame=picture(2))
-    cake_again = at(8, 90, media_id="cake again", frame=picture(1, moved=(-3, 1)))
-
-    chosen, rejected = selection.choose([cake, guests, cake_again], target_seconds=60)
-
-    assert [piece.media_id for piece in chosen] == ["guests", "cake again"]
-    assert [(piece.media_id, piece.rejected) for piece in rejected] == [
-        ("cake", selection.DUPLICATE)
-    ]
-
-
-def test_a_long_sequence_stays_several_moments():
-    """Measured from the first of a series and not from the shot before it: a table photographed
-    every ten seconds through the evening is not one moment, however alike it looks."""
-    every_ten = [at(10 * number, 10 + number, frame=picture(1)) for number in range(8)]
-
-    chosen = cut(every_ten, target_seconds=60)
-
-    # 0–30 seconds is one moment and 40–70 the next, so the sharpest of each survives — each
-    # standing for the four of its own moment.
-    assert chosen == [
-        dataclasses.replace(every_ten[3], series_size=4),
-        dataclasses.replace(every_ten[7], series_size=4),
-    ]
-
-
-def test_a_file_with_no_capture_date_is_never_deduped():
-    """Nothing says those two were taken together, and dropping one would drop material over a
-    missing EXIF field — however alike they look."""
-    undated = [at(0, 10, dated=False, frame=picture(1)), at(1, 90, dated=False, frame=picture(1))]
-
-    assert cut(undated, target_seconds=60) == undated
+    assert [piece.media_id for piece in chosen] == ["dark", "blurry"]
+    assert rejected == []
 
 
 def test_only_what_fits_the_asked_for_length_gets_in_and_it_gets_in_in_order():
@@ -117,19 +71,21 @@ def test_the_first_piece_is_taken_however_long_it_is():
     assert cut([at(0, 10, dated=False)], target_seconds=1) == [at(0, 10, dated=False)]
 
 
-def test_a_file_the_algorithm_threw_away_stays_thrown_away_with_its_reason():
-    """`judge` has already had its say on every piece by the time `choose` sees it, and a piece it
-    rejected is not silently dropped on the floor here — it comes back out the other side."""
-    dark = dataclasses.replace(at(0, 0, dated=False), rejected=selection.EXPOSURE)
+def test_a_file_with_no_frame_in_it_stays_out_with_its_reason():
+    """Единственный отказ, который ничем не переигрывается: файла, в котором нет ни кадра, ни
+    звука, нет вовсе. Это отсутствие, а не мнение о картинке."""
+    broken = dataclasses.replace(at(0, 0, media_id="mine"), rejected=selection.UNREADABLE)
 
-    chosen, rejected = selection.choose([dark, at(30, 10), at(60, 20)], target_seconds=60)
+    chosen, rejected = selection.choose([broken, at(30, 10, media_id="a")], target_seconds=60)
 
-    assert dark not in chosen
-    assert [piece.rejected for piece in rejected] == [selection.EXPOSURE]
+    assert [piece.media_id for piece in chosen] == ["a"]
+    assert [(piece.media_id, piece.rejected) for piece in rejected] == [
+        ("mine", selection.UNREADABLE)
+    ]
 
 
 # --- what the organizer said ------------------------------------------------
-# «включить» and «исключить», marked before the order and beating the algorithm both ways.
+# «исключить» — единственное слово заказа, которое до сих пор решает (doc-03, «What it doesn't»).
 
 
 def test_an_excluded_shot_is_not_in_the_video_however_sharp_it_is():
@@ -145,85 +101,8 @@ def test_an_excluded_shot_is_not_in_the_video_however_sharp_it_is():
     assert [(piece.media_id, piece.rejected) for piece in rejected] == [("no", selection.EXCLUDED)]
 
 
-def test_a_shot_the_organizer_asked_for_goes_in_however_bad_the_frames_are():
-    """The algorithm called it too dark to use. The organizer looked at it and said otherwise, and
-    the organizer is the one who was there."""
-    dark = dataclasses.replace(at(0, 1, media_id="mine"), rejected=selection.EXPOSURE)
-
-    chosen, rejected = selection.choose(
-        [dark, at(30, 10, media_id="a")], target_seconds=60, include=["mine"]
-    )
-
-    assert [piece.media_id for piece in chosen] == ["mine", "a"]
-    assert chosen[0].rejected is None, "it is in the video, so nothing about it is rejected"
-    assert rejected == []
-
-
-def test_a_file_with_no_frame_in_it_stays_out_even_when_the_organizer_asked_for_it():
-    """The one judgement «включить» cannot overrule. Everything else is an opinion about the
-    picture; this one is that there is no picture to have an opinion about."""
-    broken = dataclasses.replace(at(0, 0, media_id="mine"), rejected=selection.UNREADABLE)
-
-    chosen, rejected = selection.choose(
-        [broken, at(30, 10, media_id="a")], target_seconds=60, include=["mine"]
-    )
-
-    assert [piece.media_id for piece in chosen] == ["a"]
-    assert [(piece.media_id, piece.rejected) for piece in rejected] == [
-        ("mine", selection.UNREADABLE)
-    ]
-
-
-def test_told_both_at_once_the_shot_stays_out():
-    """An order that contradicts itself. Left out is the answer that can still be undone by
-    ordering again; a frame in a finished video cannot be taken back out of it."""
-    piece = at(0, 90, media_id="both")
-
-    chosen, rejected = selection.choose(
-        [piece, at(30, 10), at(60, 20)], target_seconds=60, include=["both"], exclude=["both"]
-    )
-
-    assert piece not in chosen
-    assert rejected[0].rejected == selection.EXCLUDED
-
-
-def test_what_the_organizer_asked_for_is_paid_for_out_of_everyone_elses_time():
-    """«Включить» is not weighed against the length — it is spent first, and the algorithm fills
-    what is left. Here the dullest shot of the five is in the video and two sharper ones are not."""
-    pieces = [at(second * 10, 10 * (second + 1), media_id=f"m{second}") for second in range(5)]
-
-    chosen, rejected = selection.choose(pieces, target_seconds=7, include=["m0"])
-
-    # Two and a half seconds each and half a second off every join: m0 asked for, then the two
-    # sharpest that still fit — 2.5, 4.5, 6.5 — and the fourth would be 8.5.
-    assert [piece.media_id for piece in chosen] == ["m0", "m3", "m4"]
-    assert assembly.length_of(chosen) == 6.5
-    assert {piece.media_id: piece.rejected for piece in rejected} == {
-        "m1": selection.NO_ROOM,
-        "m2": selection.NO_ROOM,
-    }
-
-
-def test_the_shot_the_organizer_asked_for_stands_for_its_own_burst():
-    """Three shots of one moment, and the organizer picked the one they wanted. The other two are
-    still that same moment, so they go — the burst does not get to be in the video twice."""
-    burst = [
-        at(0, 10, media_id="a", frame=picture(1)),
-        at(1, 90, media_id="b", frame=picture(1)),
-        at(2, 30, media_id="c", frame=picture(1)),
-    ]
-
-    chosen, rejected = selection.choose(burst, target_seconds=60, include=["a"])
-
-    assert [piece.media_id for piece in chosen] == ["a"], "not the sharpest — the asked-for one"
-    assert {piece.media_id: piece.rejected for piece in rejected} == {
-        "b": selection.DUPLICATE,
-        "c": selection.DUPLICATE,
-    }
-
-
 def test_ids_from_the_order_are_matched_as_text():
-    """The two lists come out of the order's json as strings and the rows they name come out of
+    """The list comes out of the order's json as strings and the rows it names come out of
     Postgres as uuids. Nothing in between converts them, so this is where they would quietly stop
     matching and the organizer's word would be ignored without a word in the log."""
 
@@ -234,6 +113,87 @@ def test_ids_from_the_order_are_matched_as_text():
     chosen = cut([at(0, 90, media_id="mine"), at(30, 10)], target_seconds=60, exclude=[Uuid()])
 
     assert [piece.media_id for piece in chosen] == [""]
+
+
+# --- the series of one moment (the proposal on the order screen) ------------
+# Дедуп больше не сворачивает кадры в ролике — он предлагает убрать их на экране заказа, где
+# решает человек (`media/screening.py`). Само правило серий — то же.
+
+
+def test_a_burst_of_shots_is_one_moment_whose_sharpest_stands_for_it():
+    # Three shots of the same picture inside two seconds — one moment.
+    burst = [at(0, 10, frame=picture(1)), at(1, 90, frame=picture(1)), at(2, 30, frame=picture(1))]
+    apart = at(60, 20, frame=picture(1))
+
+    kept, retakes = selection._dedup([*burst, apart])
+
+    # The sharpest of the burst stands for all three — and carries how many it stands for, which
+    # is what the gallery tells the organizer as «взял 1 из 3».
+    assert kept == [dataclasses.replace(burst[1], series_size=3), apart]
+    # And the two it stands for come back saying so, rather than quietly disappearing: this is what
+    # the organizer is shown before an order, and what they can put back.
+    assert [piece.rejected for piece in retakes] == [selection.DUPLICATE] * 2
+
+
+def test_a_retake_seconds_later_is_the_same_moment():
+    """The shot taken again ten seconds on, to catch the smile: the camera an inch aside and the
+    exposure the phone picked this time, and still the same picture — one moment, which a stopwatch
+    alone called two."""
+    first = at(0, 10, media_id="first", frame=picture(1))
+    retake = at(10, 90, media_id="retake", frame=picture(1, moved=(4, 2), light=0.8))
+
+    kept, retakes = selection._dedup([first, retake])
+
+    assert [(piece.media_id, piece.series_size) for piece in kept] == [("retake", 2)]
+    assert [(piece.media_id, piece.rejected) for piece in retakes] == [
+        ("first", selection.DUPLICATE)
+    ]
+
+
+def test_two_different_pictures_a_second_apart_are_two_moments():
+    """The cake, then the guests a second later: taken as close as a burst, and nothing alike."""
+    cake = at(0, 10, media_id="cake", frame=picture(1))
+    guests = at(1, 90, media_id="guests", frame=picture(2))
+
+    assert selection._dedup([cake, guests])[0] == [cake, guests]
+
+
+def test_a_retake_is_one_moment_with_other_shots_taken_in_between():
+    """A shot of the cake, one of the guests, and the cake again: the guests are a moment of their
+    own, and they do not split the cake's."""
+    cake = at(0, 10, media_id="cake", frame=picture(1))
+    guests = at(4, 50, media_id="guests", frame=picture(2))
+    cake_again = at(8, 90, media_id="cake again", frame=picture(1, moved=(-3, 1)))
+
+    kept, retakes = selection._dedup([cake, guests, cake_again])
+
+    assert sorted(piece.media_id for piece in kept) == ["cake again", "guests"]
+    assert [(piece.media_id, piece.rejected) for piece in retakes] == [
+        ("cake", selection.DUPLICATE)
+    ]
+
+
+def test_a_long_sequence_stays_several_moments():
+    """Measured from the first of a series and not from the shot before it: a table photographed
+    every ten seconds through the evening is not one moment, however alike it looks."""
+    every_ten = [at(10 * number, 10 + number, frame=picture(1)) for number in range(8)]
+
+    kept = selection._dedup(every_ten)[0]
+
+    # 0–30 seconds is one moment and 40–70 the next, so the sharpest of each survives — each
+    # standing for the four of its own moment.
+    assert kept == [
+        dataclasses.replace(every_ten[3], series_size=4),
+        dataclasses.replace(every_ten[7], series_size=4),
+    ]
+
+
+def test_a_file_with_no_capture_date_is_never_deduped():
+    """Nothing says those two were taken together, and folding one into the other would drop
+    material over a missing EXIF field — however alike they look."""
+    undated = [at(0, 10, dated=False, frame=picture(1)), at(1, 90, dated=False, frame=picture(1))]
+
+    assert selection._dedup(undated)[0] == undated
 
 
 # --- the length that was ordered ---------------------------------------------
@@ -443,47 +403,39 @@ def test_material_that_runs_out_makes_a_shorter_video_and_not_a_failure(caplog):
 def test_nothing_that_was_left_out_comes_back_to_fill_the_length():
     """The length is kept by holding what is in the video longer, never by putting back what was
     left out of it: a frame the organizer struck out is not worth more because there is time going
-    spare, and neither is one the отсев turned down. The same step fills the length for the
-    director's film and the отбор's alike (`montage.py` calls it after both), so this is the answer
-    on both paths."""
+    spare. The same step fills the length for the director's film and the отбор's alike
+    (`montage.py` calls it after both), so this is the answer on both paths."""
     struck = at(0, 900, media_id="no")
-    blurred = dataclasses.replace(at(30, 5, media_id="blur"), rejected=selection.BLUR)
     material = [
         clip(60, 10, duration=8.0, media_id="v"),
         at(120, 10, media_id="p0"),
         at(180, 10, media_id="p1"),
     ]
 
-    chosen, rejected = selection.choose([struck, blurred, *material], 600, exclude=["no"])
+    chosen, rejected = selection.choose([struck, *material], 600, exclude=["no"])
     video = selection.stretch(chosen, 600)
 
     assert [piece.media_id for piece in video] == ["v", "p0", "p1"]
-    assert {piece.media_id: piece.rejected for piece in rejected} == {
-        "no": selection.EXCLUDED,
-        "blur": selection.BLUR,
-    }
+    assert {piece.media_id: piece.rejected for piece in rejected} == {"no": selection.EXCLUDED}
 
 
 # --- ten minutes, the edge of any video --------------------------------------
-# «Включить», the director and the beats can each carry a video past the ceiling; `cap` is the one
-# place it is held, after all of them (`montage.py`). That the beats keep a ten-minute order on it
-# is `test_rhythm.py`'s, and that the file itself comes out no longer is `test_montage.py`'s.
+# Ничто в заказе больше не выводит ролик за потолок: кадры равны, «включить» больше нет. Вывести
+# может биты дорожки — `cap` держит предел один раз, после них (`montage.py`). Что биты держат
+# десятиминутный заказ на нём, — дело `test_rhythm.py`, а что файл выходит не длиннее, —
+# `test_montage.py`.
 
 
-def test_everything_the_organizer_asked_for_goes_in_up_to_ten_minutes_and_no_further():
-    """Four hundred photographs, every one marked «включить»: spent before anything else and weighed
-    against nothing, they come to 800.5 seconds. Ten minutes is the edge of any video all the same —
-    the first three hundred stay in their own order, the three-hundredth is held two seconds so the
-    video ends on the ceiling, and the hundred after it come off the end."""
+def test_nothing_in_the_order_carries_a_video_past_ten_minutes():
+    """Четыреста фотографий заказа в 600 секунд: отбор набирает ровно до потолка, и `cap` не имеет
+    что срезать — видео и так не длиннее десяти минут."""
     material = [at(number * 10, 50, media_id=f"p{number}") for number in range(400)]
 
-    chosen, _ = selection.choose(material, 600, include=[piece.media_id for piece in material])
+    chosen, _ = selection.choose(material, 600)
     video = selection.cap(chosen)
 
-    assert assembly.length_of(chosen) == 800.5, "«включить» did not take the video past the ceiling"
-    assert assembly.length_of(video) == selection.MAX_SECONDS
-    assert video[:-1] == chosen[:299]
-    assert video[-1] == dataclasses.replace(chosen[299], seconds=2.0)
+    assert assembly.length_of(chosen) == selection.MAX_SECONDS
+    assert video == chosen, "никто не вывел ролик за предел — резать нечего"
 
 
 def test_a_clip_that_crosses_ten_minutes_is_cut_around_its_best_moment_and_what_is_past_it_goes():

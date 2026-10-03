@@ -311,17 +311,11 @@ def test_a_named_stretch_stays_where_it_was_named_when_the_video_is_held_longer(
         )
 
 
-@pytest.mark.parametrize("include", [[], ["m-2"]], ids=["без отметок", "клип отмечен «включить»"])
-def test_a_stretch_that_does_not_fit_is_left_out_on_its_own(described, include):
+def test_a_stretch_that_does_not_fit_is_left_out_on_its_own(described):
     """Решение — об отрезке, а не о файле: первый отрезок клипа влез в восемь заказанных секунд,
-    второй и третий нет, и «мимо, места нет» стоит только на них. «Включить» просит сам файл, один
-    раз: лишние отрезки отмеченного клипа взвешиваются, как любые."""
+    второй и третий нет, и «мимо, места нет» стоит только на них."""
     film, thoughts, _ = directed(
-        described,
-        "gemini_plan_segments.json",
-        pieces=WITH_LONG_CLIP,
-        target_seconds=8,
-        include=include,
+        described, "gemini_plan_segments.json", pieces=WITH_LONG_CLIP, target_seconds=8
     )
 
     assert stretches(film) == [("m-1", 0.0, 3.0), ("m-2", 4.0, 3.0), ("m-3", 0.0, 2.5)]
@@ -466,7 +460,7 @@ def test_what_the_database_cannot_hold_costs_the_plan_nothing_but_itself(describ
     assert (status, overview) == ("answered", "План на три части")
 
 
-# --- one shot per moment ----------------------------------------------------
+# --- one moment, every shot of it --------------------------------------------
 
 
 def twin_of(piece, media_id, sharpness, seconds_later=1.0):
@@ -479,31 +473,30 @@ def twin_of(piece, media_id, sharpness, seconds_later=1.0):
     )
 
 
-def test_a_burst_of_one_moment_reaches_the_director_as_one_shot(described):
-    """Two shots of the same second are one moment, and the model is shown the sharper of them —
-    the отбор's own дедуп, run before the material becomes a question. A director handed both can
-    put them side by side in the plan, and the second of them is paid for on the way out as well."""
+def test_a_burst_of_one_moment_reaches_the_director_whole(described):
+    """Два снимка одной секунды — и режиссёру показаны оба: кадры, оставленные при выборе, равны,
+    и сворачивать серию за его спиной было бы тем же отсевом, только тише (doc-03, «What it
+    doesn't»). Взять он может любой — а взять оба подряд решает уже он сам."""
     describe(described, "m-9", "собака под столом, кадр секундой позже")
     blurrier = twin_of(MATERIAL[2], "m-9", sharpness=1.0)
 
     film, thoughts, net = directed(described, pieces=[*MATERIAL, blurrier], story=STORY)
 
-    assert "m-9" not in asked(net) and "секундой позже" not in asked(net)
-    assert "собака под столом" in asked(net), "the sharpest of the burst stands for it"
-    assert [piece.media_id for piece in film] == ["m-1", "m-2", "m-3"]
-    # И сколько кадров за ним стояло, кусок несёт на себе — «взял 1 из 2» в журнале монтажа, ровно
-    # как на пути отсева (`story.plan`), а съеденный серией кадр — своё «мимо, дубль».
-    assert [piece.series_size for piece in film] == [1, 1, 2]
+    assert "m-9" in asked(net) and "секундой позже" in asked(net), "оба кадра серии в вопросе"
+    assert "собака под столом" in asked(net), "и первый снимок той же секунды"
+    assert [piece.media_id for piece in film] == ["m-1", "m-2", "m-3"], (
+        "в ролик идёт то, что взял план, — а «мимо» у m-9 своё, по решению режиссёра"
+    )
     assert about(thoughts, "m-9") == {
         "media_id": "m-9",
         "decision": "skip",
-        "reason": selection.DUPLICATE,
+        "reason": director.LEFT_OUT,
+        "thought": None,
     }
 
 
 def test_the_question_keeps_the_order_the_memory_is_read_in(described):
-    """Порядок вопроса — тот, в котором воспоминание читается, и дедуп его не переставляет: свои
-    кадры он возвращает своим порядком, первыми — те, у кого даты съёмки нет вовсе. Модели же
+    """Порядок вопроса — тот, в котором воспоминание читается, и ничто его не переставляет. Модели
     материал показывают так, как он пришёл, и «третий кадр» в плане значит третий сверху."""
     describe(described, "m-9", "торт несут мимо окна")
     undated = dataclasses.replace(shot("m-9", 7), captured_at=None)
@@ -514,95 +507,41 @@ def test_the_question_keeps_the_order_the_memory_is_read_in(described):
     assert sorted(("m-1", "m-9", "m-2", "m-3"), key=question.index) == ["m-1", "m-9", "m-2", "m-3"]
 
 
-def test_the_shot_the_organizer_asked_for_is_the_one_its_burst_is_shown_by(described):
-    """«Включить» beats sharpness inside a burst here exactly as it does in `selection.choose`: the
-    organizer named the blurrier shot, so that is the one moment's shot the director is offered —
-    and the sharper one next to it is not also offered."""
-    describe(described, "m-9", "собака под столом, кадр секундой позже")
-    blurrier = twin_of(MATERIAL[2], "m-9", sharpness=1.0)
-
-    film, _, net = directed(described, pieces=[*MATERIAL, blurrier], include=["m-9"])
-
-    assert "секундой позже" in asked(net), "the shot that was asked for"
-    assert "m-3" not in asked(net), "and not the sharper one beside it"
-    # The recorded plan names m-3, which is not material any more; «включить» puts m-9 in itself.
-    assert [piece.media_id for piece in film] == ["m-1", "m-2", "m-9"]
-
-
 # --- what the organizer said ------------------------------------------------
+# «Исключить» — единственное слово заказа, которое до сих пор решает. «Включить» больше нет:
+# кадры равны, и среди них никто не главнее (doc-03, «What it doesn't»).
 
 
 def test_a_struck_out_piece_is_never_even_shown_to_the_director(described):
     """«Исключить» is not a filter over the answer — the piece does not go into the question, so
     there is nothing for the model to name. Named here anyway (the recorded plan has all three),
     which is exactly the case this rule has to survive: a model that says otherwise."""
-    blurred = dataclasses.replace(shot("m-4", 15), rejected=selection.BLUR)
-    film, thoughts, net = directed(described, pieces=[*MATERIAL, blurred], exclude=["m-3", "m-4"])
+    film, thoughts, net = directed(described, exclude=["m-3"])
 
     assert [piece.media_id for piece in film] == ["m-1", "m-2"]
     assert "m-3" not in asked(net) and "собака" not in asked(net)
-    # Слово организатора видно и на этом пути — «мимо, вычеркнут», как у отсева; а смазанному
-    # второго «мимо» нет: о нём рассказал отсев.
-    assert (about(thoughts, "m-3")["decision"], about(thoughts, "m-3")["reason"]) == (
-        "skip",
-        selection.EXCLUDED,
-    )
-    assert not [one for one in thoughts if one.get("media_id") == "m-4"]
+    # И в журнале о нём нет ни слова: организатор убрал кадр сам, напоминать не о чем (контракт
+    # api, «Этапы»).
+    assert not [one for one in thoughts if one.get("media_id") == "m-3"]
 
 
-def test_told_both_at_once_the_piece_stays_out_of_the_film_too(described):
-    """The same contradiction `selection.choose` settles the same way: named on both of the
-    organizer's own lists, a piece is struck out before the director ever sees it — «исключить» is
-    what cannot be undone once a video is made, so it is the one that wins here as well."""
-    film, _, net = directed(described, include=["m-3"], exclude=["m-3"])
-
-    assert [piece.media_id for piece in film] == ["m-1", "m-2"]
-    assert "m-3" not in asked(net) and "собака" not in asked(net)
-
-
-def test_a_piece_the_organizer_asked_for_is_in_the_film_even_if_the_plan_forgot_it(described):
-    """«Включить» is not the model's to refuse. The recorded plan names three pieces and this is a
-    fourth, so the only way it can be in the film is the rule putting it back."""
-    describe(described, "m-4", "все машут в камеру")
-    film, thoughts, net = directed(described, pieces=[*MATERIAL, shot("m-4", 15)], include=["m-4"])
-
-    assert [piece.media_id for piece in film] == ["m-1", "m-2", "m-3", "m-4"]
-    assert '"must_include": true' in asked(net), "and it was asked for, not only forced afterwards"
-    # И в журнале это «беру» при любом плане: модель о кадре не сказала ничего, а он в ролике.
-    (about_it,) = [one for one in thoughts if one.get("media_id") == "m-4"]
-    assert (about_it["decision"], about_it.get("thought")) == ("take", None)
-
-
-def test_a_piece_the_selection_turned_down_is_in_the_film_when_the_organizer_asks_for_it(described):
-    """The same overruling the отбор honours: too dark for the algorithm, wanted by the person who
-    was there. It is offered to the director like everything else, and put back if the plan skips
-    it — and it goes in with nothing about it rejected."""
-    dark = dataclasses.replace(MATERIAL[2], rejected=selection.EXPOSURE)
-
-    film, _, net = directed(described, pieces=[*MATERIAL[:2], dark], include=["m-3"])
-
-    assert [piece.media_id for piece in film] == ["m-1", "m-2", "m-3"]
-    assert [piece.rejected for piece in film] == [None] * 3
-    assert "собака под столом" in asked(net)
-
-
-def test_what_the_selection_turned_down_and_nobody_asked_for_is_not_offered(described):
-    """The other way round: the director is offered what a person would be offered, and a blurred
-    frame nobody named is not on that list."""
+def test_a_frame_the_selection_disliked_is_offered_the_same_as_any_other(described):
+    """Смазанный кадр, который никто не вычеркнул, в вопросе есть — так же, как любой другой, и
+    «включить» для этого больше не нужен: он и так оставлен."""
     blurred = dataclasses.replace(MATERIAL[2], rejected=selection.BLUR)
 
     film, _, net = directed(described, pieces=[*MATERIAL[:2], blurred])
 
-    assert [piece.media_id for piece in film] == ["m-1", "m-2"]
-    assert "m-3" not in asked(net)
+    assert "собака под столом" in asked(net), "кадр в вопросе наравне с остальными"
+    assert [piece.media_id for piece in film] == ["m-1", "m-2", "m-3"]
 
 
-def test_a_file_with_no_frame_in_it_stays_out_even_when_the_organizer_asked_for_it(described):
-    """The one word «включить» cannot overrule, here as in the отбор: there is no picture to put on
-    screen, and a director cannot be shown one either."""
+def test_a_file_with_no_frame_in_it_stays_out(described):
+    """Единственный отказ, который ничем не переигрывается: файла, в котором нет ни кадра, ни звука,
+    нет вовсе. Модели показать его нечего, и в ролике ему не место."""
     broken = dataclasses.replace(MATERIAL[2], rejected=selection.UNREADABLE)
 
-    film, _, net = directed(described, pieces=[*MATERIAL[:2], broken], include=["m-3"])
+    film, _, net = directed(described, pieces=[*MATERIAL[:2], broken])
 
     assert [piece.media_id for piece in film] == ["m-1", "m-2"]
     assert "m-3" not in asked(net)

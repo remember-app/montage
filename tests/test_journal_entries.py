@@ -1,6 +1,6 @@
 """Что воркер кладёт в журнал: реплика на кадр и итог этапа — `docs/jobs/montage-journal.md`.
 
-Здесь не про порядок этапов, а про их содержание: что рассказал отсев, что рассказал
+Здесь не про порядок этапов, а про их содержание: что рассказала подготовка, что рассказал
 режиссёр-нейросеть и что из его слов вообще доезжает до базы.
 
 Warning: эти тесты чистят таблицу `jobs` той базы, на которую смотрит DATABASE_URL, и пишут в
@@ -20,7 +20,7 @@ from recorded import planning_over
 from rows import add_item, entries_of, journal_ready, order, read_montage, ready_material, stages_of
 
 
-def test_the_understanding_stage_tells_what_was_seen_and_who_was_in_frame(conn, memory):
+def test_the_analysis_stage_tells_what_was_seen_and_who_was_in_frame(conn, memory):
     """Разбор кадров пересказывает то, что уже записано (`media_understandings`): описание словами
     модели и метки «что увидел». Итог — сколько кадров описано, сколько лиц на них и скольких
     воспоминание узнало: «37 лиц, 5 людей в главных» на экране «Ролик готов».
@@ -50,13 +50,12 @@ def test_the_understanding_stage_tells_what_was_seen_and_who_was_in_frame(conn, 
 
     # Порядком записей этап ничего не рассказывает — они про разные кадры и ложатся одной пачкой.
     assert {
-        one.media_id: (one.thought, one.labels)
-        for one in entries_of(conn, montage_id, "understanding")
+        one.media_id: (one.thought, one.labels) for one in entries_of(conn, montage_id, "analysis")
     } == {
         described: ("Бабушка смеётся, Лиза обнимает её", ["человек-1", "человек-2", "животное-1"]),
         again: ("Бабушка у окна", ["человек-1"]),
     }
-    assert stages_of(conn, montage_id)["understanding"]["outcome"] == {
+    assert stages_of(conn, montage_id)["analysis"]["outcome"] == {
         "described": 2,
         "of": 3,
         "faces": 3,
@@ -65,75 +64,70 @@ def test_the_understanding_stage_tells_what_was_seen_and_who_was_in_frame(conn, 
     }
 
 
-def test_every_shot_of_a_series_is_told_and_the_organizer_is_visible_in_the_decisions(conn, memory):
-    """Серия одинаковых кадров — «взял 1 из 4» на том, кто из неё остался, и своё «мимо, дубль» на
-    каждом, кого он собой заменил: описание каждого человек уже видел на этапе разбора, и без
-    записи кадр пропал бы после него молча. Слово организатора видно с обеих сторон: `included` на
-    том, что он велел взять, `excluded` на вычеркнутом.
+def test_every_decision_of_the_selection_is_told_with_its_reason(conn, memory):
+    """Режиссёрский этап пересказывает решения отбора: «беру» на взятом с его куском исходника и
+    «взял 1 из 4» на том, кто остался за серию, и «мимо» с кодом причины на каждом, кто в ролик не
+    попал.
 
-    А смазанного кадра на этом этапе нет вовсе: о нём рассказал отсев своей записью, и второе
-    «мимо» с той же причиной — тот же кадр, пропущенный дважды, и завышенный счётчик «Мимо N».
+    Чего на этом этапе нет: кадра, названного на подготовке (второе «мимо» с той же причиной — это
+    один кадр, пропущенный дважды, и завышенный счётчик «Мимо N»), и кадра, который организатор
+    вычеркнул сам — о нём в журнале нет ни слова вовсе (контракт api, «Этапы»). Слова
+    организатора тоже больше не видно на «беру»: кадры равны, и «включить» ничего не закрепляет.
     """
     journal_ready(conn)
     montage_id = order(conn, memory, {})
     of_a_burst = selection.Piece(media_id=str(uuid.uuid4()), kind="photo", series_size=4)
-    asked_for = selection.Piece(
+    clip = selection.Piece(
         media_id=str(uuid.uuid4()), kind="video", seconds=3.0, start=4.0, duration=10.0
     )
-    # Вычеркнутый и съеденный дедупом отсев прошли — их причины ставит уже `selection.choose`,
-    # копией куска, ровно как здесь; смазанный пришёл с причиной с самого отсева.
+    # Причины «мимо» ставит `selection.choose`, копией куска, ровно как здесь; непрочитанный пришёл
+    # с причиной с самого первого этапа.
     struck_out = selection.Piece(media_id=str(uuid.uuid4()))
-    swallowed = selection.Piece(media_id=str(uuid.uuid4()))
-    blurred = selection.Piece(media_id=str(uuid.uuid4()), rejected=selection.BLUR)
-    judged = [of_a_burst, asked_for, struck_out, swallowed, blurred]
+    unreadable = selection.Piece(media_id=str(uuid.uuid4()), rejected=selection.UNREADABLE)
+    no_room = selection.Piece(media_id=str(uuid.uuid4()))
+    judged = [of_a_burst, clip, struck_out, unreadable, no_room]
     journal.begin(conn, montage_id, len(judged), 60)
 
     story.choices(
         conn,
         montage_id,
-        [of_a_burst, asked_for],
+        [of_a_burst, clip],
         [
             dataclasses.replace(struck_out, rejected=selection.EXCLUDED),
-            dataclasses.replace(swallowed, rejected=selection.DUPLICATE),
-            blurred,
+            unreadable,
+            dataclasses.replace(no_room, rejected=selection.NO_ROOM),
         ],
-        {asked_for.media_id},
         judged,
     )
 
     written = {one.media_id: one for one in entries_of(conn, montage_id, "directing")}
-    assert (written[swallowed.media_id].decision, written[swallowed.media_id].reason) == (
+    assert (written[no_room.media_id].decision, written[no_room.media_id].reason) == (
         "skip",
-        selection.DUPLICATE,
+        selection.NO_ROOM,
     )
-    assert blurred.media_id not in written, "о смазанном рассказал отсев, второго «мимо» нет"
+    assert unreadable.media_id not in written, "о непрочитанном рассказала подготовка"
+    assert struck_out.media_id not in written, "исключённый организатором в журнале не упоминается"
     assert (written[of_a_burst.media_id].decision, written[of_a_burst.media_id].series_size) == (
         "take",
         4,
     )
-    assert (written[asked_for.media_id].decision, written[asked_for.media_id].reason) == (
-        "take",
-        story.ORGANIZER_ASKED,
+    assert (written[clip.media_id].decision, written[clip.media_id].reason) == ("take", None), (
+        "взятый кусок не помечен ничьим словом — кадры равны"
     )
     assert (
-        written[asked_for.media_id].source_from_seconds,
-        written[asked_for.media_id].source_to_seconds,
+        written[clip.media_id].source_from_seconds,
+        written[clip.media_id].source_to_seconds,
     ) == (4.0, 7.0)
-    assert (written[struck_out.media_id].decision, written[struck_out.media_id].reason) == (
-        "skip",
-        selection.EXCLUDED,
-    )
 
 
 def test_the_series_the_director_kept_is_told_the_same_way(conn, memory):
-    """«Взял 1 из 4» и «мимо, дубль» — и на пути с нейросетью: серию прорежает тот же дедуп ещё до
-    вопроса модели (`director.direct`), размер серии едет до журнала на самом куске, а на каждом
-    съеденном им кадре — своя запись, хоть модель его и не видела."""
+    """«Взял 1 из 4» и на пути с нейросетью: размер серии едет до журнала на самом куске, и на
+    каждом кадре, который режиссёр в план не взял, — своя запись с кодом причины."""
     journal_ready(conn)
     montage_id = order(conn, memory, {})
     of_a_burst = selection.Piece(media_id=str(uuid.uuid4()), kind="photo", series_size=4)
     alone = selection.Piece(media_id=str(uuid.uuid4()), kind="photo")
-    swallowed = str(uuid.uuid4())
+    left_out = str(uuid.uuid4())
     journal.begin(conn, montage_id, 3, 60)
 
     story.plan(
@@ -143,9 +137,8 @@ def test_the_series_the_director_kept_is_told_the_same_way(conn, memory):
         [
             {"media_id": of_a_burst.media_id, "thought": "Вносят торт", "decision": "take"},
             {"media_id": alone.media_id, "thought": "Накрывают на стол", "decision": "take"},
-            {"media_id": swallowed, "reason": selection.DUPLICATE, "decision": "skip"},
+            {"media_id": left_out, "reason": director.LEFT_OUT, "decision": "skip"},
         ],
-        set(),
     )
 
     written = {one.media_id: one for one in entries_of(conn, montage_id, "directing")}
@@ -154,7 +147,7 @@ def test_the_series_the_director_kept_is_told_the_same_way(conn, memory):
         4,
     )
     assert written[alone.media_id].series_size is None, "кадр сам по себе — не серия"
-    assert (written[swallowed].decision, written[swallowed].reason) == ("skip", selection.DUPLICATE)
+    assert (written[left_out].decision, written[left_out].reason) == ("skip", director.LEFT_OUT)
 
 
 def test_every_stretch_of_one_clip_is_its_own_entry(conn, memory):
@@ -183,7 +176,6 @@ def test_every_stretch_of_one_clip_is_its_own_entry(conn, memory):
                 "reason": selection.NO_ROOM,
             },
         ],
-        set(),
     )
 
     assert [
@@ -407,10 +399,10 @@ def test_the_journal_takes_the_series_the_dedup_counted():
         ),
     ]
 
-    chosen, turned_down = selection.choose(burst, 30)
+    kept, turned_down = selection._dedup(burst)
 
-    assert [(piece.media_id, piece.series_size) for piece in chosen] == [("sharp", 2)]
+    assert [(piece.media_id, piece.series_size) for piece in kept] == [("sharp", 2)]
     assert [piece.rejected for piece in turned_down] == [selection.DUPLICATE]
-    assert dataclasses.replace(chosen[0], seconds=1.0).series_size == 2, (
+    assert dataclasses.replace(kept[0], seconds=1.0).series_size == 2, (
         "и переживает любую перекройку куска по дороге"
     )
