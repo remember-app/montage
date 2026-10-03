@@ -128,14 +128,14 @@
       "started_at": "2026-01-01T00:00:03Z",
       "finished_at": "2026-01-01T00:00:11Z",
       "eta_seconds": 0,
-      "done_count": 12,
-      "total_count": 12,
+      "done_count": 5,
+      "total_count": 5,
       "outcome": {
-        "of": 12,
         "faces": 7,
         "people": 3,
         "animals": 1,
-        "described": 7
+        "earlier": 7,
+        "described": 0
       },
       "updated_at": "2026-01-01T00:00:11Z"
     },
@@ -200,6 +200,7 @@
       "source_to_seconds": null,
       "labels": null,
       "focus": null,
+      "details": null,
       "created_at": "2026-01-01T00:00:01Z"
     },
     {
@@ -218,6 +219,10 @@
         "человек-1"
       ],
       "focus": null,
+      "details": {
+        "people": 1,
+        "earlier": true
+      },
       "created_at": "2026-01-01T00:00:04Z"
     },
     {
@@ -237,6 +242,10 @@
         "человек-2"
       ],
       "focus": null,
+      "details": {
+        "people": 2,
+        "earlier": true
+      },
       "created_at": "2026-01-01T00:00:05Z"
     },
     {
@@ -256,6 +265,10 @@
         "человек-2"
       ],
       "focus": null,
+      "details": {
+        "people": 2,
+        "earlier": true
+      },
       "created_at": "2026-01-01T00:00:06Z"
     },
     {
@@ -272,6 +285,10 @@
       "source_to_seconds": null,
       "labels": null,
       "focus": null,
+      "details": {
+        "people": 0,
+        "earlier": true
+      },
       "created_at": "2026-01-01T00:00:07Z"
     },
     {
@@ -291,6 +308,10 @@
         "животное-1"
       ],
       "focus": null,
+      "details": {
+        "people": 1,
+        "earlier": true
+      },
       "created_at": "2026-01-01T00:00:08Z"
     },
     {
@@ -309,6 +330,10 @@
         "человек-3"
       ],
       "focus": null,
+      "details": {
+        "people": 1,
+        "earlier": true
+      },
       "created_at": "2026-01-01T00:00:09Z"
     },
     {
@@ -325,6 +350,10 @@
       "source_to_seconds": null,
       "labels": null,
       "focus": null,
+      "details": {
+        "people": 0,
+        "earlier": true
+      },
       "created_at": "2026-01-01T00:00:10Z"
     },
     {
@@ -341,6 +370,7 @@
       "source_to_seconds": null,
       "labels": null,
       "focus": null,
+      "details": null,
       "created_at": "2026-01-01T00:00:13Z"
     },
     {
@@ -357,6 +387,7 @@
       "source_to_seconds": null,
       "labels": null,
       "focus": null,
+      "details": null,
       "created_at": "2026-01-01T00:00:14Z"
     },
     {
@@ -373,6 +404,7 @@
       "source_to_seconds": null,
       "labels": null,
       "focus": null,
+      "details": null,
       "created_at": "2026-01-01T00:00:15Z"
     },
     {
@@ -389,6 +421,7 @@
       "source_to_seconds": 6.0,
       "labels": null,
       "focus": null,
+      "details": null,
       "created_at": "2026-01-01T00:00:16Z"
     },
     {
@@ -405,6 +438,7 @@
       "source_to_seconds": null,
       "labels": null,
       "focus": null,
+      "details": null,
       "created_at": "2026-01-01T00:00:17Z"
     },
     {
@@ -421,6 +455,7 @@
       "source_to_seconds": null,
       "labels": null,
       "focus": null,
+      "details": null,
       "created_at": "2026-01-01T00:00:18Z"
     },
     {
@@ -437,6 +472,7 @@
       "source_to_seconds": null,
       "labels": null,
       "focus": null,
+      "details": null,
       "created_at": "2026-01-01T00:00:19Z"
     },
     {
@@ -453,6 +489,7 @@
       "source_to_seconds": null,
       "labels": null,
       "focus": null,
+      "details": null,
       "created_at": "2026-01-01T00:00:20Z"
     },
     {
@@ -469,6 +506,7 @@
       "source_to_seconds": null,
       "labels": null,
       "focus": null,
+      "details": null,
       "created_at": "2026-01-01T00:00:21Z"
     },
     {
@@ -485,6 +523,7 @@
       "source_to_seconds": null,
       "labels": null,
       "focus": null,
+      "details": null,
       "created_at": "2026-01-01T00:00:22Z"
     }
   ],

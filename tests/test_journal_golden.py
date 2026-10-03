@@ -195,7 +195,7 @@ def snapshot(conn, montage_id, files, params, scenario):
     entries = conn.execute(
         """SELECT stage, media_id, thought, decision, reason, series_size, story_part,
                   story_part_title, source_from_seconds, source_to_seconds, labels,
-                  focus_x, focus_y, focus_w, focus_h, created_at
+                  focus_x, focus_y, focus_w, focus_h, details, created_at
              FROM montage_journal_entries WHERE montage_id = %s ORDER BY id""",
         (montage_id,),
     ).fetchall()
@@ -277,6 +277,7 @@ def snapshot(conn, montage_id, files, params, scenario):
                     if row[11] is not None
                     else None
                 ),
+                "details": row[15],
                 "created_at": when(row[-1]),
             }
             for number, row in enumerate(entries, start=1)
@@ -309,8 +310,11 @@ def _understanding_in_file_order(entries, position):
     прогонов на одной базе он бывает разный. Между собой эти записи ничего не говорят (по записи
     на файл, одной пачкой), а снимок, шатающийся от порядка строк в куче, не сторож. Метки времени
     остаются на своих местах в пачке — порядок, в котором стоят записи, а не файлы.
+
+    Код этапа — `analysis`, как в контракте api; на `understanding` (TASK-464 переименовал его в
+    `analysis`) сортировка молча переставала бы работать и снимок шатался бы от порядка строк.
     """
-    seen = [index for index, row in enumerate(entries) if row[0] == "understanding"]
+    seen = [index for index, row in enumerate(entries) if row[0] == "analysis"]
     ordered = sorted((entries[index] for index in seen), key=lambda row: position[str(row[1])])
     entries = list(entries)
     for index, row in zip(seen, ordered):

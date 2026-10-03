@@ -96,8 +96,9 @@ CREATE TABLE IF NOT EXISTS media_speech (
 
 -- What the model saw in one photo or clip, kept so that nobody pays to see it twice (doc-03:
 -- «Описание того, что происходит на фото и видео, обязательно сохраняется и переиспользуется»).
--- Written by `understanding.py`, read by it and by the director; one row per media item, written
--- once and never updated — a frame does not change after it was described.
+-- Written by `understanding.py`, read by it, by the director and by the montage's analysis stage;
+-- one row per media item, written once and never updated — a frame does not change after it was
+-- described.
 --
 -- `cast_labels` are this memory's own «человек-1», «животное-2»: stable inside one memory and
 -- meaningless outside it, which is why the memory is on the row. No foreign key to `media_items`
@@ -110,6 +111,18 @@ CREATE TABLE IF NOT EXISTS media_understandings (
     cast_labels text[]      NOT NULL DEFAULT '{}', -- who is in it, by this memory's labels
     created_at  timestamptz NOT NULL DEFAULT now()
 );
+
+-- The same answer by fields, as the journal's card of the frame shows it (contract of the api,
+-- `details` у анализа): place, light, mood, shot, and at a clip — camera and its best moments,
+-- with the second each of them stands at. Free-form jsonb rather than a column per field, because
+-- the card is the same free `jsonb` the journal keeps and the fields are the model's, not ours —
+-- one `description` column would have thrown away everything but the first sentence.
+--
+-- Отдельным `ALTER`, а не колонкой в `CREATE`: эту таблицу заводит ещё и `CREATE TABLE IF NOT
+-- EXISTS` выше, а её миграция api читает тот же файл по своему пути (`scripts/migrate.ts`), так
+-- что на базе, где таблица уже заведена, колонка в `CREATE` до неё бы не дошла.
+ALTER TABLE media_understandings
+    ADD COLUMN IF NOT EXISTS details jsonb NOT NULL DEFAULT '{}';
 
 -- «Кого это воспоминание уже назвало» — asked before every description, to be given to the model.
 CREATE INDEX IF NOT EXISTS media_understandings_memory_idx ON media_understandings (memory_id);

@@ -1,10 +1,12 @@
 """The `media_understanding` job: what is in one photo or clip, and who — asked once and kept.
 
 Понимание, the pipeline's second module (doc-03): a cloud model is shown one ready media item and
-says in a sentence or two what happens in it and who is in the frame. The answer lands in
-`media_understandings` under the item's id and is read from there ever after — by the director, and
-by the second montage out of the same memory, which is why nobody pays to describe a frame twice
-(doc-03, «Второй ролик из тех же медиа не описывает заново уже описанные кадры»).
+says what happens in it, who is in the frame, where and when it was shot, in what mood and with
+what shot — and, at a clip, how the camera moves and which moments are worth having. The answer
+lands in `media_understandings` under the item's id, as one sentence plus those fields, and is read
+from there ever after — by the montage's analysis stage and by the director, and by the second
+montage out of the same memory, which is why nobody pays to describe a frame twice (doc-03, «Второй
+ролик из тех же медиа не описывает заново уже описанные кадры»).
 
 Who is who across a memory is the model's own doing and not a face database of ours (decision-9):
 every call carries the cast this memory has already named — «человек-1», «животное-1» — and the
@@ -26,6 +28,8 @@ photographs. Hand Gemini the clip itself when the director turns out to need the
 import logging
 import pathlib
 import tempfile
+
+from psycopg.types.json import Jsonb
 
 from montage import ai, ffmpeg, storage
 from montage.ai import answers
@@ -79,11 +83,45 @@ def media_understanding(conn, ref):
 
     cast = _labels(described.get("cast"))
     conn.execute(
-        """INSERT INTO media_understandings (media_id, memory_id, description, cast_labels)
-           VALUES (%s, %s, %s, %s) ON CONFLICT (media_id) DO NOTHING""",
-        (ref, str(memory_id), description, cast),
+        """INSERT INTO media_understandings (media_id, memory_id, description, cast_labels, details)
+           VALUES (%s, %s, %s, %s, %s) ON CONFLICT (media_id) DO NOTHING""",
+        (ref, str(memory_id), description, cast, Jsonb(answers.described(described))),
     )
     log.info("media item %s described, in frame: %s", ref, ", ".join(cast) or "nobody")
+
+
+def frame_comments(conn, media_ids):
+    """Что участники воспоминания написали к кадрам: `{media_id: [текст, …]}`.
+
+    Единственное место, откуда они возьмутся: и разбор кадров, и режиссёр читают комментарии через
+    неё, а не спрашивают базу каждый сам. Хранилища у комментариев ещё нет — его заведёт m-32
+    (doc-14) — и потому сегодня здесь пусто, что означает «пока никто ничего не написал», а не
+    «комментариев у кадра не бывает» (решение chief, 2026-10-03).
+
+    Пустой ответ — не ошибка и не повод придумывать: вызывающий код обязан быть готов к тому, что
+    у любого кадра комментариев нет, и не должен этим догадываться — список пуст сам по себе.
+    """
+    return {}
+
+
+def describe_missing(conn, media_ids):
+    """Описать те из этих кадров, которых ещё никто не описывал; вернуть взятые готовыми.
+
+    Тот же `media_understanding`, что и у задачи из очереди, — поэтому кадр, описанный месяц назад
+    или прошлым роликом из этого же воспоминания, в нейросеть второй раз не уходит: он и здесь, и
+    в задаче начинается с одной и той же проверки. Возвращается множество тех, чьё описание взято
+    из таблицы, — журнал помечает их «описан ранее», и по нему же считает, сколько описано
+    сейчас (контракт api, «analysis»).
+    """
+    earlier = {
+        (row[0],)
+        for row in conn.execute(
+            "SELECT media_id FROM media_understandings WHERE media_id = ANY(%s)", (list(media_ids),)
+        )
+    }
+    for media_id in media_ids:
+        media_understanding(conn, media_id)
+    return {media_id for (media_id,) in earlier}
 
 
 def _cast(conn, memory_id):

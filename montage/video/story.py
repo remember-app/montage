@@ -6,6 +6,7 @@
 """
 
 from montage import journal
+from montage.media import understanding
 from montage.video import selection
 
 # Как воспоминание само называет тех, кого узнало на кадрах: «человек-1», «животное-2»
@@ -14,42 +15,89 @@ PEOPLE_LABEL, ANIMAL_LABEL = "человек", "животное"
 
 
 @journal.quiet
-def what_was_seen(conn, ref, judged):
-    """Этап «разбираем, что на кадрах» в журнал: описание и кто в кадре — на каждый файл, о котором
-    это уже записано.
+def what_was_seen(conn, ref, judged, earlier):
+    """Этап «разбираем, что на кадрах» в журнал: описание каждого кадра — и на тот, что описан
+    сейчас, и на взятый готовым.
 
-    Своей работы у этапа нет и не должно быть: кадры описывает `understanding.py` задолго до
-    заказа, по одному, и второй ролик из тех же медиа ничего не описывает заново (doc-03). Этап от
-    этого не исчезает с экрана — он честно говорит «описано 0 из 14», и это сегодняшнее состояние
-    продукта, пока ключа от модели нет (decision-10), а не пропущенный шаг.
+    Описания приходят сюда готовыми: пишет их `understanding.describe_missing`, тот же вопросом и
+    по одному кадру, что и задолго до заказа, и второй раз их не спрашивает (doc-03), — а по
+    разделению на «сейчас» и «ранее» (`earlier`) считается счёт этапа. Кадр из `earlier` помечен в
+    карточке `earlier`, «описан ранее», и приложение рисует его такой же.
 
-    Описание — слова модели, а не код: приложению их только показать. Метки «что увидел» —
+    Описание — слова модели, а не код: приложению их только показать. Метки «кто увидел» —
     `cast_labels` воспоминания, по ним же считается и итог этапа: «37 лиц, 5 людей в главных»
     (контракт api, `faces`, `people`, `animals`). Лица — сколько раз человек попал в кадр, то есть
     сумма меток людей по всем разобранным кадрам; люди и животные — сколько их всего, по разным
     меткам: один и тот же «человек-1» на двадцати кадрах — двадцать лиц и один человек.
     """
-    journal.start(conn, ref, "analysis", total=len(judged))
     seen = conn.execute(
-        """SELECT media_id, description, cast_labels FROM media_understandings
+        """SELECT media_id, description, cast_labels, details FROM media_understandings
            WHERE media_id = ANY(%s)""",
         ([piece.media_id for piece in judged],),
     ).fetchall()
+    # Сколько описано *сейчас* — по тому, что лежит в таблице, а не по тому, сколько кадров
+    # оставалось описать: с ключом от модели не описывается ни один кадр, и «описано 6» на экране
+    # было бы враньём (decision-10, состояние без ключа).
+    described = sum(one[0] not in earlier for one in seen)
+    journal.start(
+        conn,
+        ref,
+        "analysis",
+        total=len(judged) - len(earlier),
+        described=described,
+        earlier=len(earlier),
+    )
+    spoken = _spoken(conn, [piece.media_id for piece in judged])
+    comments = understanding.frame_comments(conn, [piece.media_id for piece in judged])
     cast, faces = set(), 0
-    for media_id, description, labels in seen:
-        cast.update(labels or ())
-        faces += sum(label.startswith(PEOPLE_LABEL) for label in labels or ())
-        journal.entry(conn, ref, "analysis", media_id=media_id, thought=description, labels=labels)
+    for media_id, description, labels, details in seen:
+        labels = labels or ()
+        cast.update(labels)
+        faces += sum(label.startswith(PEOPLE_LABEL) for label in labels)
+        journal.entry(
+            conn,
+            ref,
+            "analysis",
+            media_id=media_id,
+            thought=description,
+            labels=labels,
+            # Сколько человек в кадре — это его метки, а не отдельное число от модели: она и так
+            # перечислила, кто в кадре, и второе поле с тем же самым разошлось бы с ним.
+            details={
+                **(details or {}),
+                "people": sum(label.startswith(PEOPLE_LABEL) for label in labels),
+                **({"earlier": True} if media_id in earlier else {}),
+                **({"speech": spoken[media_id]} if media_id in spoken else {}),
+                **({"comments": comments[media_id]} if comments.get(media_id) else {}),
+            },
+        )
     journal.finish(
         conn,
         ref,
         "analysis",
-        described=len(seen),
-        of=len(judged),
+        described=described,
+        earlier=len(earlier),
         faces=faces,
         people=sum(label.startswith(PEOPLE_LABEL) for label in cast),
         animals=sum(label.startswith(ANIMAL_LABEL) for label in cast),
     )
+
+
+def _spoken(conn, media_ids):
+    """Что сказано в клипах заказа — из своей таблицы (`media_speech`), а не у модели.
+
+    Отдельной строкой в карточке анализа: модель видит вырезанные кадры и звука не слышит, и
+    спросить её, что слышно, значило бы выдумать и показать это людям. Словами, что на самом деле
+    сказано, лежит то, что расшифровал отдельный шаг пайплайна (doc-03).
+    """
+    return {
+        media_id: transcript
+        for media_id, transcript in conn.execute(
+            """SELECT media_id, transcript FROM media_speech
+                WHERE media_id = ANY(%s) AND transcript <> ''""",
+            (list(media_ids),),
+        )
+    }
 
 
 def choices(conn, ref, chosen, turned_down, judged):
@@ -84,7 +132,7 @@ def plan(conn, ref, chosen, thoughts):
     каждом кадре, который видел, порядком плана, и «мимо» на тех, кого он сам не взял.
 
     Пишется там же, где решения отбора, и по той же причине — после набора заказанной длины
-    (`selection.stretch`): «беру 0:04–0:07» должно называть тот кусок исходника, который в ролик и
+    (`selection.stretch`): «беру 0:04–0:07» должно называть тот кусок исходника, который в ролик
     пойдёт. Слова здесь режиссёра, а куски наши: сколько секунд кадра взято и какой кусок исходника
     пойдёт в ролик, видно отсюда, а не из плана.
 

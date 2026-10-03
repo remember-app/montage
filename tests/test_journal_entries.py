@@ -12,7 +12,10 @@ import datetime
 import math
 import uuid
 
+from psycopg.types.json import Jsonb
+
 from montage import journal, worker
+from montage.media import understanding
 from montage.video import director, selection, story
 
 from pieces import picture
@@ -21,8 +24,9 @@ from rows import add_item, entries_of, journal_ready, order, read_montage, ready
 
 
 def test_the_analysis_stage_tells_what_was_seen_and_who_was_in_frame(conn, memory):
-    """Разбор кадров пересказывает то, что уже записано (`media_understandings`): описание словами
-    модели и метки «что увидел». Итог — сколько кадров описано, сколько лиц на них и скольких
+    """Разбор кадров пересказывает то, что записано в `media_understandings`: описание словами
+    модели, метки «кто в кадре» и — полями — где снято, в каком свете, с каким настроением и
+    планом. Итог — сколько описано, сколько взято готовыми, сколько лиц на кадрах и скольких
     воспоминание узнало: «37 лиц, 5 людей в главных» на экране «Ролик готов».
 
     Лица и люди — разные числа, и разойтись они должны именно здесь: «человек-1» стоит на обоих
@@ -34,34 +38,211 @@ def test_the_analysis_stage_tells_what_was_seen_and_who_was_in_frame(conn, memor
     described, _ = add_item(conn, memory, "photo", status="ready")
     again, _ = add_item(conn, memory, "photo", status="ready")
     silent, _ = add_item(conn, memory, "photo", status="ready")
-    for media_id, description, cast in (
-        (described, "Бабушка смеётся, Лиза обнимает её", ["человек-1", "человек-2", "животное-1"]),
-        (again, "Бабушка у окна", ["человек-1"]),
+    for media_id, description, cast, fields in (
+        (
+            described,
+            "Бабушка смеётся, Лиза обнимает её",
+            ["человек-1", "человек-2", "животное-1"],
+            {"place": "Гостиная", "light": "Вечер, тёплые гирлянды", "mood": "Нежно"},
+        ),
+        (again, "Бабушка у окна", ["человек-1"], {"place": "Гостиная", "shot": "Средний"}),
     ):
         conn.execute(
-            """INSERT INTO media_understandings (media_id, memory_id, description, cast_labels)
-               VALUES (%s, %s, %s, %s)""",
-            (media_id, str(memory_id), description, cast),
+            """INSERT INTO media_understandings (media_id, memory_id, description, cast_labels,
+                                                 details)
+               VALUES (%s, %s, %s, %s, %s)""",
+            (media_id, str(memory_id), description, cast, Jsonb(fields)),
         )
     judged = [selection.Piece(media_id=one) for one in (described, again, silent)]
+    earlier = {described, again}
 
     journal.begin(conn, montage_id, len(judged), 60)
-    story.what_was_seen(conn, montage_id, judged)
+    story.what_was_seen(conn, montage_id, judged, earlier)
 
     # Порядком записей этап ничего не рассказывает — они про разные кадры и ложатся одной пачкой.
-    assert {
-        one.media_id: (one.thought, one.labels) for one in entries_of(conn, montage_id, "analysis")
-    } == {
+    written = {one.media_id: one for one in entries_of(conn, montage_id, "analysis")}
+    assert {one.media_id: (one.thought, one.labels) for one in written.values()} == {
         described: ("Бабушка смеётся, Лиза обнимает её", ["человек-1", "человек-2", "животное-1"]),
         again: ("Бабушка у окна", ["человек-1"]),
     }
+    assert written[described].details == {
+        "place": "Гостиная",
+        "light": "Вечер, тёплые гирлянды",
+        "mood": "Нежно",
+        "earlier": True,
+        "people": 2,
+    }, "описание полями плюс «описан ранее» и сколько людей в кадре"
+    assert written[again].details["shot"] == "Средний"
     assert stages_of(conn, montage_id)["analysis"]["outcome"] == {
-        "described": 2,
-        "of": 3,
+        # Ни одного: третий кадр не описан — без модели (decision-10) или потому, что описать его
+        # нечем. Считается по тому, что описано на самом деле, а не по тому, сколько оставалось.
+        "described": 0,
+        "earlier": 2,
         "faces": 3,
         "people": 2,
         "animals": 1,
     }
+    assert stages_of(conn, montage_id)["analysis"]["total"] == 1, (
+        "а счётчик стоит на том, сколько кадров пришлось бы описать"
+    )
+
+
+def test_a_frame_described_now_is_not_marked_as_described_earlier(conn, memory):
+    """«Описан ранее» — только про то описание, которое взято готовым. Кадр, описанный этим же
+    этапом, помеченства не должен: иначе на экране «описано 1 сейчас, ещё 1 ранее» стояло бы на
+    карточке, которую только что описали, и не сказало бы, за что заплатили сейчас.
+    """
+    journal_ready(conn)
+    montage_id = order(conn, memory, {})
+    fresh, _ = add_item(conn, memory, "photo", status="ready")
+    conn.execute(
+        """INSERT INTO media_understandings (media_id, memory_id, description, cast_labels, details)
+           VALUES (%s, %s, 'Бабушка у окна', %s, %s)""",
+        (fresh, str(memory[0]), ["человек-1"], Jsonb({"place": "Гостиная"})),
+    )
+
+    journal.begin(conn, montage_id, 1, 60)
+    story.what_was_seen(conn, montage_id, [selection.Piece(media_id=fresh)], set())
+
+    (written,) = entries_of(conn, montage_id, "analysis")
+    assert written.details == {"place": "Гостиная", "people": 1}, (
+        "нет ключа earlier — описан сейчас (контракт api)"
+    )
+    assert stages_of(conn, montage_id)["analysis"]["outcome"]["described"] == 1
+    assert stages_of(conn, montage_id)["analysis"]["outcome"]["earlier"] == 0
+
+
+def test_the_description_a_model_gave_is_cut_to_what_the_journal_can_hold(conn, memory):
+    """Поля описания едут из модели целиком, а потолки у них свои и мельче, чем у колонок: место,
+    свет, настроение, план и камера — по 120 символов, а подробный текст — 1500, и моментов у
+    клипа восемь. Без обрезки база отвергла бы реплику целиком (контракт api), и в рассказе о
+    ролике осталось бы пустое место.
+    """
+    journal_ready(conn)
+    montage_id = order(conn, memory, {})
+    clip, _ = add_item(conn, memory, "video", status="ready")
+    moments = [{"seconds": number, "text": "момент " + "я" * 200} for number in range(12)]
+    conn.execute(
+        """INSERT INTO media_understandings (media_id, memory_id, description, cast_labels, details)
+           VALUES (%s, %s, 'Тост', %s, %s)""",
+        (
+            clip,
+            str(memory[0]),
+            ["человек-1"],
+            Jsonb(
+                {
+                    "place": "п" * 300,
+                    "light": "с" * 300,
+                    "mood": "н" * 300,
+                    "shot": "к" * 300,
+                    "camera": "д" * 300,
+                    "text": "т" * 2000,
+                    "moments": moments,
+                }
+            ),
+        ),
+    )
+
+    journal.begin(conn, montage_id, 1, 60)
+    story.what_was_seen(conn, montage_id, [selection.Piece(media_id=clip)], {clip})
+
+    (written,) = entries_of(conn, montage_id, "analysis")
+    given = ("place", "light", "mood", "shot", "camera", "text")  # что положили в строку
+    assert {name: len(written.details[name]) for name in given} == {
+        name: journal.DETAIL_CHARACTERS[name] for name in given
+    }
+    assert len(written.details["moments"]) == journal.MOMENTS_COUNT
+    assert all(len(one["text"]) == journal.MOMENT_CHARACTERS for one in written.details["moments"])
+    assert [one["seconds"] for one in written.details["moments"]] == list(
+        range(journal.MOMENTS_COUNT)
+    )
+    assert "speech" not in written.details, "у этого клипа речи не записано, и говорить не о чем"
+
+
+def test_a_moment_the_model_gave_unusably_is_left_out_rather_than_shown(conn, memory):
+    """Момент клипа — это секунда и текст, и оба нужны: карточка рисует его по полосе ролика, и
+    без секунды на полосе его не поставить, а без текста — и подать нечего. Момент без того или
+    без другого — не момент, и на карточку он не попадает вовсе.
+    """
+    journal_ready(conn)
+    montage_id = order(conn, memory, {})
+    clip, _ = add_item(conn, memory, "video", status="ready")
+    conn.execute(
+        """INSERT INTO media_understandings (media_id, memory_id, description, cast_labels, details)
+           VALUES (%s, %s, 'Тост', %s, %s)""",
+        (
+            clip,
+            str(memory[0]),
+            ["человек-1"],
+            Jsonb(
+                {
+                    "moments": [
+                        {"seconds": 7, "text": "поднимают бокалы"},
+                        {"seconds": "не семь", "text": "поднимают бокалы"},
+                        {"seconds": 12, "text": "   "},
+                        "пару поднимают на руки",
+                        {"seconds": -3, "text": "до начала"},
+                    ]
+                }
+            ),
+        ),
+    )
+
+    journal.begin(conn, montage_id, 1, 60)
+    story.what_was_seen(conn, montage_id, [selection.Piece(media_id=clip)], {clip})
+
+    (written,) = entries_of(conn, montage_id, "analysis")
+    assert written.details["moments"] == [{"seconds": 7, "text": "поднимают бокалы"}]
+
+
+def test_a_frames_speech_and_comments_come_from_their_own_tables(conn, memory):
+    """Речь клипа — из `media_speech`, а не от модели: модель видит вырезанные кадры и звука не
+    слышит, и спросить её, что слышно, значило бы выдумать это людям. Комментарии участников —
+    из своего места (`understanding.frame_comments`), а пока хранилища нет, их на карточке нет,
+    и пустое место читается как «пока никто ничего не написал», а не как ошибка (решение chief,
+    2026-10-03).
+
+    Клип без расшифровки и фотография — оба молчат: речи, которой не записано, на карточке нет.
+    """
+    journal_ready(conn)
+    montage_id = order(conn, memory, {})
+    clip, _ = add_item(conn, memory, "video", status="ready")
+    photo, _ = add_item(conn, memory, "photo", status="ready")
+    for media_id, description in ((clip, "Тост"), (photo, "Стол")):
+        conn.execute(
+            """INSERT INTO media_understandings (media_id, memory_id, description, cast_labels)
+               VALUES (%s, %s, %s, %s)""",
+            (media_id, str(memory[0]), description, ["человек-1"]),
+        )
+    conn.execute(
+        "INSERT INTO media_speech (media_id, transcript) VALUES (%s, %s)",
+        (clip, "С днём рождения! " * 40),
+    )
+
+    journal.begin(conn, montage_id, 2, 60)
+    judged = [selection.Piece(media_id=clip), selection.Piece(media_id=photo)]
+    story.what_was_seen(conn, montage_id, judged, set())
+
+    written = {one.media_id: one.details for one in entries_of(conn, montage_id, "analysis")}
+    assert (
+        written[clip]["speech"].startswith("С днём рождения!")
+        and len(written[clip]["speech"]) == journal.DETAIL_CHARACTERS["speech"]
+    ), "речь обрезана по своему потолку"
+    assert "speech" not in written[photo], "у фотографии речи нет и говорить не о чем"
+    assert all("comments" not in fields for fields in written.values()), (
+        "пока m-32 не заведёт хранилище, комментариев ни у кого нет"
+    )
+
+
+def test_the_one_place_comments_come_from_is_empty_and_breaks_nothing(conn, memory):
+    """`frame_comments` — единственное место, откуда берутся комментарии участников к кадру, и
+    сегодня оно пусто. Пусто здесь означает «пока никто ничего не написал»: вызывающий код обязан
+    быть готов к пустому ответу у любого кадра, а хранилище заведёт m-32 (doc-14).
+    """
+    media_ids = [add_item(conn, memory, "photo", status="ready")[0] for _ in range(2)]
+
+    assert understanding.frame_comments(conn, media_ids) == {}
+    assert understanding.frame_comments(conn, []) == {}, "и на пустом заказе тоже"
 
 
 def test_every_decision_of_the_selection_is_told_with_its_reason(conn, memory):

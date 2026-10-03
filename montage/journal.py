@@ -12,7 +12,8 @@
 
 Слов для человека здесь нет: в записи идут коды и числа (`skip`, `unreadable`, «1 из 4»), а фразу
 из них строит приложение на своём языке. Исключение — слова модели: `thought` (описание кадра и
-мысль режиссёра-нейросети), `story_part_title` и метки `labels`; все они идут в базу через `fit`.
+мысль режиссёра-нейросети), `story_part_title`, метки `labels` и поля описания в `details`; все они
+идут в базу через `fit`.
 
 **Живьём, а не пачкой в конце.** Приложение опрашивает журнал раз в секунду-две, пока ролик
 собирается, поэтому каждая запись уходит отдельной командой и ложится в базу сразу: соединение
@@ -29,6 +30,8 @@ import functools
 import json
 import logging
 import unicodedata
+
+from psycopg.types.json import Jsonb
 
 # Ручка оценки времени: сколько секунд этап тратит на один файл материала и на одну секунду
 # готового ролика. Числа — «на глаз», и подстраивать их по реальным прогонам надо здесь: больше
@@ -66,6 +69,7 @@ COLUMNS = (
     "focus_y",
     "focus_w",
     "focus_h",
+    "details",
 )
 
 # Потолки из контракта. Стоят `CHECK`-ами в базе, поэтому запись, вышедшую за них, база отвергнет
@@ -74,6 +78,21 @@ THOUGHT_CHARACTERS = 500
 REASON_CHARACTERS = 40
 TITLE_CHARACTERS = 80
 LABELS_COUNT, LABELS_CHARACTERS = 12, 240
+
+# Поля внутри `details` (контракт api, «details» у анализа) — своими потолками, потому что это
+# разные вещи разной длины: место, свет, настроение, план и движение камеры — короткой строкой,
+# подробное описание текстом — длиннее всех. Само `details` целиком база держит одним `CHECK` на
+# 4000 символов JSON, а по полям обрезает воркер — здесь.
+DETAIL_CHARACTERS = {
+    "place": 120,
+    "light": 120,
+    "mood": 120,
+    "shot": 120,
+    "camera": 120,
+    "speech": 240,
+    "text": 1500,
+}
+MOMENTS_COUNT, MOMENT_CHARACTERS = 8, 120
 
 log = logging.getLogger("montage.journal")
 
@@ -225,14 +244,19 @@ def entry(conn, ref, stage, **fields):
     if unknown:
         raise ValueError(f"the journal has no column(s) {sorted(unknown)}")
     # Имена колонок — свои же, из `COLUMNS`: в запрос подставляется список констант этого файла, а
-    # значения идут параметрами, как везде.
+    # значения идут параметрами, как везде. `details` — единственный jsonb, поэтому его значение
+    # оборачивается: словарь сам по себе параметром не поедет.
     columns = [name for name in COLUMNS if fields.get(name) is not None]
     named = "".join(f", {one}" for one in columns)
     conn.execute(
         f"""INSERT INTO montage_journal_entries (montage_id, stage{named})
             VALUES (%s, %s{", %s" * len(columns)})""",
-        (ref, stage, *(fields[name] for name in columns)),
+        (ref, stage, *(_jsonb(name, fields[name]) for name in columns)),
     )
+
+
+def _jsonb(name, value):
+    return Jsonb(value) if name == "details" else value
 
 
 def fit(fields):
@@ -257,6 +281,45 @@ def fit(fields):
         while labels and len(",".join(labels)) > LABELS_CHARACTERS:
             labels.pop()
         fitted["labels"] = labels or None
+    if fitted.get("details") is not None:
+        fitted["details"] = _fit_details(fitted["details"]) or None
+    return fitted
+
+
+def _fit_details(details):
+    """Поля описания кадра — тем же `fit`, что и колонки, но по своим потолкам.
+
+    Каждое поле очищено и обрезано отдельно, и моменты клипа оставлены не больше `MOMENTS_COUNT` с
+    текстом до `MOMENT_CHARACTERS`: обрезанное описание стоит карточке хвоста фразы, а всё поле
+    разом — всей записи, потому что `details` база держит одним `CHECK` на 4000 символов и отвергнет
+    реплику целиком. Ключ, который в `details` не нашёлся, в неё не попадает: пустое приложение
+    просто не рисует.
+    """
+    fitted = {}
+    for name, characters in DETAIL_CHARACTERS.items():
+        words = _clean(details.get(name) or "")[:characters]
+        if words:
+            fitted[name] = words
+    moments = [
+        {"seconds": moment["seconds"], "text": _clean(moment.get("text") or "")[:MOMENT_CHARACTERS]}
+        for moment in (details.get("moments") or [])[:MOMENTS_COUNT]
+        if isinstance(moment, dict)
+        and isinstance(moment.get("seconds"), (int, float))
+        and moment["seconds"] >= 0
+    ]
+    moments = [one for one in moments if one["text"]]
+    if moments:
+        fitted["moments"] = moments
+    # Кроме полей описания в `details` лежит то, что кладёт сам воркер: сколько людей в кадре,
+    # «описан ранее» и комментарии участников (doc-14). Это его собственные значения, и в потолках
+    # контракта им места нет.
+    for name in ("people", "earlier"):
+        if details.get(name) is not None:
+            fitted[name] = details[name]
+    if details.get("comments"):
+        fitted["comments"] = [
+            words for words in (_clean(one) for one in details["comments"]) if words
+        ] or None
     return fitted
 
 
