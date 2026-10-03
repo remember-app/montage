@@ -353,12 +353,16 @@ def test_the_sweep_writes_nothing_about_a_memory_nobody_touched(conn, memory):
     _kept(conn, memory, 0, picture(1), 50)
     retake = _kept(conn, memory, 10, picture(1, moved=(3, 0)), 30)
 
-    assert sweeps.sweep_media_duplicates(conn) == 1
+    # The count the sweep returns is how many memories it went over, and it goes over the whole
+    # library — so it says how big this shared database is by now, not what this test laid out. What
+    # the sweep did about this memory is said by the mark below, which only appears if it was
+    # reached: `_kept` leaves the retake with no verdict of its own.
+    sweeps.sweep_media_duplicates(conn)
     written = conn.execute(
         "SELECT id, updated_at FROM media_items WHERE memory_id = %s ORDER BY id", (memory[0],)
     ).fetchall()
 
-    assert sweeps.sweep_media_duplicates(conn) == 1
+    sweeps.sweep_media_duplicates(conn)
     assert (
         conn.execute(
             "SELECT id, updated_at FROM media_items WHERE memory_id = %s ORDER BY id", (memory[0],)
