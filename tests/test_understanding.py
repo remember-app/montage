@@ -245,6 +245,67 @@ def test_without_a_cloud_model_nothing_is_described_and_nobody_is_asked(
     )
 
 
+def test_the_fields_the_model_answers_with_are_asked_for_and_kept(
+    conn, s3, memory, tmp_path, monkeypatch
+):
+    """Описание приходит полями, а не одной фразой — и модель о них спрошена, и её ответ сохранён
+    целиком, а не выброшен за ненадобностью.
+
+    Обе половины проверяются, потому что порушиться может любая: забыть спросить — и карточка
+    останется пустой, взять да не положить в таблицу — и карточка окажется пустой при втором
+    ролике из тех же медиа, когда описание берут готовым.
+    """
+    said = json.dumps(
+        {
+            "description": "Женщина вносит торт",
+            "cast": ["человек-1"],
+            "place": "Кухня",
+            "light": "Вечер, тёплый свет",
+            "mood": "Празднично",
+            "shot": "Средний",
+            "text": "Женщина вносит торт на столе, за столом сидят гости.",
+        },
+        ensure_ascii=False,
+    )
+    net = Answering()
+    net.answers = [
+        json.dumps(
+            {
+                "id": "interactions/1",
+                "model": "gemini-3.8-flash",
+                "output_text": said,
+                "usage": {"total_input_tokens": 1, "total_output_tokens": 1, "total_tokens": 2},
+            }
+        ).encode()
+    ]
+    monkeypatch.setattr(
+        ai, "from_env", lambda *_, **__: providers.Gemini("test-key", transport=net)
+    )
+    item_id = ready_media(conn, s3, memory, jpeg(tmp_path / "preview.jpg"))
+
+    understanding.describe_missing(conn, [item_id])
+
+    # О полях описания спросено в постоянной инструкции (`asked` отбрасывает её и оставляет
+    # только вопрос про уже известных действующих лиц), поэтому смотрим весь ушедший текст.
+    instruction = net._body(0)["input"][0]["text"]
+    assert all(field in instruction for field in ("place", "light", "mood", "shot", "text")), (
+        "о каждом поле описания модель спрошена — иначе она их и не назовёт"
+    )
+    assert "camera" in instruction and "moments" in instruction, (
+        "у клипа — ещё и движение камеры с моментами"
+    )
+    kept = conn.execute(
+        "SELECT details FROM media_understandings WHERE media_id = %s", (item_id,)
+    ).fetchone()[0]
+    assert kept == {
+        "place": "Кухня",
+        "light": "Вечер, тёплый свет",
+        "mood": "Празднично",
+        "shot": "Средний",
+        "text": "Женщина вносит торт на столе, за столом сидят гости.",
+    }, "поля сохранены вместе с описанием — второй ролик возьмёт их готовыми"
+
+
 def test_the_analysis_stage_asks_about_a_frame_only_once(conn, s3, memory, tmp_path, model):
     """Главное обещание этапа анализа: кадр, описанный раньше, в нейросеть второй раз не уходит.
 
