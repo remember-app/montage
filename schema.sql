@@ -118,8 +118,9 @@ CREATE TABLE IF NOT EXISTS media_understandings (
 -- the card is the same free `jsonb` the journal keeps and the fields are the model's, not ours —
 -- one `description` column would have thrown away everything but the first sentence.
 --
--- Added to a table that was already in use, so `init` brings an older one up to date and leaves
--- its rows as they were, with this empty on every one of them.
+-- Отдельным `ALTER`, а не колонкой в `CREATE`: эту таблицу заводит ещё и `CREATE TABLE IF NOT
+-- EXISTS` выше, а её миграция api читает тот же файл по своему пути (`scripts/migrate.ts`), так
+-- что на базе, где таблица уже заведена, колонка в `CREATE` до неё бы не дошла.
 ALTER TABLE media_understandings
     ADD COLUMN IF NOT EXISTS details jsonb NOT NULL DEFAULT '{}';
 
