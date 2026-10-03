@@ -302,11 +302,12 @@ def test_the_proposal_does_not_decide_what_goes_into_a_video(conn, s3, memory, t
 
 def test_a_retake_is_marked_a_duplicate_before_anybody_orders_a_video(conn, s3, memory, tmp_path):
     """The softer shot of the cake is proposed as a duplicate the moment the sharper one comes in —
-    on its own row, though the job that ran was the other file's — and the order then folds exactly
-    that one into its series.
+    on its own row, though the job that ran was the other file's.
 
     Only the proposal changes: the retake stays in the gallery as it was, `ready` and not hidden,
-    with every other column of the row the gallery reads left alone."""
+    with every other column of the row the gallery reads left alone. And в ролик оно не идёт
+    «мимо»: отсев внутри сборки больше нет, и отмеченный повтор — обычный кадр, как и сосед по
+    серии (doc-03, «What it doesn't»)."""
     journal_ready(conn)
     sharp, soft, other = shots(tmp_path)
     retake = shot(conn, s3, memory, soft, 10)
@@ -327,12 +328,12 @@ def test_a_retake_is_marked_a_duplicate_before_anybody_orders_a_video(conn, s3, 
     worker.enqueue(conn, "montage", montage_id)
     assert worker.run_once(conn) is True
 
-    folded = [
-        entry.media_id
-        for entry in entries_of(conn, montage_id, "directing")
-        if entry.reason == selection.DUPLICATE
-    ]
-    assert folded == [retake], "the order folds the very frame the proposal marked"
+    assert not [one for one in entries_of(conn, montage_id) if one.reason == selection.DUPLICATE], (
+        "в журнале ролика никакого «мимо, дубль» нет — отсева в сборке не осталось"
+    )
+    assert {first, retake} <= {media_id for media_id, _, _ in layout_of(conn, montage_id)}, (
+        "и оба кадра серии стоят в ролике"
+    )
 
 
 def test_the_series_are_counted_over_the_memory_from_scratch(conn, memory):
@@ -380,15 +381,11 @@ def test_the_series_are_counted_over_the_memory_from_scratch(conn, memory):
     assert recounted[guests] == counted[guests], "a row whose answer held is not rewritten"
 
 
-def test_the_organizers_word_on_a_duplicate_is_the_orders_and_no_recount_takes_it(
-    conn, s3, memory, tmp_path
-):
-    """The organizer takes a retake back on the step of choosing frames the way they take back a
-    blurred one: «включить», which the app sends with the order (`include_media_ids`) and nothing
-    ever stores on the frame — the api has no route that writes the proposal, and the recount writes
-    nothing else. So a recount, however it falls, has nothing of theirs to undo: a frame arriving
-    between the order and the assembly counts the memory again, the proposal is still a proposal,
-    the order is as it was sent, and the retake is in the video."""
+def test_a_recount_after_the_order_never_reaches_the_video(conn, s3, memory, tmp_path):
+    """Предложение отсева — это предложение, и пересчёт после заказа его не отменяет: кадр,
+    пришедший между заказом и сборкой, пересчитывает память заново, а заказ остаётся таким, каким
+    его прислали. И в ролике дедупа нет: кадры, оставленные при выборе, равны, так что и отмеченный
+    повтор, и его сосед по серии стоят в ролике наравне (doc-03, «What it doesn't»)."""
     sharp, soft, other = shots(tmp_path)
     first = shot(conn, s3, memory, sharp, 0)
     guests = shot(conn, s3, memory, other, 4)
@@ -396,13 +393,13 @@ def test_the_organizers_word_on_a_duplicate_is_the_orders_and_no_recount_takes_i
     screen(conn, first, guests, retake)
     assert screening_of(conn, retake) == (True, selection.DUPLICATE)
 
-    params = api_params(target_seconds=10, include_media_ids=[retake])
+    params = api_params(target_seconds=10)
     montage_id = order(conn, memory, params)
     late = tmp_path / "late.jpg"
     draw("-f", "lavfi", "-i", "mandelbrot=size=1200x800", "-frames:v", "1", str(late))
     screen(conn, shot(conn, s3, memory, late, 120))
 
-    assert screening_of(conn, retake) == (True, selection.DUPLICATE)
+    assert screening_of(conn, retake) == (True, selection.DUPLICATE), "предложение на месте"
     stored = conn.execute("SELECT params FROM montages WHERE id = %s", (montage_id,)).fetchone()[0]
     assert stored == params, "the recount does not touch the order"
 
@@ -411,8 +408,7 @@ def test_the_organizers_word_on_a_duplicate_is_the_orders_and_no_recount_takes_i
 
     assert read_montage(conn, montage_id)[0] == "ready"
     in_the_video = {media_id for media_id, _, _ in layout_of(conn, montage_id)}
-    assert retake in in_the_video
-    assert first not in in_the_video, "«включить» wins its series, as it does at every order"
+    assert {first, guests, retake} <= in_the_video, "отсев в ролике не выбрасывает кадры"
 
 
 def test_the_sweep_looks_again_at_a_frame_kept_before_its_frame_was(conn, s3, memory, tmp_path):

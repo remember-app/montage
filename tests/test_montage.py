@@ -12,7 +12,7 @@ import pytest
 
 from montage import ffmpeg, storage, worker
 from montage.media import preview
-from montage.video import assembly, frames, layout, library, montage, rhythm, selection
+from montage.video import assembly, director, frames, layout, library, montage, rhythm, selection
 
 from checks import about, loudness
 from material import dark_opening_clip, draw, hush, jpeg, long_clip, probe, tone
@@ -632,12 +632,7 @@ def test_a_real_montage_survives_the_whole_milestone_at_once(
     montage_id = order(
         conn,
         memory,
-        api_params(
-            target_seconds=9.5,
-            music_tracks=[own_track],
-            story_text="тост и торт",
-            include_media_ids=[f3],
-        ),
+        api_params(target_seconds=9.5, music_tracks=[own_track], story_text="тост и торт"),
     )
     worker.enqueue(conn, "montage", montage_id)
 
@@ -650,12 +645,13 @@ def test_a_real_montage_survives_the_whole_milestone_at_once(
     )
 
     dropped = next(entry for entry in directing if entry.media_id == f2)
-    assert (dropped.decision, dropped.reason) == ("skip", selection.DUPLICATE), (
-        "проигравший серии рассказан своей строкой, а не молчанием (TASK-447)"
+    assert (dropped.decision, dropped.reason) == ("skip", director.LEFT_OUT), (
+        "проигравший серии рассказан своей строкой, а не молчанием (TASK-447) — и решение о нём "
+        "теперь у режиссёра, а не у отсева"
     )
     kept = next(entry for entry in directing if entry.media_id == f3 and entry.decision == "take")
-    assert (kept.reason, kept.series_size) == ("included", 2), (
-        "«включить» сильнее дублирования — организатор вернул проигравшего серии (TASK-452)"
+    assert kept.reason is None, (
+        "и «включить» на взятом кадре не стоит: кадры равны, и ничьим словом не помечен ни один"
     )
     segments = sorted(
         (entry.source_from_seconds, entry.source_to_seconds)

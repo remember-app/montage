@@ -1,4 +1,4 @@
-"""Что попадает в ролик, а что нет: отсев, «включить», «исключить» и пол с потолком.
+"""Что попадает в ролик, а что нет: «исключить», равные кадры и пол с потолком.
 
 См. `docs/jobs/montage.md`. Всё живое: настоящий Postgres, бакет и ffmpeg.
 """
@@ -12,7 +12,7 @@ from montage.video import assembly, montage, selection
 
 from checks import about, near, pixel_at
 from material import FIXTURES, click_track, crushed, draw, jpeg, lopsided, probe, tone, unopenable
-from rows import add_item, fetch, layout_of, order, read_montage, ready_material
+from rows import add_item, entries_of, fetch, layout_of, order, read_montage, ready_material
 
 
 def test_a_file_that_will_not_open_is_left_out_rather_than_failing_the_video(
@@ -34,61 +34,39 @@ def test_a_file_that_will_not_open_is_left_out_rather_than_failing_the_video(
     assert about(duration, 9.0), "the four that opened went in, the broken one was left out"
 
 
-def test_a_badly_exposed_photo_is_left_out_rather_than_failing_the_video(
-    conn, s3, memory, tmp_path
-):
-    """A different code path from a file ffmpeg refuses to open: this one decodes fine and the
-    отсев turns it down on exposure, the one frame in it being crushed almost to black. The unit
-    tests on `choose` never exercise this — they score every piece by hand."""
+def test_a_badly_exposed_photo_is_in_the_video_rather_than_failing_it(conn, s3, memory, tmp_path):
+    """A different code path from a file ffmpeg refuses to open: this one decodes fine, and the
+    only frame in it is crushed almost to black. Отсева внутри сборки больше нет, и такой кадр стоит
+    в ролике наравне с остальными — решение человека, оставившего его при выборе (doc-03, «What it
+    doesn't»). Единственное, что в сборку не попадает, — файл, который не открывается вовсе."""
     montage_id = order(conn, memory, {"target_seconds": 30})
-    ready_material(conn, s3, memory, tmp_path)
-    _, key = add_item(conn, memory, "photo", status="ready")
-    s3.upload_file(str(crushed(tmp_path / "crushed.jpg")), storage.client().bucket, key)
-    worker.enqueue(conn, "montage", montage_id)
-
-    assert worker.run_once(conn) is True
-
-    status, _, duration, error_text = read_montage(conn, montage_id)
-    assert (status, error_text) == ("ready", None)
-    assert about(duration, 9.0), "the crushed photo had no usable frame and was left out uncounted"
-
-
-def test_a_photo_the_organizer_marked_include_is_in_the_video_the_algorithm_notwithstanding(
-    conn, s3, memory, tmp_path
-):
-    """The same crushed photo as above, and the same verdict from the algorithm — except this time
-    the order names it. «Включить» is the organizer overruling the automatic отсев, so the piece
-    the test above proves is dropped is here proved to be in the video."""
     ready_material(conn, s3, memory, tmp_path)
     crushed_id, key = add_item(conn, memory, "photo", status="ready")
     s3.upload_file(str(crushed(tmp_path / "crushed.jpg")), storage.client().bucket, key)
-    montage_id = order(conn, memory, {"target_seconds": 30, "include_media_ids": [crushed_id]})
     worker.enqueue(conn, "montage", montage_id)
 
     assert worker.run_once(conn) is True
 
     status, _, duration, error_text = read_montage(conn, montage_id)
     assert (status, error_text) == ("ready", None)
-    # Four stills of 2.5 and the three-second clip instead of three stills, less half a second
-    # for each of four joins.
-    assert about(duration, 11.0), "the crushed photo went in because the order asked for it"
+    # Три снимка по 2.5, пересвеченный снимок по 2.5 и трёхсекундный клип, минус полсекунды на
+    # каждую из четырёх склеек.
+    assert about(duration, 11.0), "пересвеченный кадр в ролике, а не выброшен за брак"
+    assert crushed_id in {media_id for media_id, _, _ in layout_of(conn, montage_id)}
 
 
-def test_the_floor_counts_the_pieces_the_organizer_asked_for_too(conn, s3, memory, tmp_path):
-    """A memory the отсев turns down almost entirely, and an organizer who overrules it. The floor
-    is «сколько кусков реально войдёт», so the two crushed photos named in «включить» count towards
-    it — refusing the order here would be the automatic отсев beating the person, which is the one
-    thing «включить» exists to prevent (doc-03, «Кадры, отмеченные включить, есть в ролике»)."""
+def test_the_floor_counts_every_frame_the_organizer_left_alike(conn, s3, memory, tmp_path):
+    """Пол — это «сколько кусков реально войдёт», и кадры, оставленные при выборе, равны: из
+    одного нормального снимка и двух пересвеченных ролик собирается, а не отказывается. Раньше
+    отказ был возможен, если материал отсевал почти целиком."""
     _, key = add_item(conn, memory, "photo", status="ready")
     s3.upload_file(str(jpeg(tmp_path / "good.jpg")), storage.client().bucket, key)
-    wanted = []
     for index in range(2):
-        crushed_id, key = add_item(conn, memory, "photo", status="ready")
+        _, key = add_item(conn, memory, "photo", status="ready")
         s3.upload_file(
             str(crushed(tmp_path / f"crushed-{index}.jpg")), storage.client().bucket, key
         )
-        wanted.append(crushed_id)
-    montage_id = order(conn, memory, {"target_seconds": 30, "include_media_ids": wanted})
+    montage_id = order(conn, memory, {"target_seconds": 30})
     worker.enqueue(conn, "montage", montage_id)
 
     assert worker.run_once(conn) is True
@@ -102,10 +80,10 @@ def test_no_montage_runs_past_the_ceiling_whatever_the_organizer_asked_for_and_t
     conn, s3, memory, tmp_path, monkeypatch
 ):
     """The ten-minute edge on a real file, at a ceiling lowered to eight seconds: what is asked is
-    whether the edge holds, not whether ten minutes can be encoded. Five stills, every one marked
-    «включить», come to 10.5 seconds, and a fast metronome pulls their joins about on top of that.
-    The video is cut from its tail to the ceiling — the stills that stay are the first ones, in
-    their order — and the file ffprobe reads runs no longer than it."""
+    whether the edge holds, not whether ten minutes can be encoded. Five stills come to 10.5
+    seconds, and a fast metronome pulls their joins about on top of that. The video is cut from its
+    tail to the ceiling — the stills that stay are the first ones, in their order — and the file
+    ffprobe reads runs no longer than it."""
     monkeypatch.setattr(selection, "MAX_SECONDS", 8.0)
     track_key = f"music/{uuid.uuid4()}.wav"
     s3.upload_file(
@@ -116,9 +94,7 @@ def test_no_montage_runs_past_the_ceiling_whatever_the_organizer_asked_for_and_t
         item_id, key = add_item(conn, memory, "photo", status="ready", age_hours=5 - index)
         s3.upload_file(str(jpeg(tmp_path / f"photo-{index}.jpg")), storage.client().bucket, key)
         ids.append(item_id)
-    montage_id = order(
-        conn, memory, {"target_seconds": 30, "music_track_key": track_key, "include_media_ids": ids}
-    )
+    montage_id = order(conn, memory, {"target_seconds": 30, "music_track_key": track_key})
     worker.enqueue(conn, "montage", montage_id)
 
     assert worker.run_once(conn) is True
@@ -149,14 +125,12 @@ def test_a_photo_the_organizer_marked_exclude_stays_out_of_the_video(conn, s3, m
     assert about(duration, 7.0), "one of the four pieces was left out on the order's own word"
 
 
-def test_a_photo_its_owner_hid_stays_out_of_the_video_even_marked_include(
-    conn, s3, memory, tmp_path
-):
-    """Hiding is the owner's word and beats the organizer's «включить» (TASK-424): the hidden photo
-    is named in the order and still is not in the video, nor in its layout."""
+def test_a_photo_its_owner_hid_stays_out_of_the_video(conn, s3, memory, tmp_path):
+    """Hiding is the owner's word, и никакое слово заказа его не отменяет (TASK-424): скрытый снимок
+    не материала вовсе, и в ролике его нет — ни в файле, ни в раскладке."""
     hidden_id = ready_material(conn, s3, memory, tmp_path)[0]
     conn.execute("UPDATE media_items SET hidden = true WHERE id = %s", (hidden_id,))
-    montage_id = order(conn, memory, {"target_seconds": 30, "include_media_ids": [hidden_id]})
+    montage_id = order(conn, memory, {"target_seconds": 30})
     worker.enqueue(conn, "montage", montage_id)
 
     assert worker.run_once(conn) is True
@@ -167,16 +141,32 @@ def test_a_photo_its_owner_hid_stays_out_of_the_video_even_marked_include(
     assert hidden_id not in {media_id for media_id, _, _ in layout_of(conn, montage_id)}
 
 
-def test_the_order_judges_a_photograph_on_the_same_copy_the_proposal_did(
+def test_a_stale_include_in_the_order_no_longer_means_anything(conn, s3, memory, tmp_path):
+    """Приложение и api ещё присылают `include_media_ids` в заказе, а воркер их больше не читает:
+    кадры, оставленные при выборе, равны, и «обязательно включить» ничего не закрепляет (doc-03,
+    «What it doesn't»). Заказ с этим словом собирается ровно так же, как без него."""
+    ids = ready_material(conn, s3, memory, tmp_path)
+    montage_id = order(conn, memory, {"target_seconds": 30, "include_media_ids": [ids[0]]})
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    status, _, duration, error_text = read_montage(conn, montage_id)
+    assert (status, error_text) == ("ready", None)
+    assert about(duration, 9.0), "все четыре куска на месте, отмеченный — среди прочих"
+    assert set(ids) == {media_id for media_id, _, _ in layout_of(conn, montage_id)}
+    assert not [one for one in entries_of(conn, montage_id) if one.reason == "included"]
+
+
+def test_the_order_cuts_a_photograph_from_the_same_copy_the_proposal_judged(
     conn, s3, memory, tmp_path
 ):
-    """Which file the отсев looks at when a video is ordered — told from outside the only way it
-    can be: the large copy beside this photograph is black and the original behind it is a picture.
+    """Which file заказ смотрит, когда ролик заказан, — видно снаружи единственным способом: большая
+    копия рядом с этим снимком чёрная, а оригинал под ней — картинка.
 
-    The frame is thrown out, which means the order judged the copy — the same file
-    `screening.media_screening` wrote its proposal on and the same one the piece would have been cut
-    from. Two places looking at two different files would show the organizer one thing in the
-    gallery and put another in the video.
+    Кадры равны, и чёрная копия теперь не отсеивается, а попадает в ролик как есть: кусок режется из
+    той же копии, на которой смотрел кадр (`_back_to_originals`). Значит, и в готовом файле на месте
+    этого кадра чёрное — судил оригинал, была бы картинка.
     """
     photo_id = ready_material(conn, s3, memory, tmp_path)[0]
     black = tmp_path / "black.jpg"
@@ -191,10 +181,14 @@ def test_the_order_judges_a_photograph_on_the_same_copy_the_proposal_did(
 
     assert worker.run_once(conn) is True
 
-    status, _, duration, error_text = read_montage(conn, montage_id)
+    status, video_key, duration, error_text = read_montage(conn, montage_id)
     assert (status, error_text) == ("ready", None)
-    # Two stills and the clip: the same eight seconds less two joins as a piece struck out by hand.
-    assert about(duration, 7.0), "снимок с чёрной копией остался в ролике — судили оригинал"
+    assert about(duration, 9.0), "все четыре куска на месте, чёрный снимок в том числе"
+    where = {media_id: start for media_id, start, _ in layout_of(conn, montage_id)}
+    video = fetch(s3, video_key, tmp_path / "montage.mp4")
+    assert near(pixel_at(video, where[photo_id] + 0.5, 640, 360), (0, 0, 0)), (
+        "снимок с чёрной копией остался в ролике чёрным — судили оригинал"
+    )
 
 
 def test_the_floor_does_not_count_the_pieces_the_organizer_struck_out(conn, s3, memory, tmp_path):
@@ -214,22 +208,16 @@ def test_the_floor_does_not_count_the_pieces_the_organizer_struck_out(conn, s3, 
     assert "не годится" in error_text
 
 
-def test_the_floor_treats_a_piece_named_on_both_lists_as_struck_out(conn, s3, memory, tmp_path):
-    """The order contradicting itself is settled the same way here as in `selection.choose`:
-    «исключить» is the one that cannot be undone once a video is made, so it is the one the floor
-    counts too. Three good photos, one of them on both lists, are really only two — and a floor that
-    let «включить» save it here would pass an order `selection.choose` then cuts down to two
-    anyway."""
+def test_the_floor_does_not_count_what_the_organizer_struck_out(conn, s3, memory, tmp_path):
+    """«Исключить» — слово, которое нельзя отменить, когда ролик уже собран, и пол считает именно
+    то, что может попасть на экран: три нормальных снимка, один из них вычеркнут, — это два куска,
+    и ролик из двух не собирается. Слова «включить» больше нет, и вычеркнутый им не вернуть."""
     ids = []
     for index in range(3):
         item_id, key = add_item(conn, memory, "photo", status="ready")
         s3.upload_file(str(jpeg(tmp_path / f"photo-{index}.jpg")), storage.client().bucket, key)
         ids.append(item_id)
-    montage_id = order(
-        conn,
-        memory,
-        {"target_seconds": 60, "include_media_ids": [ids[0]], "exclude_media_ids": [ids[0]]},
-    )
+    montage_id = order(conn, memory, {"target_seconds": 60, "exclude_media_ids": [ids[0], ids[1]]})
     job_id = worker.enqueue(conn, "montage", montage_id)
 
     assert worker.run_once(conn) is True
@@ -394,11 +382,7 @@ def test_a_portrait_heic_stands_up_in_the_montage(conn, s3, memory, tmp_path, co
             "UPDATE media_items SET preview_key = %s WHERE id = %s",
             (f"previews/{heic_id}.jpg", heic_id),
         )
-    montage_id = order(
-        conn,
-        memory,
-        {"target_seconds": 30, "music_tracks": [], "include_media_ids": [*ids, heic_id]},
-    )
+    montage_id = order(conn, memory, {"target_seconds": 30, "music_tracks": []})
     worker.enqueue(conn, "montage", montage_id)
 
     assert worker.run_once(conn) is True

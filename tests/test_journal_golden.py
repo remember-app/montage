@@ -166,12 +166,22 @@ def lay_out(conn, s3, memory, tmp_path, shots, first=1):
 def snapshot(conn, montage_id, files, params, scenario):
     """Всё, что ролик и его журнал оставили в базе, — JSON, который читают, не запуская Python.
 
-    Метки `f1`, `f2`… вместо uuid файлов (по порядку съёмки), порядковые номера `n` вместо bigserial
-    записей, а метки времени — секундами от условной эпохи по месту во времени: кто раньше кого
-    легла, видно, сколько это заняло, — нет. Всё остальное — как в базе, столбец в столбец.
+    Метки `f1`, `f2`… вместо uuid файлов (по порядку съёмки), метки `u1`, `u2`… вместо участников,
+    порядковые номера `n` вместо bigserial записей, а метки времени — секундами от условной эпохи по
+    месту во времени: кто раньше кого легла, видно, сколько это заняло, — нет. Всё остальное — как в
+    базе, столбец в столбец.
     """
     label = {one.id: one.label for one in files}
     marked = lambda value: label[str(value)] if value is not None else None  # noqa: E731
+    senders = {}
+    # Участники, как и файлы, заводятся на каждый прогон заново: в снимке они метками, а не uuid.
+    marked_sender = lambda one: senders.setdefault(str(one), f"u{len(senders) + 1}")  # noqa: E731
+
+    def counted(name, value):
+        """Итог подготовки с переписанными метками участников — всё остальное как записано."""
+        if not value or "senders" not in value:
+            return value
+        return {**value, "senders": {marked_sender(one): n for one, n in value["senders"].items()}}
 
     status, duration = conn.execute(
         "SELECT status, duration_seconds FROM montages WHERE id = %s", (montage_id,)
@@ -242,7 +252,7 @@ def snapshot(conn, montage_id, files, params, scenario):
                 "eta_seconds": row[4],
                 "done_count": row[5],
                 "total_count": row[6],
-                "outcome": row[7],
+                "outcome": counted(name, row[7]),
                 "updated_at": when(row[8]),
             }
             for name in journal.STAGES
@@ -390,10 +400,12 @@ def test_the_journal_of_a_montage_directed_by_the_model_is_the_recorded_one(
 ):
     """Ролик, который режиссировала нейросеть (записанным ответом), с историей и всем, что при этом
     случается с кадрами: взят по плану — с мыслью, частью и рамкой; клип взят двумя отрезками,
-    каждый своей записью и своим местом в ролике; взят «из серии», а его пара из неё — «мимо,
-    дубль»; взят по слову
-    организатора вопреки отсеву; остался за бортом со словами модели и без слов; не влез в
-    заказанную длину; вычеркнут организатором; смазан, тёмен и не открылся на отсеве.
+    каждый своей записью и своим местом в ролике; остался за бортом со словами модели и без слов;
+    не влез в заказанную длину; вычеркнут организатором; не открылся на подготовке.
+
+    Смазанные и тёмные кадры в ролике стоят наравне с остальными, а не «мимо, брак»: отсева внутри
+    сборки нет, и в журнале о них нет ни слова. Исключённого организатором нет в журнале вовсе —
+    он убрал кадр сам, и напоминать не о чем.
     """
     files = lay_out(
         conn,
@@ -422,7 +434,6 @@ def test_the_journal_of_a_montage_directed_by_the_model_is_the_recorded_one(
         "music_tracks": [],
         "story_text": "день рождения, всё вокруг торта",
         "exclude_media_ids": [files[8].id],
-        "include_media_ids": [files[9].id],
     }
 
     montage_id = assemble(conn, memory, files, params)
@@ -436,10 +447,9 @@ def test_the_journal_of_a_montage_cut_by_the_algorithm_is_the_recorded_one(
     conn, s3, memory, tmp_path
 ):
     """Тот же ролик там, где нейросети нет вовсе (так собирается каждый ролик, пока нет ключа):
-    решения
-    ставит отсев — «взял 1 из 3» на серии, «мимо» с кодом на каждом, кого он не взял, — и дорожка
-    ритма с настоящей музыкой полки. Описания кадров при этом есть: этап «разбираем» их
-    пересказывает.
+    решения ставит отбор — резкие кадры по заказанной длине, «мимо» с кодом на каждом, кто не
+    влез, — и дорожка ритма с настоящей музыкой полки. Описания кадров при этом есть: этап
+    «разбираем» их пересказывает. Никаких «взял 1 из 3» и «дубль»: серии в ролике не сворачиваются.
     """
     files = lay_out(
         conn,
@@ -461,12 +471,7 @@ def test_the_journal_of_a_montage_cut_by_the_algorithm_is_the_recorded_one(
             (flat, 540, None, ()),
         ],
     )
-    params = {
-        "target_seconds": 10,
-        "music_tracks": ["warm"],
-        "exclude_media_ids": [files[7].id],
-        "include_media_ids": [files[8].id],
-    }
+    params = {"target_seconds": 10, "music_tracks": ["warm"], "exclude_media_ids": [files[7].id]}
 
     montage_id = assemble(conn, memory, files, params)
 
@@ -541,5 +546,5 @@ def test_a_montage_that_fell_and_was_taken_again_says_only_what_its_second_attem
     fresh = snapshot(conn, fresh_id, files, params, "retry")
 
     assert retried == fresh, "вторая попытка записала не то, что записал бы чистый ролик"
-    assert {row["media"] for row in retried["layout"]} == {"f1", "f2", "f3", "f5"}
+    assert {row["media"] for row in retried["layout"]} == {"f1", "f2", "f3", "f4", "f5"}
     assert retried["stages"][-1]["state"] == "done"
