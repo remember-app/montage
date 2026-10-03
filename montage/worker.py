@@ -168,7 +168,10 @@ def _give_up(conn, type_, ref):
         # serves `error_text` to every member of the memory, and this one is an ffmpeg stderr tail
         # or the storage's: temp paths, and the bucket's address with the object's name in it. The
         # full text stays in `jobs.last_error`, which is the operator's to read.
-        montages.give_up(conn, ref, "не удалось собрать ролик")
+        #
+        # Код причины — `internal`, и назван здесь явно: сюда попадает всё, что не разобрано
+        # отдельно, потому что очередь исчерпала попытки на ролике, который падал по-разному.
+        montages.give_up(conn, ref, "не удалось собрать ролик", "internal")
 
 
 def _hand_back(conn, job_id, type_):

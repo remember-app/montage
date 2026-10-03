@@ -91,7 +91,11 @@ def montage(conn, ref):
     # сам материал (ниже).
     ordered_music, refusal = music.ordered(params)
     if refusal:
-        return _give_up_for_good(conn, ref, refusal)
+        # Не трек, который не открылся, а название, которого нет ни в полке, ни среди загруженных:
+        # списки разошлись у api и у воркера. Это не «трек не читается» (`track_unreadable` — про
+        # файл), а расхождение сторон, то есть `internal`. Код назван здесь явно, как и на каждом
+        # другом отказе: значение по умолчанию — это «никто не подумал», а не решение.
+        return _give_up_for_good(conn, ref, refusal, "internal")
     # Пожелания организатора к трекам, его словами, — у каждого трека своё. Как и история, читает
     # их только режиссёр: дорожку они не перекраивают. Общее `music_note` старых заказов не читается
     # вовсе (docs/jobs/montage.md, «Пожелания к трекам»).
@@ -100,7 +104,9 @@ def montage(conn, ref):
     if orientation not in assembly.CANVASES:
         # Same drift, same answer: the api validates the two values it may write here, so anything
         # else is a contract that moved on one side only — and it would be no better on a retry.
-        return _give_up_for_good(conn, ref, f"неизвестная ориентация ролика «{orientation}»")
+        return _give_up_for_good(
+            conn, ref, f"неизвестная ориентация ролика «{orientation}»", "internal"
+        )
     # The organizer's own word on the material, marked before the order (doc-03, «Выбор медиа для
     # ролика»): one optional list of `media_items` ids — те, что он убрал. Оставленные кадры равны:
     # «обязательно включить» больше нет, и выбирает из них режиссёр (doc-03, «What it doesn't»).
@@ -513,7 +519,7 @@ def give_up(conn, ref, error_text, stopped="internal"):
     journal.failed(conn, ref, stopped)
 
 
-def _give_up_for_good(conn, ref, why, stopped="internal"):
+def _give_up_for_good(conn, ref, why, stopped):
     """A refusal rather than an accident: the answer would be the same on all three attempts, so
     the montage is failed here and the job finishes cleanly instead of retrying into it."""
     log.info("montage %s cannot be made: %s", ref, why)

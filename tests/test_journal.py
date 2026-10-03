@@ -11,6 +11,7 @@ Warning: эти тесты чистят таблицу `jobs` той базы, �
 бакет, на который смотрит R2_ENDPOINT.
 """
 
+import pathlib
 import uuid
 
 import pytest
@@ -310,7 +311,7 @@ def test_a_montage_that_fell_leaves_the_stage_it_fell_on_marked_failed(conn, mem
     journal.finish(conn, montage_id, "prep", photos_done=5)
     journal.start(conn, montage_id, "analysis", total=5)
 
-    montage.give_up(conn, montage_id, "не удалось собрать ролик")
+    montage.give_up(conn, montage_id, "не удалось собрать ролик", "internal")
 
     stages = stages_of(conn, montage_id)
     assert read_montage(conn, montage_id)[0] == "failed"
@@ -322,6 +323,10 @@ def test_a_montage_that_fell_leaves_the_stage_it_fell_on_marked_failed(conn, mem
         "pending",
     ]
     assert stages["analysis"]["eta"] is None, "упавшему этапу ждать нечего"
+    # Код причины — на упавшем этапе, и когда код не назван, подставляется `internal`. Именно так
+    # очередь кончает попытки (`worker._give_up` зовёт `give_up` без кода), и именно этим звонком
+    # пользуются шесть отказов из семи: молчаливый упавший этап без причины — это поломка.
+    assert stages["analysis"]["outcome"]["stopped"] == "internal"
 
 
 def test_a_journal_that_cannot_be_written_does_not_cost_the_montage(conn):
@@ -337,7 +342,7 @@ def test_a_journal_that_cannot_be_written_does_not_cost_the_montage(conn):
         conn, gone, "prep", media_id=str(uuid.uuid4()), decision="skip", reason=selection.UNREADABLE
     )
     journal.finish(conn, gone, "prep", photos_done=4)
-    journal.failed(conn, gone)
+    journal.failed(conn, gone, "internal")
     journal.entry(conn, gone, "prep", nonsense="колонки с таким именем в журнале нет")
 
     assert stages_of(conn, gone) == {} and entries_of(conn, gone) == []
@@ -374,21 +379,127 @@ def test_the_assembly_says_where_it_is_by_substeps_and_a_percent_that_only_grows
     ], "закрытый этап — все подшаги сделаны"
 
 
-def test_a_refusal_between_stages_still_names_the_reason_on_a_stage(conn, memory):
-    """Отказ между этапами приходит, когда идущего нет: предыдущий уже `done`, следующий ещё не
-    начался. Код причины всё равно должен лечь на этап — иначе на экране вместо «годных кадров
-    меньше трёх» было бы пустое место, а именно это отказ и значит.
+# --- причина остановки на каждом месте отказа --------------------------------
+
+
+def _ordered(conn, s3, memory, tmp_path, monkeypatch, **params):
+    """Заказ и очередь, как их оставляет api, — дальше отказ случается сам."""
+    montage_id = order(conn, memory, params)
+    worker.enqueue(conn, "montage", montage_id)
+    return montage_id
+
+
+def _ready_then_ordered(conn, s3, memory, tmp_path, monkeypatch, **params):
+    """Годного материала хватает, поэтому отказ случается дальше по конвейеру, а не на нижнем
+    пороге заказа."""
+    ready_material(conn, s3, memory, tmp_path)
+    return _ordered(conn, s3, memory, tmp_path, monkeypatch, **params)
+
+
+def _unreadable_three(conn, s3, memory, tmp_path, monkeypatch, **params):
+    """Три файла, которые ffmpeg не откроет: годных не остаётся ни одного."""
+    for number in range(3):
+        _item, key = add_item(conn, memory, "photo", status="ready")
+        s3.upload_file(
+            str(unopenable(tmp_path / f"broken-{number}.jpg")), storage.client().bucket, key
+        )
+    return _ordered(conn, s3, memory, tmp_path, monkeypatch, **params)
+
+
+def _refuse_nothing_fits(conn, s3, memory, tmp_path, monkeypatch, **params):
+    """Всё, что есть, на «исключить» — но довести до этого проще подменой выбора: `survived` такой
+    заказ отбил бы раньше сам, а ветку «в ролик нечего ставить» надо всё-таки прогнать."""
+    ready_material(conn, s3, memory, tmp_path)
+    monkeypatch.setattr(selection, "choose", lambda *_: ([], []))
+    return _ordered(conn, s3, memory, tmp_path, monkeypatch, target_seconds=30, **params)
+
+
+def _refuse_out_of_attempts(conn, s3, memory, tmp_path, monkeypatch, **params):
+    """Очередь исчерпала попытки: сборка падает на склейке, `worker` сам назовёт ролик упавшим."""
+    ready_material(conn, s3, memory, tmp_path)
+    montage_id = _ordered(conn, s3, memory, tmp_path, monkeypatch, target_seconds=30, **params)
+
+    def falls(*_args, **_kwargs):
+        raise RuntimeError("ffmpeg fell over")
+
+    monkeypatch.setattr(assembly, "assemble", falls)
+    conn.execute("UPDATE jobs SET attempts = %s WHERE type = 'montage'", (worker.MAX_ATTEMPTS - 1,))
+    return montage_id
+
+
+# Каждое место, где ролик признан негодным: как довести до него и что он должен сказать. `stage` —
+# та стадия, на которой код обязан лечь, а `None` — отказ до журнала, когда этапов нет вовсе и
+# причину видит человек в `error_text` под роликом.
+REFUSALS = (
+    pytest.param(_ordered, {"music_tracks": ["не-трек"]}, "internal", None, id="unknown-track"),
+    pytest.param(_ordered, {"orientation": "квадрат"}, "internal", None, id="unknown-orientation"),
+    pytest.param(_ordered, {}, "internal", None, id="no-material-at-all"),
+    pytest.param(_unreadable_three, {}, "no_material", "prep", id="nothing-usable"),
+    pytest.param(
+        _ready_then_ordered,
+        {"target_seconds": 30, "music_tracks": ["music/нет-такого"]},
+        "track_unreadable",
+        "analysis",
+        id="own-track-unreadable",
+    ),
+    pytest.param(_refuse_nothing_fits, {}, "no_material", "directing", id="nothing-to-put-in"),
+    pytest.param(_refuse_out_of_attempts, {}, "internal", "assembly", id="out-of-attempts"),
+)
+
+
+@pytest.mark.parametrize("refused, params, code, stage", REFUSALS)
+def test_every_place_the_montage_is_refused_names_its_reason(
+    conn, s3, memory, tmp_path, monkeypatch, refused, params, code, stage
+):
+    """Каждое место отказа называет причину **своим** кодом и кладёт её туда, где что-то было.
+
+    Код у `give_up` обязателен, и забытый — падение задания, а не отказ. Но «код назван» ещё не
+    значит «код проверен»: место, которого нет в тесте, выглядит покрытым ровно так же, как
+    покрытое. Поэтому мест столько же, сколько строк в `REFUSALS`, и это проверяется отдельно
+    (второй тест ниже) — иначе список протухнет молча.
+
+    Куда ложится код — тоже часть проверки. Отказ между этапами приходит, когда идущего этапа нет
+    (предыдущий `done`, следующий не начался), и тогда код ложится в **последнюю шедшую** стадию:
+    не начатая остаётся не начатой, подписывать её упавшей значило бы написать в журнале то,
+    чего не было.
     """
     journal_ready(conn)
-    montage_id = order(conn, memory, {})
-    journal.begin(conn, montage_id, 5, 60)
-    journal.start(conn, montage_id, "prep", total=5)
-    journal.finish(conn, montage_id, "prep", photos_done=5)
+    montage_id = refused(conn, s3, memory, tmp_path, monkeypatch, **params)
 
-    montage.give_up(conn, montage_id, "материал не годится для ролика", "no_material")
+    assert worker.run_once(conn) is True
+    status, _key, _duration, error_text = read_montage(conn, montage_id)
+    assert status == "failed", "отказ, а не падение задания"
 
     stages = stages_of(conn, montage_id)
+    if stage is None:
+        # До журнала: ложить причину некуда, и её видит человек в `error_text`.
+        assert error_text, "причина названа словами под роликом"
+        assert stages == {}, "журнала до отказа не было — и это верно"
+        return
+
     fell = [name for name in journal.STAGES if stages[name]["state"] == "failed"]
-    assert fell == ["analysis"], "упал первый незаконченный этап, а не тот, что уже сделан"
-    assert stages["analysis"]["outcome"]["stopped"] == "no_material"
-    assert stages["prep"]["state"] == "done", "сделанное до отказа остаётся сделанным"
+    assert fell == [stage], f"причина лежит на {stage}, а не на другой стадии"
+    assert stages[stage]["outcome"]["stopped"] == code
+    for name in journal.STAGES:
+        if name not in fell and stages[name]["state"] == "pending":
+            assert "stopped" not in stages[name]["outcome"], "пустая стадия причины не получает"
+
+
+def test_the_list_of_refusals_covers_every_place_in_the_source(conn):
+    """Сколько мест отказа в исходнике — столько строк в `REFUSALS`. Без этой сверки список
+    протухает молча: кто добавит восьмое место и не допишет строку, тот получит зелёный набор и
+    место, выглядящее покрытым. Расхождение валит тест, пока строка не добавлена.
+    """
+    journal_ready(conn)
+    root = pathlib.Path(montage.__file__).parents[1]  # `montage/video/montage.py` → `montage/`
+    written = sum(
+        1
+        for name in ("video/montage.py", "worker.py")
+        for line in (root / name).read_text().splitlines()
+        if ("_give_up_for_good(" in line or "montages.give_up(" in line)
+        and not line.strip().startswith("def ")
+    )
+    assert written == len(REFUSALS), (
+        f"в исходнике мест отказа {written}, а в списке {len(REFUSALS)} — "
+        "новое место не описано или место выкинули"
+    )
