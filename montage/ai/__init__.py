@@ -97,9 +97,9 @@ class AI:
         """The order of the film: which piece, for how long, and what it is there for.
 
         `shots` is what may go into the montage, one dict per piece — `media_id` and whatever is
-        known about it (its description, its speech, `must_include`). A piece the organizer struck
-        out is simply not in this list: the surest way for it not to be in the plan is for the
-        model never to see it.
+        known about it (its description, its speech). All of them are equal and none of them is
+        marked as wanted. A piece the organizer struck out is simply not in this list: the surest
+        way for it not to be in the plan is for the model never to see it.
 
         `music` is the montage's soundtrack as it will actually sound — the tracks in the order
         they play, how long each of them runs and the organizer's own wish on a track where they
