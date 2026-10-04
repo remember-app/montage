@@ -1,9 +1,11 @@
 """The `media_frame_info` job: how big a frame is and what its camera wrote into it.
 
 The lines «Размер», «Камера» and «Место» of the sheet «Сведения о кадре» (doc-02, the layout in
-`design/screens/SheetFrameInfo.html`), read out of the file the phone uploaded and written onto the
-row for the api to hand out — exactly as `thumbnail_key` is (the api's migration
-`100.do.frame-info.sql`). Nothing here is computed: what the camera did not write down stays null.
+`design/screens/SheetFrameInfo.html`), and the strip of shooting settings beside them — ISO, focal
+length, exposure, aperture, shutter — read out of the file the phone uploaded and written onto the
+row for the api to hand out — exactly as `thumbnail_key` is (the api's migrations
+`100.do.frame-info.sql` and `200.do.frame-exposure.sql`). Nothing here is computed: what the
+camera did not write down stays null.
 
 A job of its own rather than one more step of the preview, so that the original is read once for
 every answer the sheet wants off the file, and the catch-up that fills them in for old material
@@ -23,9 +25,10 @@ log = logging.getLogger("montage.media.frame_info")
 
 
 FrameInfo = collections.namedtuple(
-    "FrameInfo", "width height camera_model focal_length_mm aperture latitude longitude"
+    "FrameInfo",
+    "width height camera_model focal_length_mm aperture iso exposure_ev shutter latitude longitude",
 )
-NOTHING = FrameInfo(None, None, None, None, None, None, None)  # a file that says nothing at all
+NOTHING = FrameInfo(*(None,) * 10)  # a file that says nothing at all
 MODEL_LENGTH = 100  # «iPhone 15 Pro», «SM-S918B» — a camera's name, not a paragraph
 
 # ±DD.DDDD±DDD.DDDD±AAA.AAA/ — how a phone writes down where a clip was shot (ISO 6709). The third
@@ -77,6 +80,13 @@ def _plausible(info):
     def positive(value):
         return value if value is not None and math.isfinite(value) and value > 0 else None
 
+    def stated(value):
+        """Whether the camera said so at all — for a number that may legitimately be zero. The
+        exposure compensation is such a number: `0` is «shot without compensation» and means the
+        same thing to a reader as any other reading, so it is kept and told apart from the null a
+        camera that never wrote it leaves behind."""
+        return value if value is not None and math.isfinite(value) else None
+
     model = "".join(char for char in info.camera_model or "" if char.isprintable())
     a_place = (
         info.latitude is not None
@@ -89,6 +99,9 @@ def _plausible(info):
         camera_model=model.strip()[:MODEL_LENGTH] or None,
         focal_length_mm=positive(info.focal_length_mm),
         aperture=positive(info.aperture),
+        # Sensitivity is a length of the same kind: there is no ISO below one.
+        iso=positive(info.iso),
+        exposure_ev=stated(info.exposure_ev),
         latitude=info.latitude if a_place else None,
         longitude=info.longitude if a_place else None,
     )
@@ -147,6 +160,7 @@ def media_frame_info(conn, ref):
     conn.execute(
         """UPDATE media_items
            SET width = %s, height = %s, camera_model = %s, focal_length_mm = %s, aperture = %s,
+               iso = %s, exposure_ev = %s, shutter = %s,
                latitude = %s, longitude = %s, updated_at = now()
            WHERE id = %s""",
         (*info, ref),

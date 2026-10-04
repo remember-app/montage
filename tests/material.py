@@ -153,6 +153,34 @@ def photo_with_odd_numbers(path):
     return path
 
 
+def photo_with_settings(path, *, iso=None, exposure_ev=None, shutter=None):
+    """A photograph with the shooting settings the strip on the sheet is built of — the sensitivity,
+    the exposure compensation in stops, and the shutter speed as the fraction a camera writes it.
+
+    Drawn by Pillow, like every other EXIF here: `ffmpeg` writes no EXIF at all. What is left out
+    is left out of the file too, which is what makes this one material for both halves of the rule —
+    a photograph with the settings gets them, one without keeps the columns empty.
+    """
+
+    def fraction(value):
+        number, denominator = value
+        return TiffImagePlugin.IFDRational(number, denominator)
+
+    exif = Image.Exif()
+    exif[ExifTags.Base.Model] = "iPhone 15 Pro"
+    optics = exif.get_ifd(ExifTags.IFD.Exif)
+    optics[ExifTags.Base.FocalLength] = TiffImagePlugin.IFDRational(24, 1)
+    optics[ExifTags.Base.FNumber] = TiffImagePlugin.IFDRational(18, 10)
+    if iso is not None:
+        optics[ExifTags.Base.ISOSpeedRatings] = iso
+    if exposure_ev is not None:
+        optics[ExifTags.Base.ExposureBiasValue] = fraction(exposure_ev)
+    if shutter is not None:
+        optics[ExifTags.Base.ExposureTime] = fraction(shutter)
+    Image.new("RGB", (64, 48), "gray").save(path, exif=exif)
+    return path
+
+
 def gigantic_photo(path):
     """`exif-photo.jpg` whose header claims 30000×30000 — 900 megapixels in 900 bytes. Pillow
     refuses that as a decompression bomb, and ffprobe reports it as a size of nothing."""
