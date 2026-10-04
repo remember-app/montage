@@ -56,6 +56,15 @@ def read_frame_info(conn, item_id):
     ).fetchone()
 
 
+def read_settings(conn, item_id):
+    """The shooting settings strip — ISO, the exposure compensation and the shutter speed — off the
+    same row. A camera that wrote none of them leaves three nulls, and a compensation of `0` is a
+    number of its own rather than one of those nulls."""
+    return conn.execute(
+        "SELECT iso, exposure_ev, shutter FROM media_items WHERE id = %s", (item_id,)
+    ).fetchone()
+
+
 def read_size(conn, item_id):
     """The sheet's «Размер 4032 × 3024», off the same row."""
     return conn.execute(

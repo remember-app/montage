@@ -15,6 +15,7 @@ import json
 import logging
 import subprocess
 import sys
+from fractions import Fraction
 
 log = logging.getLogger("montage.photo")
 
@@ -36,8 +37,9 @@ UPENDED = {5, 6, 7, 8}
 
 def read(path):
     """The size a person sees and what the camera wrote — `width`, `height`, `camera_model`,
-    `focal_length_mm`, `aperture`, `latitude`, `longitude`, each None when the file does not say.
-    None instead of the lot when this is not a photograph the reader opens, or the reader died."""
+    `focal_length_mm`, `aperture`, `iso`, `exposure_ev`, `shutter`, `latitude`, `longitude`, each
+    None when the file does not say. None instead of the lot when this is not a photograph the
+    reader opens, or the reader died."""
     return _ask("read", path)
 
 
@@ -99,6 +101,17 @@ def _number(value):
         return None
 
 
+def _shutter(value):
+    """The exposure time as the fraction the camera wrote it — «1/60», not the seconds 0.0166…,
+    out of which the phone would have to guess the denominator back and would draw «0.008 с» on a
+    1/125. Reduced, and a whole second whole. None when the tag is not there, and when it is not a
+    fraction at all: the denominator is the answer, and without one there is nothing to show."""
+    try:
+        return str(Fraction(value.numerator, value.denominator))
+    except (AttributeError, TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
 def _degrees(value, hemisphere):
     """One EXIF coordinate: degrees, minutes and seconds in one tag, north or south in another."""
     parts = [_number(part) for part in value] if isinstance(value, tuple) else []
@@ -139,6 +152,11 @@ def _read(path):
             "focal_length_mm": _number(optics.get(ExifTags.Base.FocalLength)),
             # The f-number, so that 1.8 is what the app puts on screen as «f/1.8».
             "aperture": _number(optics.get(ExifTags.Base.FNumber)),
+            # The rest of the settings strip on the layout: 400, and the compensation in stops —
+            # signed, where a zero is «shot without compensation» and stays a zero.
+            "iso": _number(optics.get(ExifTags.Base.ISOSpeedRatings)),
+            "exposure_ev": _number(optics.get(ExifTags.Base.ExposureBiasValue)),
+            "shutter": _shutter(optics.get(ExifTags.Base.ExposureTime)),
             "latitude": _degrees(
                 place.get(ExifTags.GPS.GPSLatitude), place.get(ExifTags.GPS.GPSLatitudeRef)
             ),

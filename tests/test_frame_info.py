@@ -18,12 +18,13 @@ from material import (
     jpeg,
     phone_video,
     photo_with_odd_numbers,
+    photo_with_settings,
     sideways_photo,
     sound,
     upright_video,
     video,
 )
-from rows import add_item, only_jobs_for, read_frame_info, read_size
+from rows import add_item, only_jobs_for, read_frame_info, read_settings, read_size
 
 MOSCOW_SOUTH = (pytest.approx(55.518, abs=0.0005), pytest.approx(37.53, abs=0.0005))
 
@@ -82,6 +83,96 @@ def test_a_photograph_brings_its_camera_and_its_place(conn, s3, memory, fixture)
     # words and the app puts them in the reader's own language.
     assert (camera, focal_length, aperture) == ("iPhone 15 Pro", 24, 1.8)
     assert (latitude, longitude) == MOSCOW_SOUTH
+
+
+@pytest.mark.parametrize(
+    "iso, exposure_ev, shutter, seen_as",
+    [
+        (400, (0, 1), (1, 60), (400, 0, "1/60")),  # what a phone writes on an ordinary day
+        (12800, (-13, 10), (1, 125), (12800, -1.3, "1/125")),  # a dim room, a hand on the dial
+        (100, (0, 1), (1, 1), (100, 0, "1")),  # bright sun, a whole second, no compensation
+    ],
+    ids=["ordinary", "dim-room", "sun"],
+)
+def test_a_photograph_brings_its_shooting_settings(
+    conn, s3, memory, tmp_path, iso, exposure_ev, shutter, seen_as
+):
+    """The rest of the strip on the layout — ISO · мм · ev · ƒ · выдержка — off the same file the
+    camera line came from, written by the same one update that writes it."""
+    item_id, key = add_item(conn, memory, "photo")
+    settings = photo_with_settings(
+        tmp_path / "original.jpg", iso=iso, exposure_ev=exposure_ev, shutter=shutter
+    )
+    s3.upload_file(str(settings), storage.client().bucket, key)
+    worker.enqueue(conn, "media_frame_info", item_id)
+
+    assert worker.run_once(conn) is True
+
+    # The shutter as the fraction a phone reads back out loud: «1/60», never the 0.0166… seconds
+    # it equals, out of which the denominator would have to be guessed at.
+    assert read_settings(conn, item_id) == seen_as
+
+
+def test_a_photograph_without_the_settings_leaves_them_empty(conn, s3, memory, tmp_path):
+    """The other half of the same rule, and the one a zero is easy to lose: a camera that wrote
+    none of it leaves three nulls — not three zeroes, which would draw «ISO 0 · ev 0 · 1/0 с» on the
+    sheet. Most material is this one: a screenshot, a frame re-saved by an editor."""
+    item_id, key = add_item(conn, memory, "photo")
+    s3.upload_file(
+        str(photo_with_settings(tmp_path / "original.jpg")), storage.client().bucket, key
+    )
+    worker.enqueue(conn, "media_frame_info", item_id)
+
+    assert worker.run_once(conn) is True
+
+    assert read_settings(conn, item_id) == (None, None, None)
+
+
+def test_an_exposure_compensation_of_zero_is_a_number_and_not_an_absence(
+    conn, s3, memory, tmp_path
+):
+    """`exposure_ev` is signed and nullable without a default precisely so that «сняли без
+    компенсации» and «воркер не смотрел» stay two different things. This file is the first."""
+    item_id, key = add_item(conn, memory, "photo")
+    settings = photo_with_settings(
+        tmp_path / "original.jpg", iso=64, exposure_ev=(0, 1), shutter=(1, 500)
+    )
+    s3.upload_file(str(settings), storage.client().bucket, key)
+    worker.enqueue(conn, "media_frame_info", item_id)
+
+    assert worker.run_once(conn) is True
+
+    iso, exposure_ev, shutter = read_settings(conn, item_id)
+    assert exposure_ev == 0, "a zero compensation is a reading, not a blank"
+    assert (iso, shutter) == (64, "1/500")
+
+
+def test_a_clip_keeps_the_settings_empty(conn, s3, memory, tmp_path):
+    """A container says nothing about the optics — and says nothing about the settings beside them
+    either, which is why `focal_length_mm` and `aperture` are empty at a clip too."""
+    item_id, key = add_item(conn, memory, "video")
+    s3.upload_file(str(phone_video(tmp_path / "original.mp4")), storage.client().bucket, key)
+    worker.enqueue(conn, "media_frame_info", item_id)
+
+    assert worker.run_once(conn) is True
+
+    assert read_settings(conn, item_id) == (None, None, None)
+
+
+def test_a_shutter_written_as_it_is_reduced_and_a_whole_second_is_whole(tmp_path):
+    """2/120 is the same 1/60 written wider, and 1/1 is one second rather than a fraction of it.
+    The sheet promises «1/60 с», so the text is the answer, in the fewest words that say it."""
+    from fractions import Fraction
+
+    from montage import photo
+
+    for written, as_text in [((2, 120), "1/60"), ((1, 1), "1"), ((1, 2), "1/2"), ((1, 60), "1/60")]:
+        path = photo_with_settings(tmp_path / f"{written[0]}-{written[1]}.jpg", shutter=written)
+
+        found = photo.read(path)
+
+        assert found["shutter"] == as_text
+        assert Fraction(found["shutter"]) == Fraction(*written)
 
 
 def test_a_clip_brings_its_camera_and_its_place_off_the_container(conn, s3, memory, tmp_path):
