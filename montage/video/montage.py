@@ -497,7 +497,7 @@ def _back_to_originals(chosen, originals, orientation, workdir):
     return pieces
 
 
-def give_up(conn, ref, error_text, stopped="internal"):
+def give_up(conn, ref, error_text, stopped):
     """Out of retries. The montage is failed too, so the organizer stops waiting on it and gets
     «повторить» under it (architecture.md, «Обработка ошибок»).
 
@@ -505,8 +505,11 @@ def give_up(conn, ref, error_text, stopped="internal"):
     so it is a sentence about the video, never an exception's text.
 
     `stopped` — кодом в журнал, на упавший этап: что именно остановило сборку, из трёх
-    (`journal.failed`). Словарь закрыт, и `internal` — всё, что не разобрано отдельно: сюда
-    попадает и очередь, исчерпавшая попытки.
+    (`journal.failed`). **Кода нет по умолчанию**: подставить `internal` молча значило бы решить,
+    что отказ неразобранный, там, где решение не принял никто, — а на месте, где код совпадает с
+    умолчанием, сломанный код неотличим от работающего и набор остаётся зелёным. Называть код —
+    обязанность каждого места отказа, включая `worker`, который закрывает ролик по исчерпании
+    попыток.
     """
     conn.execute(
         "UPDATE montages SET status = 'failed', error_text = %s, updated_at = now() WHERE id = %s",
