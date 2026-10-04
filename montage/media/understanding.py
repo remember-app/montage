@@ -27,6 +27,7 @@ photographs. Hand Gemini the clip itself when the director turns out to need the
 
 import logging
 import pathlib
+import re
 import tempfile
 
 from psycopg.types.json import Jsonb
@@ -35,6 +36,8 @@ from montage import ai, ffmpeg, storage
 from montage.ai import answers
 
 FRAMES_PER_CLIP = 3  # spread across the clip, never at its edges — see `_frames`
+
+UUID = re.compile(r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}", re.IGNORECASE)
 
 log = logging.getLogger("montage.understanding")
 
@@ -94,14 +97,27 @@ def frame_comments(conn, media_ids):
     """Что участники воспоминания написали к кадрам: `{media_id: [текст, …]}`.
 
     Единственное место, откуда они возьмутся: и разбор кадров, и режиссёр читают комментарии через
-    неё, а не спрашивают базу каждый сам. Хранилища у комментариев ещё нет — его заведёт m-32
-    (doc-14) — и потому сегодня здесь пусто, что означает «пока никто ничего не написал», а не
-    «комментариев у кадра не бывает» (решение chief, 2026-10-03).
+    неё, а не спрашивают базу каждый сам. Хранилище — `frame_comments` (миграция 190): пишут
+    комментарии через api, воркер их только читает, и индекс `(media_id, created_at)` заведён
+    ровно под этот отбор — комментарии кадра по времени написания, старые раньше новых.
 
-    Пустой ответ — не ошибка и не повод придумывать: вызывающий код обязан быть готов к тому, что
-    у любого кадра комментариев нет, и не должен этим догадываться — список пуст сам по себе.
+    Кадра, которому ничего не написали, в ответе нет вовсе: пустой ответ — не ошибка и не повод
+    придумывать, вызывающий код обязан быть готов к тому, что у любого кадра комментариев нет, и не
+    должен этим догадываться — список пуст сам по себе.
+
+    Отбор идёт по uuid, как его держит `frame_comments`, и мимо индекса на то же самое не уйти: на
+    текстовом сравнении таблица читается вся. Поэтому id, которые uuid не есть, уходят в отсев
+    здесь, а не падают на приведении в самом запросе.
     """
-    return {}
+    said = {}
+    for media_id, body in conn.execute(
+        """SELECT media_id::text, body FROM frame_comments
+           WHERE media_id = ANY(%s::uuid[])
+           ORDER BY media_id, created_at""",
+        ([one for one in media_ids if UUID.fullmatch(one)],),
+    ):
+        said.setdefault(media_id, []).append(body)
+    return said
 
 
 def describe_missing(conn, media_ids):
