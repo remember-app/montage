@@ -306,6 +306,30 @@ def test_the_fields_the_model_answers_with_are_asked_for_and_kept(
     }, "поля сохранены вместе с описанием — второй ролик возьмёт их готовыми"
 
 
+def test_an_id_that_is_not_a_uuid_is_left_out_and_does_not_break_the_others(conn, memory):
+    """Отсев не-uuid в `frame_comments` держит одно: чужой id уходит в пустой ответ, а не роняет
+    этап. Стоит он ради `tests/test_director.py`, где вместо id заглушки вида «m-1», а не ради
+    боевой правды, — настоящие `media_items.id` рождает база, и они всегда uuid.
+
+    Поэтому в одном запросе стоят оба: настоящий id с написанным под ним и чужой. Настоящий
+    приходит со своими словами, чужого в ответе нет вовсе.
+
+    Проверка ловит не только снятый отсев (тогда запрос падает на `invalid input syntax for type
+    uuid`), но и отсев, испортивший всё подряд: пустой ответ на чужой id вышел бы и у функции,
+    которая не отдаёт ничего вообще, — поэтому здесь ещё и настоящий кадр со своим комментарием.
+    """
+    ours, _ = add_item(conn, memory, "photo", status="ready")
+    conn.execute(
+        """INSERT INTO frame_comments (media_id, memory_id, author_id, body)
+           VALUES (%s, %s, %s, 'Это бабушка, не Лиза')""",
+        (ours, memory[0], memory[1]),
+    )
+
+    assert understanding.frame_comments(conn, [ours, "m-1"]) == {ours: ["Это бабушка, не Лиза"]}, (
+        "свой кадр со своим комментарием, а чужой id — в ответе нет вовсе, и этап не упал"
+    )
+
+
 def test_the_analysis_stage_asks_about_a_frame_only_once(conn, s3, memory, tmp_path, model):
     """Главное обещание этапа анализа: кадр, описанный раньше, в нейросеть второй раз не уходит.
 
