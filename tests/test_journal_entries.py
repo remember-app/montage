@@ -13,6 +13,7 @@ import math
 import pathlib
 import uuid
 
+import pytest
 from psycopg.types.json import Jsonb
 
 from montage import journal, worker
@@ -21,7 +22,16 @@ from montage.video import selection, story
 
 from pieces import picture
 from recorded import planning_over
-from rows import add_item, entries_of, journal_ready, order, read_montage, ready_material, stages_of
+from rows import (
+    add_item,
+    entries_of,
+    journal_ready,
+    layout_of,
+    order,
+    read_montage,
+    ready_material,
+    stages_of,
+)
 
 
 def test_the_analysis_stage_tells_what_was_seen_and_who_was_in_frame(conn, memory):
@@ -493,6 +503,65 @@ def test_the_parts_of_the_story_are_the_parts_the_video_has():
             {"title": "Прощание", "from_seconds": 6.0, "to_seconds": 8.0},
         ]
     }
+
+
+def test_the_parts_of_a_directed_story_are_told_over_the_pieces_that_really_reach_the_video(
+    conn, s3, memory, tmp_path, monkeypatch
+):
+    """Режиссёр **и** дорожка с битами в одном прогоне — случай, где части разъезжаются с роликом.
+
+    Ни один тест этого не покрывал: в золотых снимках режиссёр идёт с пустым списком треков (ритм не
+    двигает ничего), а дорожка — без режиссёра, и частей тогда нет вовсе. Здесь обе половины
+    сходятся, и `rhythm.fit` двигает длины кусков — а с ними и все места в ролике. Части, названные
+    по кускам **до** подгонки, встали бы на секунды, которых в ролике нет: полоса под роликом и
+    склейки разошлись бы, и обе называли бы то, чего в видео не было.
+
+    Проверяется тем, что границы частей совпадают с раскладкой — настоящей, из `montage_frames` —
+    и что она отличается от того, что вышло бы без дорожки (иначе тест проходил бы, ничего не
+    проверяя).
+    """
+    journal_ready(conn)
+    ids = ready_material(conn, s3, memory, tmp_path)
+    for media_id, description in zip(ids[:3], ("накрывают на стол", "вносят торт", "собака")):
+        conn.execute(
+            """INSERT INTO media_understandings (media_id, memory_id, description, cast_labels)
+               VALUES (%s, %s, %s, %s)""",
+            (media_id, str(memory[0]), description, ["человек-1"]),
+        )
+    planning_over(monkeypatch, ids[:3], "gemini_plan_thoughts.json")
+    montage_id = order(
+        conn,
+        memory,
+        {
+            "target_seconds": 30,
+            "music_tracks": ["warm"],
+            "story_text": "день рождения, всё вокруг торта",
+        },
+    )
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+    assert read_montage(conn, montage_id)[0] == "ready"
+
+    parts = stages_of(conn, montage_id)["directing"]["outcome"]["parts"]
+    assert [one["title"] for one in parts] == ["Сборы", "Торт"], "части режиссёра на месте"
+
+    # Склейки этапа музыки и раскладка — по одним и тем же исправленным кускам, и обе сходятся с
+    # границами частей: это и есть «часть стоит там, где стоит её кусок».
+    stood = [start for _media, start, _seconds in layout_of(conn, montage_id)]
+    assert parts[0]["from_seconds"] == pytest.approx(0.0, abs=0.2)
+    assert parts[1]["from_seconds"] == pytest.approx(stood[1], abs=0.2), (
+        "часть стоит там, где стоит её первый кусок — по исправленным дорожкой"
+    )
+    assert parts[-1]["to_seconds"] == pytest.approx(
+        stood[-1] + layout_of(conn, montage_id)[-1][2], abs=0.3
+    ), "а последняя идёт до конца ролика"
+    assert stages_of(conn, montage_id)["music"]["outcome"]["cut_seconds"] == pytest.approx(
+        stood[1:], abs=0.2
+    ), "склейки и части — по одному проходу, разойтись им не на чем"
+    assert "bpm" in stages_of(conn, montage_id)["music"]["outcome"], (
+        "дорожка с темпом была — иначе подгонки не было и тест ничего бы не проверял"
+    )
 
 
 def test_each_part_of_the_story_is_told_what_is_heard_in_it(conn, memory):

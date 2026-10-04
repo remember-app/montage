@@ -215,7 +215,6 @@ def montage(conn, ref):
             # По файлу, а не по всей папке разом: этап идёт минутами, и «61 из 212» на экране
             # должно двигаться, пока он идёт.
             journal.progress(conn, ref, "prep", index + 1, **ready)
-        journal.finish(conn, ref, "prep", video_seconds=round(video_seconds, 1), **ready)
 
         # The floor again, now against what the download brought. The count above was of rows;
         # files drop out here for being unreadable or having no usable frame in them, and three
@@ -227,6 +226,11 @@ def montage(conn, ref):
         # line. Four good files with two of them struck out are two pieces, and a two-piece montage
         # against a minute-long order is exactly what the floor refuses. Everything else counts
         # equally: ни один оставленный кадр не выпадает из счёта за резкость или за свет.
+        #
+        # It is asked **before** the stage closes, not after: preparation is the stage that answers
+        # how many files are fit for a video, so a refusal named there is true — «Подготовка: годных
+        # кадров меньше трёх». Asked past `finish`, there is no stage running to name it on at all,
+        # and the reason falls on whichever one merely went before.
         survived = sum(piece.rejected is None and piece.media_id not in exclude for piece in pieces)
         if survived < MIN_ITEMS:
             return _give_up_for_good(
@@ -235,6 +239,7 @@ def montage(conn, ref):
                 "материал не годится для ролика: файлы не читаются или исключены",
                 "no_material",
             )
+        journal.finish(conn, ref, "prep", video_seconds=round(video_seconds, 1), **ready)
 
         # Разбор кадров — описание каждого, кто ещё не описан, и чтение всего, что уже есть. Кадр,
         # описанный раньше, в нейросеть повторно не уходит: `describe_missing` отдаёт его журналу
@@ -243,13 +248,11 @@ def montage(conn, ref):
         story.what_was_seen(conn, ref, pieces, earlier)
 
         # Музыка раньше режиссёра: под что собирают ролик — часть того, из чего он строит план.
+        # Дорожка нужна ему файлами уже здесь, а вот отказ по ней — не здесь: он принадлежит стадии
+        # музыки и назовётся там, где она идёт (ниже), — разбору кадров, который к дорожке не при
+        # чём, он его не получит.
         tracks, refusal = music.files(ordered_music, workdir)
-        if refusal:
-            # Свой трек не нашёлся в хранилище или не читается — на второй попытке будет то же
-            # самое, и на третьей. Идущего этапа в этот момент нет: `prep` и `analysis` уже
-            # кончились, а `music` ещё не начался, — и код ложится на первый незаконченный этап
-            # (`journal.failed`).
-            return _give_up_for_good(conn, ref, refusal, "track_unreadable")
+        tracks = tracks or ()
         track = assembly.one_track(tracks, workdir)
 
         # The director first, and the отбор whenever there is no director: no cloud model, nothing
@@ -296,9 +299,10 @@ def montage(conn, ref):
             story.choices(conn, ref, chosen, turned_down, pieces)
         else:
             story.plan(conn, ref, chosen, thoughts)
-        # Итог этапа — части истории с тем местом в ролике, где часть стоит (контракт api,
-        # «directing»). Счётчики «взял N / мимо N» воркер не пишет: их считает API по записям.
-        journal.finish(conn, ref, "directing", **story.parts(chosen, thoughts))
+        # Итог режиссёрского этапа без частей истории: части названы уже, но **где** часть стоит в
+        # ролике, известно только после подгонки кусков под биты и обрезки хвоста — а это работа
+        # следующего этапа. Они дописываются в его итог, оттуда же, где и посчитаны.
+        journal.finish(conn, ref, "directing")
 
         # Музыка: куски выбраны и стоят на своих местах, и всё, что здесь решается, — как долго
         # каждый из них держать, чтобы склейка легла на бит. Дорожки без темпа оставляет куски как
@@ -306,6 +310,11 @@ def montage(conn, ref):
         # списку треков разом, — а когда дорожки нет, куски держатся ровно так, как их выбрал
         # режиссёр.
         journal.start(conn, ref, "music", total=max(len(chosen) - 1, 0))
+        if refusal:
+            # Свой трек не нашёлся в хранилище или не читается — на второй попытке будет то же
+            # самое, и на третьей. Отказ на этом месте — музыки: её этап идёт вот сейчас, а её
+            # трек не открылся, и код причины ложится на неё.
+            return _give_up_for_good(conn, ref, refusal, "track_unreadable")
         moments = ()
         if track:
             moments = rhythm.beats(track)
@@ -314,6 +323,11 @@ def montage(conn, ref):
         # он один раз, после обоих: лишнее срезается с хвоста (`selection.cap`) — и до того, как
         # этап расскажет, где стоят склейки, иначе он назвал бы их там, где их в ролике нет.
         chosen = selection.cap(chosen)
+        # Части истории — по тем кускам, что действительно окажутся в ролике: подгонка под биты и
+        # обрезка хвоста только что поменяли их длины, а с длинами — и все места в ролике. Считать
+        # их по кускам, какими они были до этого, значило бы назвать секунды, которых в ролике нет;
+        # оттого и дописываются они в итог режиссёрского этапа отсюда, а не в его `finish`.
+        journal.appended(conn, ref, "directing", **story.parts(chosen, thoughts))
         # Что в каждой части истории слышно, — по одной записи на часть, без кадра и без решения.
         story.sound(conn, ref, chosen, thoughts, track)
         # Под что подогнаны куски: треки в том порядке, в каком они играют (id полки и ключи своих,
