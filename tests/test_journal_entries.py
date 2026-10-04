@@ -9,6 +9,7 @@ Warning: эти тесты чистят таблицу `jobs` той базы, �
 
 import dataclasses
 import datetime
+import json
 import math
 import pathlib
 import uuid
@@ -196,20 +197,33 @@ def test_a_moment_the_model_gave_unusably_is_left_out_rather_than_shown(conn, me
     assert written.details["moments"] == [{"seconds": 7, "text": "поднимают бокалы"}]
 
 
+def said(conn, memory, media_id, body, minutes=0):
+    """A `frame_comments` row as the api leaves it: somebody wrote this under a frame of ours.
+
+    `minutes` is how long ago they wrote it, and it is what the order of a frame's comments is read
+    off — not the order the rows went in, which is what a test would otherwise be checking.
+    """
+    conn.execute(
+        """INSERT INTO frame_comments (media_id, memory_id, author_id, body, created_at)
+           VALUES (%s, %s, %s, %s, now() - make_interval(mins => %s))""",
+        (media_id, memory[0], memory[1], body, minutes),
+    )
+
+
 def test_a_frames_speech_and_comments_come_from_their_own_tables(conn, memory):
     """Речь клипа — из `media_speech`, а не от модели: модель видит вырезанные кадры и звука не
     слышит, и спросить её, что слышно, значило бы выдумать это людям. Комментарии участников —
-    из своего места (`understanding.frame_comments`), а пока хранилища нет, их на карточке нет,
-    и пустое место читается как «пока никто ничего не написал», а не как ошибка (решение chief,
-    2026-10-03).
+    из своей таблицы (`frame_comments`), и на карточку едут те, что написали под **этим** кадром.
 
-    Клип без расшифровки и фотография — оба молчат: речи, которой не записано, на карточке нет.
+    Кадр, которому ничего не написали, поля `comments` не получает вовсе: пустое место читается
+    как «пока никто ничего не написал», а не как ошибка — и не как «у кадра не бывает комментариев».
     """
     journal_ready(conn)
     montage_id = order(conn, memory, {})
     clip, _ = add_item(conn, memory, "video", status="ready")
     photo, _ = add_item(conn, memory, "photo", status="ready")
-    for media_id, description in ((clip, "Тост"), (photo, "Стол")):
+    quiet, _ = add_item(conn, memory, "photo", status="ready")
+    for media_id, description in ((clip, "Тост"), (photo, "Стол"), (quiet, "Гости")):
         conn.execute(
             """INSERT INTO media_understandings (media_id, memory_id, description, cast_labels)
                VALUES (%s, %s, %s, %s)""",
@@ -219,9 +233,11 @@ def test_a_frames_speech_and_comments_come_from_their_own_tables(conn, memory):
         "INSERT INTO media_speech (media_id, transcript) VALUES (%s, %s)",
         (clip, "С днём рождения! " * 40),
     )
+    said(conn, memory, photo, "Лизу видно со спины", minutes=30)
+    said(conn, memory, photo, "Это бабушка, не Лиза", minutes=10)
 
-    journal.begin(conn, montage_id, 2, 60)
-    judged = [selection.Piece(media_id=clip), selection.Piece(media_id=photo)]
+    journal.begin(conn, montage_id, 3, 60)
+    judged = [selection.Piece(media_id=one) for one in (clip, photo, quiet)]
     story.what_was_seen(conn, montage_id, judged, set())
 
     written = {one.media_id: one.details for one in entries_of(conn, montage_id, "analysis")}
@@ -230,19 +246,67 @@ def test_a_frames_speech_and_comments_come_from_their_own_tables(conn, memory):
         and len(written[clip]["speech"]) == journal.DETAIL_CHARACTERS["speech"]
     ), "речь обрезана по своему потолку"
     assert "speech" not in written[photo], "у фотографии речи нет и говорить не о чем"
-    assert all("comments" not in fields for fields in written.values()), (
-        "пока m-32 не заведёт хранилище, комментариев ни у кого нет"
+    assert written[photo]["comments"] == ["Лизу видно со спины", "Это бабушка, не Лиза"], (
+        "что написали под этим кадром, по времени написания — старые раньше новых"
+    )
+    assert "comments" not in written[quiet], "под кем не написали — того и не на карточке"
+    assert "comments" not in written[clip], "и под клипом, которому тоже ничего не написали"
+
+
+def test_what_they_wrote_about_a_frame_reaches_the_director(conn, s3, memory, tmp_path, monkeypatch):
+    """Режиссёру комментарии участников уходят как их собственные слова о кадре: то, чего в самом
+    изображении нет и о чём модель спросить не могла (doc-14). Путь весь — от строки в
+    `frame_comments` до вопроса, — и нигде на нём шов не притворяется пустым."""
+    ids = ready_material(conn, s3, memory, tmp_path)
+    for media_id, description in zip(ids, ("накрывают на стол", "вносят торт", "собака под столом")):
+        conn.execute(
+            """INSERT INTO media_understandings (media_id, memory_id, description, cast_labels)
+               VALUES (%s, %s, %s, %s)""",
+            (media_id, str(memory[0]), description, ["человек-1"]),
+        )
+    said(conn, memory, ids[1], "Это бабушка, не Лиза", minutes=10)
+    said(conn, memory, ids[1], "Лизу видно со спины", minutes=30)
+    said(conn, memory, ids[2], "Собака под столом — не снимать", minutes=20)
+    asked_of = planning_over(monkeypatch, ids[:3], "gemini_plan_thoughts.json")
+    montage_id = order(
+        conn,
+        memory,
+        {"target_seconds": 30, "music_tracks": [], "story_text": "день рождения, всё вокруг торта"},
+    )
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+    assert read_montage(conn, montage_id)[0] == "ready"
+
+    question = json.loads(asked_of.sent.data)["input"][0]["text"]
+    assert '"comments"' in question, "у кадра с комментариями поле под них в вопросе есть"
+    assert "Это бабушка, не Лиза" in question and "Лизу видно со спины" in question, (
+        "оба комментария к этому кадру, и оба — в порядке, в каком их написали"
+    )
+    assert question.index("Лизу видно со спины") < question.index("Это бабушка, не Лиза")
+    assert "Собака под столом — не снимать" in question, "и комментарий к третьему кадру тоже"
+    assert question.count('"comments"') == 2, (
+        "а у первого кадра, под которым ничего не написали, поля нет — пустое место в вопросе не "
+        "загадывает модели, что это такое"
     )
 
 
-def test_the_one_place_comments_come_from_is_empty_and_breaks_nothing(conn, memory):
+def test_the_one_place_comments_come_from_reads_them_where_they_are(conn, memory):
     """`frame_comments` — единственное место, откуда берутся комментарии участников к кадру, и
-    сегодня оно пусто. Пусто здесь означает «пока никто ничего не написал»: вызывающий код обязан
-    быть готов к пустому ответу у любого кадра, а хранилище заведёт m-32 (doc-14).
-    """
-    media_ids = [add_item(conn, memory, "photo", status="ready")[0] for _ in range(2)]
+    читает оно их из `frame_comments` (миграция 190): кадру, которому написали, — его слова.
 
-    assert understanding.frame_comments(conn, media_ids) == {}
+    Кадру, которому не написали, в ответе нет вовсе, а не пустой список: вызывающий код сам
+    решает, что пустого списка на карточке не видно, и не должен этим догадываться.
+    """
+    loud, _ = add_item(conn, memory, "photo", status="ready")
+    quiet, _ = add_item(conn, memory, "photo", status="ready")
+    for body, minutes in (("Это бабушка, не Лиза", 20), ("Дед тоже тут", 5), ("Свечи", 40)):
+        said(conn, memory, loud, body, minutes=minutes)
+
+    assert understanding.frame_comments(conn, [loud, quiet]) == {
+        loud: ["Свечи", "Это бабушка, не Лиза", "Дед тоже тут"]
+    }, "старые раньше новых, а не в том порядке, в каком легли в базу"
+    assert understanding.frame_comments(conn, [quiet]) == {}, "у кого не написали — пусто"
     assert understanding.frame_comments(conn, []) == {}, "и на пустом заказе тоже"
 
 
