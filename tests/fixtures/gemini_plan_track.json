@@ -1,0 +1,25 @@
+{
+  "id": "interactions/45c48cce2e2d7fbd",
+  "model": "gemini-3.8-flash",
+  "steps": [
+    {
+      "type": "model_output",
+      "content": [
+        {
+          "type": "text",
+          "text": "{\"track\": \"night\", \"plan\": [{\"media_id\": \"m-1\", \"seconds\": 3.0}, {\"media_id\": \"m-2\", \"seconds\": 4.0}, {\"media_id\": \"m-3\", \"seconds\": 3.0}]}"
+        }
+      ]
+    }
+  ],
+  "output_text": "{\"track\": \"night\", \"plan\": [{\"media_id\": \"m-1\", \"seconds\": 3.0}, {\"media_id\": \"m-2\", \"seconds\": 4.0}, {\"media_id\": \"m-3\", \"seconds\": 3.0}]}",
+  "usage": {
+    "input_tokens_by_modality": [{"modality": "text", "tokens": 402}],
+    "total_cached_tokens": 0,
+    "total_input_tokens": 402,
+    "total_output_tokens": 124,
+    "total_thought_tokens": 96,
+    "total_tokens": 622,
+    "total_tool_use_tokens": 0
+  }
+}

@@ -9,6 +9,8 @@ import json
 import math
 import re
 
+from montage.video import library
+
 # Частей в ролике единицы, а `story_part` в журнале — `integer` с `CHECK (> 0)`: номер больше
 # этого — не номер части, и база отвергла бы с ним всю реплику.
 PARTS_LIMIT = 99
@@ -122,8 +124,8 @@ def counted(number):
 # «куда смотрит» приложение нарисует поверх кадра. Поэтому план разбирается здесь, у самой двери, и
 # выше уходит только то, что выдержало чтение: шаг без куска — не шаг, длина и начало отрезка не
 # конечным числом, часть не номером и рамка не четырьмя долями внутри кадра — их просто нет, а
-# звук, названный не так, — музыка. Чей кусок назван, здесь не проверить: что показали модели,
-# знает `director`, он и сверяет.
+# звук, названный не так, — музыка, трек не с полки — умолчание. Чей кусок назван, здесь не
+# проверить: что показали модели, знает `director`, он и сверяет.
 
 
 def planned(answered):
@@ -148,6 +150,7 @@ def planned(answered):
         "overview": said(answered.get("overview")),
         "plan": [step for step in steps if step],
         "left_out": left_out,
+        "track": track(answered.get("track")),
     }
 
 
@@ -213,6 +216,16 @@ def _live(audio, level):
         level = number(level)
         return 0.5 if level is None else min(max(level, 0.0), 1.0)
     return 0.0
+
+
+def track(value):
+    """Трек, названный режиссёром из полки, — id полки, иначе «тёплая» по умолчанию.
+
+    Полка закрыта (`library.TRACKS`): файл названного трека достаёт воркер, и трека вне полки у
+    него нет. Трека в ответе нет, назван он не строкой или такого трека на полке нет — умолчание,
+    а не падение: без музыки ролик не собирается, и выдумка модели стоит одной подстановки.
+    """
+    return value if isinstance(value, str) and value in library.TRACKS else library.DEFAULT_TRACK
 
 
 def _part(number):

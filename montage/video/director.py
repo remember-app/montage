@@ -7,13 +7,14 @@ what is said in every clip (`speech.py`), and it is given the organizer's own st
 frames left out by hand and the length that was ordered. What comes back is an order, a length per
 piece — out of a clip, the stretch of it, and as many stretches of one clip as the film wants —
 what each piece is heard with (the music, its own sound or the two mixed) and a note on what each is
-there for.
+there for. When the order leaves the track to it (`music_director`, `direct`), the library to choose
+from goes in with the rest and one of its ids comes back beside the plan.
 
 The pieces it hands back are `assembly`'s to lay down, exactly as `selection.choose`'s are — nothing
-downstream knows which of the two cut the video. And `(None, ())` is an answer here: no cloud model
-configured, nothing described yet, or a plan with nothing of ours in it. On it the montage is cut
-the way every montage in production is cut today (`selection.choose`), which is the whole state of
-the worker while there is no key (decision-10).
+downstream knows which of the two cut the video. And `(None, (), None)` is an answer here: no cloud
+model configured, nothing described yet, or a plan with nothing of ours in it. On it the montage is
+cut the way every montage in production is cut today (`selection.choose`), which is the whole state
+of the worker while there is no key (decision-10).
 
 Рядом с кусками едут слова, которыми режиссёр объяснил сам себя: мысль о плане в целом и по записи
 на каждый показанный ему кадр — мысль, часть истории, рамка «куда смотрит», решение и причина, если
@@ -53,9 +54,19 @@ SPEECH_CHARACTERS = 400
 log = logging.getLogger("montage.director")
 
 
-def direct(conn, pieces, target_seconds, exclude=(), story="", ref=None, brain=None, music=()):
-    """The film the model plans out of these pieces and what it said while planning it — or
-    `(None, ())`, and then nobody directed anything.
+def direct(
+    conn,
+    pieces,
+    target_seconds,
+    exclude=(),
+    story="",
+    ref=None,
+    brain=None,
+    music=(),
+    choose_music=False,
+):
+    """The film the model plans out of these pieces, what it said while planning it, and the track
+    it chose — or `(None, (), None)`, and then nobody directed anything.
 
     `pieces` are prepared (`selection.judge`), `exclude` is the organizer's own list of media ids
     from the order and `story` is what they said the video is about. `music` is what will play under
@@ -63,6 +74,13 @@ def direct(conn, pieces, target_seconds, exclude=(), story="", ref=None, brain=N
     wished something of, that wish in their own words (`music.heard`); the soundtrack itself is
     assembled from the order's list either way, so it is here to be read and not to be obeyed.
     `brain` is for the tests; the worker takes the gateway the environment gives it.
+
+    `choose_music` — the order left the track to the director: there is no soundtrack yet, so
+    `music` is the library to choose from (`music.shelf`) and the model names one of its tracks in
+    the answer. That name comes back third, already read against the library
+    (`answers.track`), and it is the model's whether or not the plan it came with was usable: the
+    music was ordered of the director, not of the algorithm. Without the flag the third value is
+    None and the order's own list plays.
 
     Слова режиссёра — вторым, готовыми полями журнала (`journal.COLUMNS`), порядком плана: первой
     мысль о плане в целом, за ней по записи на каждый кусок плана — у видео их бывает несколько, —
@@ -74,7 +92,7 @@ def direct(conn, pieces, target_seconds, exclude=(), story="", ref=None, brain=N
         # Today's state, and the one thing that must not change because of this module: with nobody
         # to ask, the montage is the montage it has always been.
         log.info("no cloud model: montage %s is cut by the worker's own choosing", ref)
-        return None, ()
+        return None, (), None
 
     # Порядок вопроса — наш: спрашивается тот же материал и в том же порядке, в каком читается
     # воспоминание. Режиссёру показывается всё, что осталось после заказа, серия одинаковых кадров
@@ -90,7 +108,7 @@ def direct(conn, pieces, target_seconds, exclude=(), story="", ref=None, brain=N
             "own choosing",
             ref,
         )
-        return None, ()
+        return None, (), None
 
     planned = (
         brain.plan_montage(
@@ -99,10 +117,14 @@ def direct(conn, pieces, target_seconds, exclude=(), story="", ref=None, brain=N
             target_seconds=target_seconds,
             music=music,
             ref=ref,
+            choose_music=choose_music,
         )
         or {}
     )
     log.info("montage %s: the director's plan is %s", ref, planned)
+    # Трек, названный режиссёром, — уже проверенный по полке (`answers.track`): незнакомый или
+    # неназванный стал «тёплой». Отбор его не отменяет: музыка заказана режиссёру, а не алгоритму.
+    chosen_track = planned.get("track") if choose_music else None
 
     # Кусок плана — вместе со словами режиссёра о нём: одно видео может стоять в плане несколькими
     # отрезками, и «беру» или «мимо» решается о каждом отрезке, а не о файле.
@@ -184,14 +206,14 @@ def direct(conn, pieces, target_seconds, exclude=(), story="", ref=None, brain=N
             "worker's own choosing instead",
             ref,
         )
-        return None, ()
+        return None, (), chosen_track
     log.info(
         "montage %s is cut to a plan of %s piece(s), %.1fs",
         ref,
         len(fitted),
         assembly.length_of(fitted),
     )
-    return fitted, thoughts
+    return fitted, thoughts, chosen_track
 
 
 def _material(pieces, exclude):

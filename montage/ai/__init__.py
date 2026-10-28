@@ -93,7 +93,9 @@ class AI:
             lambda provider: provider.transcribe(audio, least_thinking=True),
         )
 
-    def plan_montage(self, shots, story="", target_seconds=None, music=(), ref=None):
+    def plan_montage(
+        self, shots, story="", target_seconds=None, music=(), ref=None, choose_music=False
+    ):
         """The order of the film: which piece, for how long, and what it is there for.
 
         `shots` is what may go into the montage, one dict per piece — `media_id` and whatever is
@@ -107,12 +109,18 @@ class AI:
         the order's list whatever comes back: it is the model's to plan the picture against, not to
         change (doc-03).
 
+        `choose_music` — the order left the track to the director (`params.music_director`): there
+        is no soundtrack yet, so `music` is the library to choose from (the id and the length of
+        each track, `music.shelf`) and the answer names one in `track`. It is read with the rest of
+        the plan (`answers.track`), against the same library and with the same fallback.
+
         Returns the plan as it can be read (`answers.planned`) or None:
 
             {"overview": "...",
              "plan": [{"media_id", "start", "seconds", "live", "thought", "part",
                        "part_title", "focus"}],
-             "left_out": {media_id: "почему не взял"}}
+             "left_out": {media_id: "почему не взял"},
+             "track": "id трека полки"}
 
         The answer itself is kept whole in `ai_requests`; what comes back here is what survived
         being read — the model's own words about the film, and nothing it made up.
@@ -123,6 +131,9 @@ class AI:
                 "target_seconds": target_seconds,
                 "music": list(music),
                 "shots": list(shots),
+                # Только когда музыка и вправду на выборе: обычный заказ это поле не платит и не
+                # читает (промпт оплачивается словом).
+                **({"choose_music": True} if choose_music else {}),
             },
             ensure_ascii=False,
         )

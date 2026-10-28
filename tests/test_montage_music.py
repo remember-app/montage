@@ -5,6 +5,7 @@
 
 import dataclasses
 import json
+import logging
 import uuid
 
 import pytest
@@ -26,7 +27,17 @@ from material import (
     unopenable,
     video,
 )
-from rows import add_item, api_params, fetch, layout_of, order, read_montage, ready_material
+from recorded import planning_over
+from rows import (
+    add_item,
+    api_params,
+    fetch,
+    layout_of,
+    order,
+    read_montage,
+    ready_material,
+    stages_of,
+)
 
 
 def pulled_to_the_beat(layout, beats, own_lengths):
@@ -242,6 +253,76 @@ def test_a_montage_under_a_list_of_tracks_is_cut_to_the_beat_of_the_whole_soundt
     assert about(duration, 9.0), "подгонка под биты изменила длину ролика"
 
 
+def test_a_montage_whose_track_the_director_chose_is_cut_to_that_tracks_beats(
+    conn, s3, memory, tmp_path, monkeypatch
+):
+    """Заказ отдал выбор трека режиссёру (`music_director`): списка треков в нём нет вовсе, и
+    дорожка собирается не до вопроса, а после ответа. Режиссёр назвал «Ночь» — под неё ролик и
+    собран: в сборку ушёл её файл, а склейки легли на её биты. Темп в итоге этапа — темп «Ночи», а
+    не «Тёплой» по умолчанию: подгоняли под названный трек, а не под умолчание.
+    """
+    ids = ready_material(conn, s3, memory, tmp_path)
+    for media_id, description in zip(ids, ("накрывают на стол", "вносят торт", "все за столом")):
+        conn.execute(
+            """INSERT INTO media_understandings (media_id, memory_id, description, cast_labels)
+               VALUES (%s, %s, %s, %s)""",
+            (media_id, str(memory[0]), description, ["человек-1"]),
+        )
+    planning_over(monkeypatch, ids[:3], "gemini_plan_track.json")
+    montage_id = order(conn, memory, {"target_seconds": 30, "music_director": True})
+    played = []
+    assembling = assembly.assemble
+
+    def watched(pieces, orientation, track, *rest, **kwargs):
+        played.append(track)
+        return assembling(pieces, orientation, track, *rest, **kwargs)
+
+    monkeypatch.setattr(assembly, "assemble", watched)
+    worker.enqueue(conn, "montage", montage_id)
+
+    assert worker.run_once(conn) is True
+
+    status, _, duration, error_text = read_montage(conn, montage_id)
+    assert (status, error_text) == ("ready", None)
+    assert played == [library.track_file("night")], "в сборку ушёл не тот трек, что назвал режиссёр"
+    outcome = stages_of(conn, montage_id)["music"]["outcome"]
+    assert outcome["tracks"] == ["night"], "итог музыки называет трек, который реально играл"
+    beats = rhythm.beats(library.track_file("night"))
+    assert outcome["bpm"] == rhythm.tempo(beats)
+    default_bpm = rhythm.tempo(rhythm.beats(library.track_file(library.DEFAULT_TRACK)))
+    assert outcome["bpm"] != default_bpm, "темп как у «Тёплой» — значит, подгоняли не под «Ночь»"
+    for _, start, _ in layout_of(conn, montage_id)[1:]:
+        join = start + assembly.CROSSFADE_SECONDS / 2
+        assert min(abs(join - beat) for beat in beats) < 0.1, f"склейка на {join:.2f} не на бите"
+    assert about(duration, 9.0), "ролик вышел длиной плана — три, четыре и три секунды"
+
+
+def test_an_order_that_left_the_track_to_the_director_plays_the_default_when_there_is_no_model(
+    conn, s3, memory, tmp_path, caplog
+):
+    """Модели нет (сегодняшнее состояние, decision-10): выбрать трек некому, играет «тёплая», и в
+    журнале видно, что модель не спрашивалась, — это не выбор, спрятанный под именем умолчания."""
+    montage_id = order(conn, memory, {"target_seconds": 30, "music_director": True})
+    ready_material(conn, s3, memory, tmp_path)
+    worker.enqueue(conn, "montage", montage_id)
+
+    with caplog.at_level(logging.INFO):
+        assert worker.run_once(conn) is True
+
+    status, _, _, error_text = read_montage(conn, montage_id)
+    assert (status, error_text) == ("ready", None)
+    assert stages_of(conn, montage_id)["music"]["outcome"]["tracks"] == [library.DEFAULT_TRACK]
+    assert "no model named a track" in caplog.text, "в журнале не видно, что выбирал не режиссёр"
+    assert "no cloud model" in caplog.text, "и что ролик резал отбор"
+    assert (
+        conn.execute(
+            "SELECT count(*) FROM ai_requests WHERE operation = 'plan_montage' AND ref = %s",
+            (montage_id,),
+        ).fetchone()[0]
+        == 0
+    ), "и что модель не спрашивали"
+
+
 @pytest.mark.parametrize(
     "seconds", [3.0, 40.0], ids=["shorter than the video", "longer than the video"]
 )
@@ -448,6 +529,28 @@ def test_what_the_order_says_about_music_is_read_the_old_way_too():
     ), "список отдаётся как заказан: дубли не сливаются и порядок не меняется"
     named, refusal = music.ordered({"music_track_id": "polka"})
     assert named is None and "polka" in refusal
+
+    # Флаг `music_director` — «выбирает режиссёр», и он читается первым и сильнее списка. Заказа с
+    # обоими api не пропускает (TASK-549), но воркер читает и такой: флагом.
+    assert music.ordered({"music_director": True}) == (music.BY_DIRECTOR, None)
+    assert music.ordered({"music_director": True, "music_tracks": ["warm"]}) == (
+        music.BY_DIRECTOR,
+        None,
+    )
+    assert music.ordered({"music_director": False, "music_tracks": ["warm"]}) == (["warm"], None)
+    assert music.ordered({"music_director": False}) == ([library.DEFAULT_TRACK], None), (
+        "без флага и без списка — заказ старой формы, как и был"
+    )
+
+
+def test_the_shelf_the_director_chooses_from_is_the_whole_library():
+    """Полка, когда трек выбирает режиссёр: id и длительность каждого трека `library.TRACKS`, по
+    порядку и той же формы, что дорожка заказа, — ни файлов, ни пожеланий, которых у полки нет."""
+    shelf = music.shelf()
+
+    assert [one["track"] for one in shelf] == list(library.TRACKS)
+    assert all(set(one) == {"track", "seconds"} for one in shelf), "в полке только id и длина"
+    assert all(one["seconds"] > 30 for one in shelf), "длины настоящие, а не нули"
 
 
 # Что организатор может написать у трека: буквы разных письменностей, эмодзи, перевод строки,
