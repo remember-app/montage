@@ -263,12 +263,16 @@ def test_a_frames_speech_and_comments_come_from_their_own_tables(conn, memory):
     assert "comments" not in written[clip], "и под клипом, которому тоже ничего не написали"
 
 
-def test_what_they_wrote_about_a_frame_reaches_the_director(conn, s3, memory, tmp_path, monkeypatch):
+def test_what_they_wrote_about_a_frame_reaches_the_director(
+    conn, s3, memory, tmp_path, monkeypatch
+):
     """Режиссёру комментарии участников уходят как их собственные слова о кадре: то, чего в самом
     изображении нет и о чём модель спросить не могла (doc-14). Путь весь — от строки в
     `frame_comments` до вопроса, — и нигде на нём шов не притворяется пустым."""
     ids = ready_material(conn, s3, memory, tmp_path)
-    for media_id, description in zip(ids, ("накрывают на стол", "вносят торт", "собака под столом")):
+    for media_id, description in zip(
+        ids, ("накрывают на стол", "вносят торт", "собака под столом")
+    ):
         conn.execute(
             """INSERT INTO media_understandings (media_id, memory_id, description, cast_labels)
                VALUES (%s, %s, %s, %s)""",
@@ -644,14 +648,34 @@ def test_each_part_of_the_story_is_told_what_is_heard_in_it(conn, memory):
     ]
     thoughts = [
         {"thought": "Две части."},
-        {"media_id": "a", "decision": "take", "story_part": 1, "story_part_title": "Клятвы",
-         "thought": "Клятвы читают вслух"},
-        {"media_id": "b", "decision": "take", "story_part": 2, "story_part_title": "Тосты",
-         "thought": "Поднимают бокалы"},
-        {"media_id": "c", "decision": "skip", "reason": selection.LEFT_OUT, "story_part": 3,
-         "story_part_title": "Салют"},
-        {"media_id": "d", "decision": "take", "story_part": 3, "story_part_title": "Салют",
-         "thought": "Салют во дворе"},
+        {
+            "media_id": "a",
+            "decision": "take",
+            "story_part": 1,
+            "story_part_title": "Клятвы",
+            "thought": "Клятвы читают вслух",
+        },
+        {
+            "media_id": "b",
+            "decision": "take",
+            "story_part": 2,
+            "story_part_title": "Тосты",
+            "thought": "Поднимают бокалы",
+        },
+        {
+            "media_id": "c",
+            "decision": "skip",
+            "reason": selection.LEFT_OUT,
+            "story_part": 3,
+            "story_part_title": "Салют",
+        },
+        {
+            "media_id": "d",
+            "decision": "take",
+            "story_part": 3,
+            "story_part_title": "Салют",
+            "thought": "Салют во дворе",
+        },
     ]
 
     story.sound(conn, montage_id, pieces, thoughts, pathlib.Path("track.mp3"))
@@ -673,8 +697,13 @@ def test_a_part_without_a_track_is_heard_whole(conn, memory):
     montage_id = order(conn, memory, {})
     pieces = [selection.Piece(media_id="a", seconds=3.0, live=1.0)]
     thoughts = [
-        {"media_id": "a", "decision": "take", "story_part": 1, "story_part_title": "Тост",
-         "thought": "Тост слышно целиком"}
+        {
+            "media_id": "a",
+            "decision": "take",
+            "story_part": 1,
+            "story_part_title": "Тост",
+            "thought": "Тост слышно целиком",
+        }
     ]
 
     story.sound(conn, montage_id, pieces, thoughts, None)
