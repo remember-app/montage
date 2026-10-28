@@ -6,7 +6,8 @@ what shot — and, at a clip, how the camera moves and which moments are worth h
 lands in `media_understandings` under the item's id, as one sentence plus those fields, and is read
 from there ever after — by the montage's analysis stage and by the director, and by the second
 montage out of the same memory, which is why nobody pays to describe a frame twice (doc-03, «Второй
-ролик из тех же медиа не описывает заново уже описанные кадры»).
+ролик из тех же медиа не описывает заново уже описанные кадры»). The first stage of an order is
+the only thing that starts it: an upload describes nothing (m-43, decision-22).
 
 Who is who across a memory is the model's own doing and not a face database of ours (decision-9):
 every call carries the cast this memory has already named — «человек-1», «животное-1» — and the
@@ -45,8 +46,8 @@ log = logging.getLogger("montage.understanding")
 def media_understanding(conn, ref):
     """One ready media item described and the description kept — or nothing asked of anybody."""
     if conn.execute("SELECT 1 FROM media_understandings WHERE media_id = %s", (ref,)).fetchone():
-        # The whole point of keeping them: a second montage out of the same memory, and the hourly
-        # sweep, both come back here on frames that were described weeks ago.
+        # The whole point of keeping them: a second montage out of the same memory comes back here
+        # on frames that were described weeks ago.
         log.info("media item %s is described already, not asking again", ref)
         return
 

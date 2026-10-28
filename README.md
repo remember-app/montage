@@ -5,10 +5,11 @@
 вставить строку в `jobs` (это делает API).
 
 Сейчас он умеет семь вещей: делать превью загруженного медиа (`media_preview`), читать из оригинала
-размер кадра, камеру и место съёмки (`media_frame_info`), считать по нему предложение
-автоматического отсева (`media_screening`), разбирать, что на кадре и кто на нём
-(`media_understanding`), расшифровывать речь в видео (`media_speech`), собирать ролик из материала
-воспоминания (`montage`) и раз в час подчищать оборванные загрузки.
+размер кадра, камеру и место съёмки (`media_frame_info`), считать по воспоминанию предложение
+автоматического отсева (`media_analysis`) — по нажатию «Analyze» или заказом ролика, не при
+загрузке, — разбирать, что на кадре и кто на нём (`media_understanding`), расшифровывать речь в
+видео (`media_speech`), собирать ролик из материала воспоминания (`montage`) и раз в час подчищать
+оборванные загрузки.
 
 ```sh
 python -m montage run     # цикл разбора очереди; остальные команды — docs/running.md
@@ -44,7 +45,7 @@ docs/             как это поднять, что обещает кажда
 
 - [docs/jobs/preview.md](docs/jobs/preview.md) — `media_preview`
 - [docs/jobs/frame-info.md](docs/jobs/frame-info.md) — `media_frame_info`
-- [docs/jobs/screening.md](docs/jobs/screening.md) — `media_screening`
+- [docs/jobs/analysis.md](docs/jobs/analysis.md) — `media_analysis` (и одиночный `media_screening`)
 - [docs/jobs/understanding.md](docs/jobs/understanding.md) — `media_understanding`
 - [docs/jobs/speech.md](docs/jobs/speech.md) — `media_speech`
 - [docs/jobs/montage.md](docs/jobs/montage.md) — `montage`

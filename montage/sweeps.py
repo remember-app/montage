@@ -4,10 +4,11 @@ Every sweep runs off the worker's own loop, at start-up and then once an hour. T
 and they answer to the same rule — do the least that brings the tables back to what they should
 say, and never pile work on something already on its way:
 
-    the catch-ups — ready material with no preview, no size, no screening proposal, nothing the
-    cloud model was ever asked about. Everything taken in before the worker learned to do a thing
-    is like this, and nothing else will ever come for it: the api queues a job at upload and the
-    upload is long over.
+    the catch-ups — ready material with no preview, or no size and camera. Everything taken in
+    before the worker learned to do a thing is like this, and nothing else will ever come for it:
+    the api queues a job at upload and the upload is long over. Only what is read without a model
+    and without a decision of a person's: the отсев and everything a cloud model answers are asked
+    for by «Analyze» or by an order (`docs/jobs/analysis.md`), never by the hour.
 
     the uploads nobody finished — a multipart started a day ago and abandoned, which costs the
     bucket until somebody aborts it.
@@ -18,7 +19,7 @@ say, and never pile work on something already on its way:
 
 import logging
 
-from montage import ai, storage
+from montage import storage
 from montage.media import screening
 
 STALE_UPLOAD_HOURS = 24  # a day in `pending_upload` means the phone is not coming back
@@ -106,32 +107,6 @@ def sweep_media_without_frame_info(conn):
     return queued
 
 
-def sweep_media_without_screening(conn):
-    """Ready material the отсев has not looked at yet, given the job that looks.
-
-    Everything taken in before the worker learned to screen is like this: the proposal is queued the
-    moment an item goes `ready` (`preview.media_preview`), and for old material that moment is long
-    past. Until the job has run both columns are `null` — «не посчитано», which the gallery shows as
-    no opinion at all rather than as a frame the analysis kept.
-
-    So is a frame kept before the job learned to tell retakes apart: it has a verdict and no frame
-    to compare (`media_frames`), and the memory's series are counted without it until it is looked
-    at once more. A kept file always leaves its frame behind, so it is asked about only the once.
-    """
-    queued = _catch_up(
-        conn,
-        "media_screening",
-        """(item.screening_rejected IS NULL
-            OR (item.screening_rejected = false AND NOT EXISTS (
-              SELECT 1 FROM media_frames seen WHERE seen.media_id = item.id::text)))""",
-    )
-    if queued:
-        log.info(
-            "queued a screening for %s ready item(s) with no proposal or no frame kept", queued
-        )
-    return queued
-
-
 def sweep_media_duplicates(conn):
     """Every memory's series counted again over its material as it stands now.
 
@@ -139,8 +114,9 @@ def sweep_media_duplicates(conn):
     its neighbours* (`screening._duplicates`), and a neighbour can change without a single new file
     arriving: the organizer hides a frame or deletes one (`frame.ts`, `gallery.ts`), or corrects the
     date it was shot on, and any of the three moves the series every other frame of that memory
-    stands in. None of them queues a job — they are the api's, and it queues only `media_preview`
-    at upload and `montage` at the order — so without this sweep a «Дубль» would stand until the
+    stands in. None of them queues a job — they are the api's, and it queues `media_preview` at
+    upload, `media_analysis` on «Analyze» and `montage` at the order — so without this sweep a
+    «Дубль» would stand until the
     next upload into that same memory, and one that never comes would stand for good.
 
     Counted from scratch by the same `_duplicates` a screened file runs, over the same material, so
@@ -163,51 +139,6 @@ def sweep_media_duplicates(conn):
     if memories:
         log.info("counted the retakes again over %s memories", len(memories))
     return len(memories)
-
-
-def sweep_media_without_ai_answers(conn):
-    """Ready media the cloud model was never asked about: frames with no description, clips with no
-    transcript.
-
-    Both jobs are queued at the end of `preview.media_preview` and both are lost the same way. One:
-    the item became ready while there was no key at all — the job then stored nothing and left the
-    item as it was. Two, and this is the one that bites: the model refused. An account over its free
-    limit answers «429» to every call, three attempts go in a minute and the job is `failed` for
-    good — and nothing ever comes back for that frame, because ordering a video does not describe
-    anything, it only reads what is already in the tables (doc-03). A memory then holds a hundred
-    failed descriptions and an AI montage that will never turn on, however often it is re-ordered —
-    which is a thing that has happened here, on a free tier. This sweep is what comes back.
-
-    Hence the first line — with no model configured there is simply nothing to do, and without it
-    the whole library would be queued every hour for every job of it to answer «nobody to ask». The
-    two are asked in one sweep so that a worker without a key says so once an hour and not twice.
-
-    ponytail: the whole library at once, in one insert each. A cap per sweep is the knob to add when
-    a real key makes a first sweep over a year of memories a bill rather than a queue.
-    """
-    if ai.from_env() is None:
-        return 0
-    # A description is made out of the copies `media_preview` left, never the original — a frame
-    # whose large copy is not made yet is `sweep_photos_without_previews`'s first.
-    described = _catch_up(
-        conn,
-        "media_understanding",
-        """item.preview_key IS NOT NULL AND NOT EXISTS (
-             SELECT 1 FROM media_understandings seen WHERE seen.media_id = item.id::text)""",
-    )
-    if described:
-        log.info("queued a description for %s media item(s) that had none", described)
-    # Speech is a clip's alone, and an empty row is an answer (`speech.py`): a silent clip has one
-    # and is not asked about again.
-    transcribed = _catch_up(
-        conn,
-        "media_speech",
-        """item.kind = 'video' AND NOT EXISTS (
-             SELECT 1 FROM media_speech said WHERE said.media_id = item.id::text)""",
-    )
-    if transcribed:
-        log.info("queued a transcript for %s clip(s) that had none", transcribed)
-    return described + transcribed
 
 
 def sweep_stale_uploads(conn):
@@ -263,7 +194,5 @@ SWEEPS = (
     sweep_stale_uploads,
     sweep_photos_without_previews,
     sweep_media_without_frame_info,
-    sweep_media_without_screening,
     sweep_media_duplicates,
-    sweep_media_without_ai_answers,
 )

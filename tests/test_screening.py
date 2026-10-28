@@ -14,6 +14,7 @@ import datetime
 
 from montage import storage, sweeps, worker
 from montage.media import screening
+from montage.video import montage as montages
 from montage.video import selection
 
 from material import draw, jpeg, video
@@ -106,31 +107,66 @@ def proposals(conn, memory):
     }
 
 
-def only_screening_jobs_for(conn, item_id):
-    """Whatever else this database holds is not this test's business — the sweep is over the whole
-    table, and a dev stand's own material would otherwise be queued into the run."""
-    conn.execute("DELETE FROM jobs WHERE ref IS DISTINCT FROM %s", (item_id,))
-    return conn.execute(
-        "SELECT count(*) FROM jobs WHERE type = 'media_screening' AND ref = %s", (item_id,)
-    ).fetchone()[0]
+def test_the_analysis_job_screens_the_whole_memory_in_one_pass(conn, s3, memory, tmp_path):
+    """«Analyze» is one job for the memory, not one per frame (m-43): every ready visible item is
+    judged and the series are counted once over all of them. The softer shot of the cake is marked
+    a duplicate by the same pass that judged it — the answer a per-file recount would also reach,
+    but the recount itself happens once (the next test pins that)."""
+    sharp, soft, other = shots(tmp_path)
+    first = shot(conn, s3, memory, sharp, 0)
+    retake = shot(conn, s3, memory, soft, 10)
+    guests = shot(conn, s3, memory, other, 4)
+
+    worker.enqueue(conn, "media_analysis", str(memory[0]))
+    assert worker.run_once(conn) is True
+
+    assert screening_of(conn, first) == (False, None)
+    assert screening_of(conn, retake) == (True, selection.DUPLICATE)
+    assert screening_of(conn, guests) == (False, None)
 
 
-def test_a_photo_that_becomes_ready_gets_a_proposal_with_nobody_ordering_a_video(
-    conn, s3, memory, tmp_path
+def test_the_analysis_counts_the_series_once_for_the_whole_memory(
+    conn, s3, memory, tmp_path, monkeypatch
 ):
-    """The whole point of the job: the organizer opens the gallery and the analysis has already had
-    its say, though no video has been ordered and none may ever be."""
-    item_id, key = add_item(conn, memory, "photo")
-    s3.upload_file(str(jpeg(tmp_path / "original.jpg")), storage.client().bucket, key)
-    worker.enqueue(conn, "media_preview", item_id)
+    """The recount is not run per file — that would be one pass over the memory per frame. Three
+    files are judged and the series are counted exactly once at the end."""
+    counted = []
+    real = screening._duplicates
 
-    assert worker.run_once(conn) is True, "the preview, which hands the item on"
-    assert screening_of(conn, item_id) == (None, None), "nothing is said before the job has run"
-    assert worker.run_once(conn) is True, "and the proposal it queued"
+    def count(conn, memory_id):
+        counted.append(str(memory_id))
+        return real(conn, memory_id)
 
-    # Looked at and kept: `false` and not `null`, which is what tells the gallery the difference
-    # between a frame the analysis approved and one it has not reached yet.
-    assert screening_of(conn, item_id) == (False, None)
+    monkeypatch.setattr(screening, "_duplicates", count)
+    sharp, soft, other = shots(tmp_path)
+    for path, at in ((sharp, 0), (soft, 10), (other, 4)):
+        shot(conn, s3, memory, path, at)
+
+    worker.enqueue(conn, "media_analysis", str(memory[0]))
+    assert worker.run_once(conn) is True
+
+    assert counted == [str(memory[0])], "one recount for the memory, not one per file"
+
+
+def test_an_analysis_asked_for_again_reads_nothing_and_rewrites_nothing(conn, s3, memory, tmp_path):
+    """Idempotent: once every file has its verdict, another «Analyze» fetches and decodes nothing.
+    The originals are gone from the bucket, and it still finishes cleanly — nothing is read that
+    was already read, and not one row is rewritten."""
+    sharp, soft, other = shots(tmp_path)
+    for path, at in ((sharp, 0), (soft, 10), (other, 4)):
+        shot(conn, s3, memory, path, at)
+
+    worker.enqueue(conn, "media_analysis", str(memory[0]))
+    assert worker.run_once(conn) is True
+    written = proposals(conn, memory)
+
+    for item_id in written:
+        s3.delete_object(Bucket=storage.client().bucket, Key=f"originals/{item_id}")
+
+    job_id = worker.enqueue(conn, "media_analysis", str(memory[0]))
+    assert worker.run_once(conn) is True
+    assert conn.execute("SELECT status FROM jobs WHERE id = %s", (job_id,)).fetchone()[0] == "done"
+    assert proposals(conn, memory) == written, "nothing re-judged, not one row rewritten"
 
 
 def test_a_frame_the_analysis_throws_out_says_why(conn, s3, memory, tmp_path):
@@ -233,50 +269,38 @@ def test_a_file_that_does_not_read_is_a_proposal_too(conn, s3, memory, tmp_path)
     assert read_item(conn, item_id)[0] == "ready"
 
 
-def test_the_sweep_catches_up_material_from_before_the_screening(conn, s3, memory, tmp_path):
-    """Material that went `ready` before this job existed: nothing else will ever come for it, and
-    the original is still in the bucket, so it costs the member nothing."""
+def test_an_order_gets_the_screening_nobody_asked_for(conn, s3, memory, tmp_path):
+    """An order without «Analyze» must pass: the montage's analysis stage screens the material
+    itself, so the frame has a verdict although nobody pressed the button."""
+    item_id, key = add_item(conn, memory, "photo", status="ready")
+    s3.upload_file(str(jpeg(tmp_path / "original.jpg")), storage.client().bucket, key)
+    assert screening_of(conn, item_id) == (None, None)
+
+    montages.analysis(conn, str(memory[0]), [selection.Piece(media_id=item_id, kind="photo")])
+
+    assert screening_of(conn, item_id) == (False, None)
+    assert (
+        conn.execute(
+            "SELECT count(*) FROM media_frames WHERE media_id = %s", (item_id,)
+        ).fetchone()[0]
+        == 1
+    )
+
+
+def test_the_hourly_sweeps_do_not_start_analysis(conn, s3, memory, tmp_path):
+    """An item nobody analysed is not analysed by the hour (m-43, decision-22): the отсев and
+    everything a cloud model answers are a person's request — «Analyze» or an order. The preview
+    and the camera catch-ups stay, and they are the only jobs the sweeps put in the queue."""
     item_id, key = add_item(conn, memory, "photo", status="ready")
     s3.upload_file(str(jpeg(tmp_path / "original.jpg")), storage.client().bucket, key)
 
-    sweeps.sweep_media_without_screening(conn)
-    assert only_screening_jobs_for(conn, item_id) == 1
-    sweeps.sweep_media_without_screening(conn)
-    assert only_screening_jobs_for(conn, item_id) == 1, "the job on its way is left to finish"
+    for sweep in sweeps.SWEEPS:
+        sweep(conn)
 
-    assert worker.run_once(conn) is True
-    assert screening_of(conn, item_id) == (False, None)
-
-    sweeps.sweep_media_without_screening(conn)
-    assert only_screening_jobs_for(conn, item_id) == 1, (
-        "and an item with a proposal is not re-asked"
+    types = {type_ for (type_,) in conn.execute("SELECT type FROM jobs WHERE ref = %s", (item_id,))}
+    assert types <= {"media_preview", "media_frame_info"}, (
+        f"a sweep queued analysis without being asked: {sorted(types)}"
     )
-
-
-def test_the_sweep_does_not_go_on_asking_for_material_it_has_given_up_on(conn, memory):
-    """An original that is not in the bucket at all fails every attempt, and the third gives up. The
-    columns stay `null` on purpose — saying «брак» about a file nobody could reach would be a lie,
-    and the day's wait is there so an hour of unreachable storage does not cost the gallery its
-    proposals for good."""
-    item_id, _ = add_item(conn, memory, "photo", status="ready")
-    sweeps.sweep_media_without_screening(conn)
-    assert only_screening_jobs_for(conn, item_id) == 1
-    for _ in range(worker.MAX_ATTEMPTS):
-        conn.execute("UPDATE jobs SET run_after = now() WHERE ref = %s", (item_id,))
-        assert worker.run_once(conn) is True
-
-    assert screening_of(conn, item_id) == (None, None)
-    sweeps.sweep_media_without_screening(conn)
-    assert only_screening_jobs_for(conn, item_id) == 1, (
-        "an hour later it is not asked all over again"
-    )
-
-    conn.execute(
-        "UPDATE jobs SET updated_at = now() - make_interval(hours => %s) WHERE ref = %s",
-        (sweeps.CATCH_UP_AFTER_HOURS + 1, item_id),
-    )
-    sweeps.sweep_media_without_screening(conn)
-    assert only_screening_jobs_for(conn, item_id) == 2, "the day after, it is given one more go"
 
 
 def test_the_proposal_does_not_decide_what_goes_into_a_video(conn, s3, memory, tmp_path):
@@ -411,11 +435,11 @@ def test_a_recount_after_the_order_never_reaches_the_video(conn, s3, memory, tmp
     assert {first, guests, retake} <= in_the_video, "отсев в ролике не выбрасывает кадры"
 
 
-def test_the_sweep_looks_again_at_a_frame_kept_before_its_frame_was(conn, s3, memory, tmp_path):
+def test_the_analysis_looks_again_at_a_frame_kept_before_its_frame_was(conn, s3, memory, tmp_path):
     """A frame an older worker kept has a verdict and no frame to compare: until it is looked at
     once more, the memory's series are counted without it. Once is enough — a kept file leaves its
     frame behind — and a frame turned down on its own never takes part in a series, so it is not
-    asked."""
+    judged again."""
     item_id, key = add_item(conn, memory, "photo", status="ready")
     s3.upload_file(str(jpeg(tmp_path / "original.jpg")), storage.client().bucket, key)
     conn.execute("UPDATE media_items SET screening_rejected = false WHERE id = %s", (item_id,))
@@ -425,15 +449,21 @@ def test_the_sweep_looks_again_at_a_frame_kept_before_its_frame_was(conn, s3, me
         (selection.BLUR, blurred),
     )
 
-    sweeps.sweep_media_without_screening(conn)
-    queued = conn.execute(
-        "SELECT ref FROM jobs WHERE type = 'media_screening' AND ref = ANY(%s)",
-        ([item_id, blurred],),
-    ).fetchall()
-    assert queued == [(item_id,)]
-    assert only_screening_jobs_for(conn, item_id) == 1
-
-    assert worker.run_once(conn) is True
+    screening.screen_memory(conn, str(memory[0]))
     assert screening_of(conn, item_id) == (False, None)
-    sweeps.sweep_media_without_screening(conn)
-    assert only_screening_jobs_for(conn, item_id) == 1, "and it is not asked about again"
+    assert (
+        conn.execute(
+            "SELECT count(*) FROM media_frames WHERE media_id = %s", (item_id,)
+        ).fetchone()[0]
+        == 1
+    )
+    assert (
+        conn.execute(
+            "SELECT count(*) FROM media_frames WHERE media_id = %s", (blurred,)
+        ).fetchone()[0]
+        == 0
+    ), "a frame turned down on its own takes no part in a series"
+
+    s3.delete_object(Bucket=storage.client().bucket, Key=f"originals/{item_id}")
+    screening.screen_memory(conn, str(memory[0]))
+    assert screening_of(conn, item_id) == (False, None), "and it is not judged again"

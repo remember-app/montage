@@ -101,8 +101,8 @@ def direct(
     known = _known(conn, candidates)
     if not any(what.get("description") for what in known.values()):
         # Nothing has been described yet — the memory became ready before there was a key, and the
-        # hourly sweep has not caught up. A director shown nothing but file kinds would be ordering
-        # frames it has never seen, for money; the algorithm at least looks at the pixels.
+        # analysis stage had nobody to ask. A director shown nothing but file kinds would be
+        # ordering frames it has never seen, for money; the algorithm at least looks at the pixels.
         log.info(
             "montage %s: nothing in this memory is described yet, leaving it to the worker's "
             "own choosing",

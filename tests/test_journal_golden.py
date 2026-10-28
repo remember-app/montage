@@ -156,6 +156,13 @@ def lay_out(conn, s3, memory, tmp_path, shots, first=1):
                    VALUES (%s, %s, %s, %s)""",
                 (item_id, str(memory[0]), described, list(cast)),
             )
+        if kind == "video":
+            # The clip's transcript is settled before the order: an empty one is an answer
+            # (`speech.py`), so the analysis stage asks the model nothing and the golden is the
+            # director's alone. The words on the card are checked in `test_journal_entries.py`.
+            conn.execute(
+                "INSERT INTO media_speech (media_id, transcript) VALUES (%s, '')", (item_id,)
+            )
         files.append(File(f"f{number}", item_id, kind, second, duration, described, cast))
     return files
 

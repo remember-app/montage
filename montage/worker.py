@@ -78,6 +78,7 @@ HANDLERS = {
     "dummy": dummy,
     "media_preview": preview.media_preview,
     "media_frame_info": frame_info.media_frame_info,
+    "media_analysis": screening.media_analysis,
     "media_screening": screening.media_screening,
     "media_speech": speech.transcribe,
     "media_understanding": understanding.media_understanding,

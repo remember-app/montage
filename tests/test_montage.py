@@ -368,6 +368,9 @@ def test_a_montage_ordered_with_a_story_is_cut_to_the_directors_plan(
                VALUES (%s, %s, %s, %s)""",
             (media_id, str(memory[0]), description, ["человек-1"]),
         )
+    # The analysis stage now transcribes a clip nobody listened to, and this order asks for no model
+    # call but the plan: the clip's words are already recorded as silence (an answer, `speech.py`).
+    conn.execute("INSERT INTO media_speech (media_id, transcript) VALUES (%s, '')", (ids[3],))
     net = planning_over(monkeypatch, ids[:3])
     own = f"music/{uuid.uuid4()}.wav"
     s3.upload_file(str(tone(tmp_path / "own.wav", seconds=5.0)), storage.client().bucket, own)
