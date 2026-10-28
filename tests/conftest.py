@@ -4,15 +4,18 @@
 это Google Cloud Storage, у которого ответы подменены на месте, — в сеть он не ходит.
 
 Внимание: они чистят таблицу `jobs` той базы, на которую указывает DATABASE_URL, и пишут в тот
-бакет, на который указывает R2_ENDPOINT.
+бакет, на который указывает R2_ENDPOINT. И то и другое — своё у прогона: базу с меткой заводит
+`test.sh`/`test-in-docker.sh` (`tests/test-env.sh`), бакет с меткой — `bucket` ниже.
 """
 
 import io
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
 import requests
+from botocore.exceptions import ClientError
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from google.auth.credentials import CredentialsWithRegionalAccessBoundary
@@ -20,6 +23,40 @@ from google.auth.credentials import CredentialsWithRegionalAccessBoundary
 from montage import storage, worker
 
 TOKEN_URI = "https://oauth2.googleapis.com/token"
+
+
+@pytest.fixture(scope="session")
+def bucket():
+    """The bucket of this run, made here and removed after.
+
+    Two runs at once — two worktrees, two sessions — used to write into one bucket: each read
+    objects the other had already deleted, and the red came with who got there first
+    (`NoSuchKey`). The name carries the run's tag (`TEST_RUN_TAG`); `test_environment.py` checks
+    that it does. A bucket that is this run's is emptied and removed on the way out, so no run
+    leaves one for the next.
+    """
+    s3 = storage.client().s3
+    name = storage.client().bucket
+    # Only a bucket this run named after its tag is one to empty and remove at the end: the name
+    # without the tag is somebody else's — the stand's — and removing it would take the music and
+    # the media with it. An untagged run is no run of its own, and `test_environment.py` says so.
+    own = bool(tag := os.environ.get("TEST_RUN_TAG")) and name.endswith(f"-{tag}")
+    try:
+        s3.create_bucket(Bucket=name)
+    except ClientError as error:
+        # The same tag run again after a kill: that bucket is this run's own, only left over.
+        if error.response["Error"]["Code"] != "BucketAlreadyOwnedByYou":
+            raise
+    yield name
+    if not own:
+        return
+    for upload in s3.list_multipart_uploads(Bucket=name).get("Uploads", []):
+        s3.abort_multipart_upload(Bucket=name, Key=upload["Key"], UploadId=upload["UploadId"])
+    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=name):
+        objects = [{"Key": item["Key"]} for item in page.get("Contents", [])]
+        if objects:
+            s3.delete_objects(Bucket=name, Delete={"Objects": objects})
+    s3.delete_bucket(Bucket=name)
 
 
 @pytest.fixture
@@ -31,9 +68,11 @@ def conn():
 
 
 @pytest.fixture
-def s3():
+def s3(bucket):
     """The bucket as boto3 sees it, for a test to lay out what the worker will find in it and to
-    look at what it left there. The s3 driver's — the suite runs on MinIO."""
+    look at what it left there. The s3 driver's — the suite runs on MinIO. The bucket itself is
+    made on first use, so the tests that need none (`test_storage.py`'s first two,
+    `test_storage_google.py`) never call for one."""
     return storage.client().s3
 
 

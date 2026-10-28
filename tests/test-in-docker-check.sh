@@ -1,18 +1,22 @@
 #!/bin/sh
-# Проверка `test-in-docker.sh`: скрипт обязан сам приводить свою базу в порядок, а если не может —
-# сказать словами, что базе нужно и какой командой это лечится. Раньше он обещал и не держал:
-# тест падал на `relation "frame_comments" does not exist`, и виноватым выглядел кто угодно, кроме
-# ненакатанной базы. Без этой проверки скрипт можно сломать обратно, и первым это заметит тот,
-# кто запустит тесты следующим, и не ты.
+# Проверка `test-in-docker.sh`: прогон обязан завести себе базу с меткой, накатить в неё миграции
+# api и снести после, а если накатывать нечем — сказать словами, что базе нужно и какой командой
+# это лечится. Раньше он обещал и не держал: тест падал на `relation "frame_comments" does not
+# exist`, и виноватым выглядел кто угодно, кроме ненакатанной базы. Без этой проверки скрипт
+# можно сломать обратно, и первым это заметит тот, кто запустит тесты следующим, и не ты.
 #
 #     tests/test-in-docker-check.sh
 #
-# Живой Postgres стенда и docker, как у самого скрипта. Базу заводит и сносит сам, общую
-# `remember_test` не трогает. Скрипт проверяется как есть: ни одна его настройка не подменяется,
-# кроме имени базы (своя) и каталога api (во втором случае его нет намеренно).
+# Живой Postgres стенда и docker, как у самого скрипта. База проверки — своя, с меткой; общую
+# `remember_test` и бакет `remember` она не трогает. Скрипт проверяется как есть: ни одна его
+# настройка не подменяется, кроме основы имени базы (своя) и каталога api (во втором случае его
+# нет намеренно). База остаётся после прогона только чтобы её можно было осмотреть (TEST_KEEP_DB=1)
+# и сносится здесь же.
 set -e
 here=$(cd "$(dirname "$0")/.." && pwd)
-DB=montage_in_docker_check
+BASE=montage_in_docker_check
+TAG=check$$
+DB="${BASE}_${TAG}_test"
 err=$(mktemp)
 pg=$(docker ps --format '{{.Names}} {{.Ports}}' | awk '$2 ~ /(^|:)5432->/ {print $1; exit}')
 
@@ -21,12 +25,13 @@ pg=$(docker ps --format '{{.Names}} {{.Ports}}' | awk '$2 ~ /(^|:)5432->/ {print
 drop_db() { docker exec "$pg" psql -U postgres -d postgres -qc "DROP DATABASE IF EXISTS $DB WITH (FORCE)" >/dev/null; }
 trap 'drop_db; rm -f "$err"' EXIT
 
-# Свежая пустая база — состояние строго хуже, чем у стенда (там применены миграции до 180):
-# довести её до свежей версии и есть обещание скрипта.
-echo "== пустая база: скрипт обязан накатить в неё миграции api сам"
+# Базы прогона ещё нет — и скрипт обязан завести её сам, а не ждать, что её заведёт кто-то другой.
+# Довести её до свежей версии миграций и есть его обещание.
+echo "== базы прогона нет: скрипт обязан завести $DB и накатить в неё миграции api"
 drop_db
-docker exec "$pg" psql -U postgres -d postgres -qc "CREATE DATABASE $DB" >/dev/null
-TEST_DB_NAME=$DB "$here/test-in-docker.sh" --collect-only -q >/dev/null
+TEST_DATABASE_URL="postgres://postgres:postgres@localhost:5432/$BASE" \
+TEST_RUN_TAG="$TAG" TEST_KEEP_DB=1 \
+  "$here/test-in-docker.sh" --collect-only -q >/dev/null
 got=$(docker exec "$pg" psql -U postgres -d "$DB" -tAc 'SELECT max(version) FROM schema_migrations' 2>/dev/null || true)
 # Свежая версия — из файлов api, а не из базы: иначе проверка повторяла бы то же, что проверяет.
 d=$here
@@ -39,7 +44,9 @@ echo "ok: $DB доехала до $freshest"
 
 # Накатывать нечем — не молча и не прогоном тестов, а остановкой с адресом.
 echo "== api на месте нет: скрипт обязан остановиться и сказать, что делать"
-if TEST_DB_NAME=$DB API_DIR=/nonexistent "$here/test-in-docker.sh" >/dev/null 2>"$err"; then
+if TEST_DATABASE_URL="postgres://postgres:postgres@localhost:5432/$BASE" \
+  TEST_RUN_TAG="$TAG" API_DIR=/nonexistent \
+  "$here/test-in-docker.sh" >/dev/null 2>"$err"; then
   echo "!! скрипт пошёл дальше, не заметив, что накатывать нечем"
   exit 1
 fi
