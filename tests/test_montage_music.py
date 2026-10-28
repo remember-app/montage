@@ -6,6 +6,8 @@
 import dataclasses
 import json
 import logging
+import pathlib
+import re
 import uuid
 
 import pytest
@@ -282,6 +284,36 @@ def test_a_montage_whose_track_the_director_chose_is_cut_to_that_tracks_beats(
 
     assert worker.run_once(conn) is True
 
+    # Вопрос режиссёру несёт всю полку, а не сколько-то её треков: он выбирает из того, что воркер
+    # потом достанет файлом, и из пяти из десяти выбрал бы мимо. Полка названа здесь руками: список,
+    # взятый у `library.TRACKS`, укорачивался бы вместе с самой библиотекой и не заметил бы, что она
+    # вернулась к пяти. Длины — те же, что у файлов.
+    ((prompt,),) = conn.execute(
+        "SELECT request->>'prompt' FROM ai_requests WHERE operation = 'plan_montage' AND ref = %s",
+        (montage_id,),
+    ).fetchall()
+    asked = json.loads(prompt)
+    whole_shelf = [
+        "bright",
+        "warm",
+        "calm",
+        "night",
+        "road",
+        "merry",
+        "tender",
+        "dreamy",
+        "mystery",
+        "energetic",
+    ]
+    assert asked["choose_music"] is True, "модели не сказали, что трек выбирает она"
+    assert [one["track"] for one in asked["music"]] == whole_shelf, (
+        "в вопрос ушла не вся полка: режиссёр выбирал бы из того, чего у воркера нет"
+    )
+    assert [one["seconds"] for one in asked["music"]] == [
+        round(ffmpeg.duration(library.track_file(one)), 1) for one in whole_shelf
+    ], "длины в полке — не те, что у файлов"
+    assert "night" in [one["track"] for one in asked["music"]], "назван трек вне полки"
+
     status, _, duration, error_text = read_montage(conn, montage_id)
     assert (status, error_text) == ("ready", None)
     assert played == [library.track_file("night")], "в сборку ушёл не тот трек, что назвал режиссёр"
@@ -551,6 +583,23 @@ def test_the_shelf_the_director_chooses_from_is_the_whole_library():
     assert [one["track"] for one in shelf] == list(library.TRACKS)
     assert all(set(one) == {"track", "seconds"} for one in shelf), "в полке только id и длина"
     assert all(one["seconds"] > 30 for one in shelf), "длины настоящие, а не нули"
+
+
+def test_the_shelf_the_docs_name_is_the_library_the_worker_plays():
+    """Полка одна на четыре стороны: код воркера, его доки, api и приложение. Здесь две из них, что
+    лежат в этом репозитории, — список id в `docs/jobs/montage.md` («Треки») и таблица
+    `tracks/README.md` с файлами: тот же и в том же порядке, что `library.TRACKS`. Трек, дописанный
+    в код и не дописанный в доки (или наоборот), — полка, о которой половина продукта не знает."""
+    root = pathlib.Path(__file__).resolve().parents[1]
+    jobs = (root / "docs" / "jobs" / "montage.md").read_text()
+    named = jobs.split("в этом порядке:")[1].split("Файлы лежат")[0]
+    assert re.findall(r"`([a-z]+)`", named) == list(library.TRACKS), (
+        "docs/jobs/montage.md называет не ту полку, что играет воркер"
+    )
+    rows = (root / "montage" / "video" / "tracks" / "README.md").read_text()
+    assert re.findall(r"^\| `([a-z]+)` \|", rows, re.M) == list(library.TRACKS), (
+        "tracks/README.md называет не ту полку, что играет воркер"
+    )
 
 
 # Что организатор может написать у трека: буквы разных письменностей, эмодзи, перевод строки,
