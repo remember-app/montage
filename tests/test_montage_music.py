@@ -625,8 +625,8 @@ def test_a_track_nobody_has_fails_the_montage_instead_of_retrying(conn, memory):
 
 @pytest.mark.parametrize("track_id", library.TRACKS)
 def test_every_track_of_the_library_is_music_that_plays(track_id):
-    """Five files on disk, and a montage ordered with one of them falls over only when somebody
-    happens to order *that* one — so all five are opened here, not just the default. A track
+    """Every file on disk, and a montage ordered with one of them falls over only when somebody
+    happens to order *that* one — so all of them are opened here, not just the default. A track
     renamed, moved or never committed fails this test instead of somebody's video."""
     played = probe(library.track_file(track_id))
 
@@ -649,8 +649,9 @@ def library_in_the_bucket(s3):
 
 
 def test_the_library_is_published_to_the_bucket_for_the_app_to_play(s3):
-    """The five files are this worker's own disk, and «Послушать» is the api's and the phone's — so
-    the library has to be in the bucket too, under the keys the api builds from the same ids."""
+    """The library's files are this worker's own disk, and «Послушать» is the api's and the
+    phone's — so the library has to be in the bucket too, under the keys the api builds from the
+    same ids."""
     for track_id in library.TRACKS:
         s3.delete_object(Bucket=storage.client().bucket, Key=library.track_key(track_id))
 
@@ -661,8 +662,8 @@ def test_the_library_is_published_to_the_bucket_for_the_app_to_play(s3):
     assert {track_id: head[:2] for track_id, head in landed.items()} == {
         track_id: (library.track_file(track_id).stat().st_size, "audio/mpeg")
         for track_id in library.TRACKS
-    }, "all five, whole, and served as music rather than as bytes of nothing in particular"
+    }, "all of them, whole, and served as music rather than as bytes of nothing in particular"
 
-    # Run on every deploy: five mp3s must not be written over every time.
+    # Run on every deploy: the mp3s must not be written over every time.
     assert library.publish_tracks() == [], "what is already there is not uploaded again"
     assert library_in_the_bucket(s3) == landed, "and the objects themselves were not touched"

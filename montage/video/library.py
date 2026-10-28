@@ -1,4 +1,4 @@
-"""Полка музыки: пять треков, которые продукт предлагает под ролик, их файлы и их ключи в бакете.
+"""Полка музыки: десять треков, которые продукт предлагает под ролик, их файлы и их ключи в бакете.
 
 Свой трек организатора сюда не попадает никогда — он приходит из бакета и доезжает до сборки тем же
 путём, просто из другого места (`music.py`).
@@ -8,12 +8,23 @@ import pathlib
 
 from montage import storage
 
-# The library: the five tracks of the «Под что монтировать» screen
-# (`design/screens/MontageMusic.html`), in its order and under its names — «Яркая», «Тёплая»,
-# «Спокойная», «Ночь», «Дорога». Ids only, because the worker shows no names: which name is which
-# track, who wrote it, where the file came from and under what licence is `tracks/README.md`, kept
-# beside the files themselves.
-TRACKS = ("bright", "warm", "calm", "night", "road")
+# The library: the tracks of the «Под что монтировать» screen (`design/screens/MontageMusic.html`) —
+# the five the screen showed, in its own order and under its names («Яркая», «Тёплая», «Спокойная»,
+# «Ночь», «Дорога»), then five more of the same mood-word kind. Ids only, because the worker shows
+# no names: which name is which track, who wrote it, where the file came from and under what licence
+# is `tracks/README.md`, kept beside the files themselves.
+TRACKS = (
+    "bright",
+    "warm",
+    "calm",
+    "night",
+    "road",
+    "merry",
+    "tender",
+    "dreamy",
+    "mystery",
+    "energetic",
+)
 DEFAULT_TRACK = "warm"  # what an order that says nothing about music means
 
 TRACKS_DIR = pathlib.Path(__file__).parent / "tracks"
