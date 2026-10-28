@@ -12,7 +12,7 @@ from montage.media import preview
 
 from checks import near
 from material import FIXTURES, jpeg, marked_photo, probe, video
-from rows import add_item, fetch, read_item
+from rows import add_item, fetch, read_item, read_size
 
 
 def test_a_photo_gets_a_thumbnail_and_a_2048px_copy(conn, s3, memory, tmp_path):
@@ -83,6 +83,23 @@ def test_a_preview_queues_only_the_camera_and_nothing_that_asks_a_model(conn, s3
     ).fetchall()
     assert dict(queued) == {"media_frame_info": 1}
     assert read_item(conn, item_id)[0] == "ready"
+
+    # And nothing of the analysis was even started on the row: not a verdict, not a frame to
+    # compare retakes by, not a word, not a description. An upload is a copy and nothing else.
+    assert conn.execute(
+        "SELECT screening_rejected, screening_reason FROM media_items WHERE id = %s", (item_id,)
+    ).fetchone() == (None, None)
+    for table in ("media_frames", "media_speech", "media_understandings"):
+        assert (
+            conn.execute(
+                f"SELECT count(*) FROM {table} WHERE media_id = %s", (item_id,)
+            ).fetchone()[0]
+            == 0
+        ), f"an upload wrote into {table}"
+
+    # The camera and the size are what the upload does ask for, and they land on the row.
+    assert worker.run_once(conn) is True
+    assert read_size(conn, item_id) == (1280, 1440)
 
 
 @pytest.mark.parametrize("started_as, ends_as", [("processing", "failed"), ("ready", "ready")])

@@ -364,13 +364,18 @@ def test_the_analysis_stage_describes_nothing_when_there_is_no_cloud_model(
 ):
     """Сегодняшнее состояние (decision-10): описать нечем. Этап проходит, ничего не спрашивает и
     ничего не выдумывает — в журнале не будет ни одной записи об описании, которого не было.
-    """
-    ready_media(conn, s3, memory, jpeg(tmp_path / "preview.jpg"))
 
-    earlier = understanding.describe_missing(conn, [add_item(conn, memory, "photo")[0]])
+    Кадр здесь именно готовый к описанию (`ready`, с копией): на неготовом этап молчал бы и с
+    ключом, и без него, и такая проверка не сказала бы ничего о том, что без модели ничего не
+    запрашивается.
+    """
+    item_id = ready_media(conn, s3, memory, jpeg(tmp_path / "preview.jpg"))
+
+    earlier = understanding.describe_missing(conn, [item_id])
 
     assert earlier == set()
     assert conn.execute("SELECT count(*) FROM ai_requests").fetchone()[0] == 0
+    assert described(conn, item_id) is None
 
 
 def test_a_preview_queues_no_description(conn, s3, memory, tmp_path):

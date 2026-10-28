@@ -125,6 +125,81 @@ def test_the_analysis_job_screens_the_whole_memory_in_one_pass(conn, s3, memory,
     assert screening_of(conn, guests) == (False, None)
 
 
+def test_the_analysis_takes_only_the_memory_ready_visible_material(conn, s3, memory, tmp_path):
+    """A memory's material is the order's: `ready` and not hidden. A file still being prepared, one
+    whose preview gave up, and one the owner hid are not judged — not fetched, not decoded, their
+    rows left `null` («the analysis has not looked»). All three are in the bucket, so a pass that
+    judged them would have said so."""
+    sharp, soft, other = shots(tmp_path)
+    visible = shot(conn, s3, memory, sharp, 0)
+    hidden = shot(conn, s3, memory, other, 4)
+    conn.execute("UPDATE media_items SET hidden = true WHERE id = %s", (hidden,))
+    left_out = []
+    for status in ("processing", "failed"):
+        item_id, key = add_item(conn, memory, "photo", status=status)
+        s3.upload_file(str(soft), storage.client().bucket, key)
+        left_out.append(item_id)
+
+    worker.enqueue(conn, "media_analysis", str(memory[0]))
+    assert worker.run_once(conn) is True
+
+    assert screening_of(conn, visible) == (False, None)
+    for item_id in (hidden, *left_out):
+        assert screening_of(conn, item_id) == (None, None), "the analysis looked where it must not"
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM media_frames WHERE media_id = %s", (item_id,)
+            ).fetchone()[0]
+            == 0
+        )
+
+
+def test_an_analysis_of_an_empty_memory_finishes_and_writes_nothing(conn, memory):
+    """Nobody has uploaded yet and the organizer pressed «Analyze»: there is nothing to judge, and
+    that is an answer — not a job that retries three times and fails."""
+    job_id = worker.enqueue(conn, "media_analysis", str(memory[0]))
+
+    assert worker.run_once(conn) is True
+
+    assert conn.execute("SELECT status FROM jobs WHERE id = %s", (job_id,)).fetchone()[0] == "done"
+    assert (
+        conn.execute(
+            """SELECT count(*) FROM media_frames
+               WHERE media_id IN (SELECT id::text FROM media_items WHERE memory_id = %s)""",
+            (memory[0],),
+        ).fetchone()[0]
+        == 0
+    )
+
+
+def test_a_frame_deleted_while_the_analysis_looks_at_it_leaves_nothing_behind(
+    conn, memory, monkeypatch
+):
+    """A member can leave and take their material away between the SELECT and the verdict. The row
+    is gone, so the verdict must not land anywhere — a frame with no item behind it would be
+    counted into the memory's series for good — and the job still finishes."""
+    item_id, _ = add_item(conn, memory, "photo", status="ready")  # nothing in the bucket
+
+    def gone_mid_look(media_id, kind, _original_key, _preview_key):
+        conn.execute("DELETE FROM media_items WHERE id = %s", (media_id,))
+        return selection.Piece(
+            media_id=str(media_id), kind=kind, rejected=None, frame=b"frame", sharpness=0.5
+        )
+
+    monkeypatch.setattr(screening, "_judged", gone_mid_look)
+    job_id = worker.enqueue(conn, "media_analysis", str(memory[0]))
+
+    assert worker.run_once(conn) is True
+
+    assert conn.execute("SELECT status FROM jobs WHERE id = %s", (job_id,)).fetchone()[0] == "done"
+    assert (
+        conn.execute(
+            "SELECT count(*) FROM media_frames WHERE media_id = %s", (item_id,)
+        ).fetchone()[0]
+        == 0
+    )
+
+
 def test_the_analysis_counts_the_series_once_for_the_whole_memory(
     conn, s3, memory, tmp_path, monkeypatch
 ):
@@ -308,17 +383,26 @@ def test_a_memory_the_order_already_judged_is_not_fetched_again(conn, memory, mo
 
 def test_the_hourly_sweeps_do_not_start_analysis(conn, s3, memory, tmp_path):
     """An item nobody analysed is not analysed by the hour (m-43, decision-22): the отсев and
-    everything a cloud model answers are a person's request — «Analyze» or an order. The preview
-    and the camera catch-ups stay, and they are the only jobs the sweeps put in the queue."""
+    everything a cloud model answers are a person's request — «Analyze» or an order. The catch-ups
+    read without a model stay and are the only jobs the sweeps put in the queue: a large copy for
+    a photo that has none, and a size and a camera for both."""
     item_id, key = add_item(conn, memory, "photo", status="ready")
     s3.upload_file(str(jpeg(tmp_path / "original.jpg")), storage.client().bucket, key)
+    clip_id, clip_key = add_item(conn, memory, "video", status="ready")
+    s3.upload_file(str(video(tmp_path / "clip.mp4")), storage.client().bucket, clip_key)
 
     for sweep in sweeps.SWEEPS:
         sweep(conn)
 
-    types = {type_ for (type_,) in conn.execute("SELECT type FROM jobs WHERE ref = %s", (item_id,))}
-    assert types <= {"media_preview", "media_frame_info"}, (
-        f"a sweep queued analysis without being asked: {sorted(types)}"
+    types = {
+        ref: {type_ for (type_,) in conn.execute("SELECT type FROM jobs WHERE ref = %s", (ref,))}
+        for ref in (item_id, clip_id)
+    }
+    assert types[item_id] == {"media_preview", "media_frame_info"}, (
+        f"the photo's catch-ups are gone, or a sweep queued analysis: {sorted(types[item_id])}"
+    )
+    assert types[clip_id] == {"media_frame_info"}, (
+        f"the clip's catch-up is gone, or a sweep queued analysis: {sorted(types[clip_id])}"
     )
 
 
