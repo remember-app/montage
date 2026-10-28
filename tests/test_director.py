@@ -23,7 +23,7 @@ import pytest
 from montage import ai, worker
 from montage.ai import providers
 from montage.media import understanding
-from montage.video import assembly, director, selection
+from montage.video import assembly, director, library, selection
 
 from pieces import picture
 from recorded import Recorded
@@ -107,7 +107,7 @@ def directed(
     planned out of."""
     net = Recorded(fixture)
     brain = ai.AI(conn, provider("test-key", transport=net))
-    film, thoughts = director.direct(
+    film, thoughts, _track = director.direct(
         conn, pieces, target_seconds, brain=brain, ref="montage-3", **order
     )
     return film, thoughts, net
@@ -587,6 +587,89 @@ def test_a_file_with_no_frame_in_it_stays_out(described):
     assert "m-3" not in asked(net)
 
 
+# --- трек на усмотрение режиссёра -------------------------------------------
+# Заказ с `music_director` треков не называет: выбор отдан режиссёру, и он называет трек с полки в
+# том же ответе, где строит план. Полка уходит в вопрос той же формы, что и дорожка заказа
+# (`music.heard`), только без пожеланий; файлов режиссёру не дают.
+
+# Полка словами — как её собрал бы `music.shelf`, но без ffmpeg: длительности здесь написаны руками,
+# проверяется не они, а то, что уходит в вопрос и что оттуда возвращается.
+SHELF = [
+    {"track": one, "seconds": seconds}
+    for one, seconds in zip(library.TRACKS, (121.0, 108.0, 92.0, 143.0, 88.0))
+]
+
+
+def choosing_the_music(
+    conn, fixture="gemini_plan_track.json", music=SHELF, choose_music=True, **order
+):
+    """The film the recorded director planned with the music left to it, the track it named, and the
+    question that went out."""
+    net = Recorded(fixture)
+    brain = ai.AI(conn, providers.Gemini("test-key", transport=net))
+    film, _, track = director.direct(
+        conn,
+        MATERIAL,
+        60.0,
+        brain=brain,
+        ref="montage-3",
+        music=music,
+        choose_music=choose_music,
+        **order,
+    )
+    return film, track, net
+
+
+def test_the_director_chooses_a_track_off_the_shelf_when_the_order_leaves_it_to_it(described):
+    """Заказ отдал выбор трека режиссёру: ему уходит вся полка — id и длительность каждого, той же
+    формы, что и дорожка заказа, — и он называет один. Названный трек возвращается третьим, а
+    вопрос несёт choose_music: без него модель не знала бы, что выбор за ней."""
+    film, track, net = choosing_the_music(described, story=STORY)
+
+    assert track == "night"
+    assert [piece.media_id for piece in film] == ["m-1", "m-2", "m-3"]
+    ((prompt,),) = described.execute(
+        "SELECT request->>'prompt' FROM ai_requests WHERE operation = 'plan_montage'"
+    ).fetchall()
+    said = json.loads(prompt)
+    assert asked(net).endswith(prompt), "в журнале не тот вопрос, что ушёл модели"
+    assert said["choose_music"] is True, "модели не сказали, что музыка на её выборе"
+    assert said["music"] == SHELF, "полка ушла не целиком: нужны id и длина каждого трека"
+    assert "track" in asked(net), "и не сказали, каким полем назвать трек"
+
+
+def test_a_track_the_director_made_up_plays_the_default_one(described):
+    """Трека нет на полке — «тёплая», а не падение: файл названного трека достаёт воркер
+    (`library.track_file`), и трека вне полки у него нет."""
+    net = Recorded("gemini_plan_track.json")
+    net.answer = net.answer.replace(b"night", b"polka")
+    brain = ai.AI(described, providers.Gemini("test-key", transport=net))
+
+    film, _, track = director.direct(
+        described, MATERIAL, 60.0, brain=brain, ref="montage-3", music=SHELF, choose_music=True
+    )
+
+    assert film and track == library.DEFAULT_TRACK
+
+
+def test_an_answer_that_named_no_track_plays_the_default_one(described):
+    """Режиссёр выбрал музыку, а трека не назвал — «тёплая»: без музыки ролик не собирается, а
+    подставить вместо трека нечего."""
+    film, track, _ = choosing_the_music(described, fixture="gemini_plan.json")
+
+    assert film and track == library.DEFAULT_TRACK
+
+
+def test_an_order_that_kept_its_own_track_list_gets_no_choice_back(described):
+    """Без флага третье значение — None, даже когда модель трек назвала: дорожка собирается из
+    списка заказа, и названный трек на неё не влияет."""
+    film, track, _ = choosing_the_music(
+        described, music=[{"track": "warm", "seconds": 121.0}], choose_music=False
+    )
+
+    assert film and track is None
+
+
 # --- when there is no director ----------------------------------------------
 
 
@@ -595,7 +678,7 @@ def test_without_a_cloud_model_nobody_is_asked_and_the_selection_cuts_the_video(
     montage is the montage it has always been (`montage.py` falls back to `selection.choose`)."""
     monkeypatch.setattr(ai, "from_env", lambda *_, **__: None)
 
-    assert director.direct(conn, MATERIAL, 60.0, ref="montage-3") == (None, ())
+    assert director.direct(conn, MATERIAL, 60.0, ref="montage-3") == (None, (), None)
     assert conn.execute("SELECT count(*) FROM ai_requests").fetchone()[0] == 0
 
 

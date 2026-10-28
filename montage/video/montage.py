@@ -14,7 +14,8 @@ calls the pipeline's modules in turn and writes the result back. The modules it 
 replaceable on their own, which is what the spec asks of the montage service (doc-03, «Сервис
 монтажа собран из отдельных модулей»):
 
-    `music`     — what the order asks to play, as files on disk and as words for the director.
+    `music`     — what the order asks to play, as files on disk and as words for the director; the
+                  shelf to choose from instead, when the order left the track to the director.
     `director`  — the film the cloud model plans out of the material, when there is a model to ask.
     `selection` — which pieces go into the video and in what order, and why the rest do not.
     `rhythm`    — how long each of them is held, so the joins land on the track's beats.
@@ -49,7 +50,7 @@ import urllib.request
 
 from montage import ffmpeg, journal, photo, storage
 from montage.media import preview, understanding
-from montage.video import assembly, director, layout, music, rhythm, selection, story
+from montage.video import assembly, director, layout, library, music, rhythm, selection, story
 
 MIN_ITEMS = 3  # «Меньше 3 → сразу failed» — the api refuses the order at this number too
 
@@ -96,6 +97,9 @@ def montage(conn, ref):
         # файл), а расхождение сторон, то есть `internal`. Код назван здесь явно, как и на каждом
         # другом отказе: значение по умолчанию — это «никто не подумал», а не решение.
         return _give_up_for_good(conn, ref, refusal, "internal")
+    # Трек выбирает режиссёр (`params.music_director`): списка треков в заказе нет вовсе, и дорожка
+    # строится не здесь, а после его ответа — файл названного им трека достаётся на этапе музыки.
+    by_director = ordered_music is music.BY_DIRECTOR
     # Пожелания организатора к трекам, его словами, — у каждого трека своё. Как и история, читает
     # их только режиссёр: дорожку они не перекраивают. Общее `music_note` старых заказов не читается
     # вовсе (docs/jobs/montage.md, «Пожелания к трекам»).
@@ -251,23 +255,30 @@ def montage(conn, ref):
         # Дорожка нужна ему файлами уже здесь, а вот отказ по ней — не здесь: он принадлежит стадии
         # музыки и назовётся там, где она идёт (ниже), — разбору кадров, который к дорожке не при
         # чём, он его не получит.
-        tracks, refusal = music.files(ordered_music, workdir)
-        tracks = tracks or ()
-        track = assembly.one_track(tracks, workdir)
+        # Трек выбирает режиссёр — ему отдают полку, а не дорожку: файл названного трека достаётся
+        # на этапе музыки, после ответа, и до вопроса о музыке здесь нечего собирать.
+        if by_director:
+            track, under_the_director = None, music.shelf()
+        else:
+            tracks, refusal = music.files(ordered_music, workdir)
+            tracks = tracks or ()
+            track = assembly.one_track(tracks, workdir)
+            under_the_director = music.heard(ordered_music, tracks, music_wishes)
 
         # The director first, and the отбор whenever there is no director: no cloud model, nothing
         # described for it to read, or an answer with nothing of ours in it (`director.direct`).
         journal.start(conn, ref, "directing", total=len(pieces))
         # Вторым — слова режиссёра-нейросети о том, что он планировал: мысль о плане в целом и по
         # записи на каждый показанный ему кадр. Ролик они не меняют, они и есть рассказ о нём.
-        chosen, thoughts = director.direct(
+        chosen, thoughts, chosen_track = director.direct(
             conn,
             pieces,
             target_seconds,
             exclude,
             story=story_text,
             ref=ref,
-            music=music.heard(ordered_music, tracks, music_wishes),
+            music=under_the_director,
+            choose_music=by_director,
         )
         turned_down = None
         if chosen is None:
@@ -315,6 +326,16 @@ def montage(conn, ref):
             # самое, и на третьей. Отказ на этом месте — музыки: её этап идёт вот сейчас, а её
             # трек не открылся, и код причины ложится на неё.
             return _give_up_for_good(conn, ref, refusal, "track_unreadable")
+        # Что реально играет: треки заказа по порядку или — когда выбор был за режиссёром — один
+        # названный им трек с полки. Не назвал никакого (модели нет, или она не ответила) —
+        # «тёплая», и в лог уходит, что выбирал не режиссёр: умолчание под именем выбора — выдумка.
+        if by_director:
+            played = [chosen_track or library.DEFAULT_TRACK]
+            if chosen_track is None:
+                log.info("montage %s: no model named a track, playing %s", ref, played[0])
+            track = assembly.one_track([library.track_file(played[0])], workdir)
+        else:
+            played = ordered_music
         moments = ()
         if track:
             moments = rhythm.beats(track)
@@ -331,15 +352,16 @@ def montage(conn, ref):
         # Что в каждой части истории слышно, — по одной записи на часть, без кадра и без решения.
         story.sound(conn, ref, chosen, thoughts, track)
         # Под что подогнаны куски: треки в том порядке, в каком они играют (id полки и ключи своих,
-        # ровно как в заказе — называет их приложение), темп дорожки — только когда он есть, — и
-        # где в ролике стоят склейки, секундами по возрастанию: теми же, что `layout.starts` кладёт
-        # на раскладку и что приложение рисует штрихами под роликом. Ролик без музыки говорит это
-        # честно: список треков пуст, склейки идут по смыслу, и подгонять было не подо что.
+        # ровно как в заказе — называет их приложение), — а когда трек выбирал режиссёр, тот, что
+        # реально играл, — темп дорожки, только когда он есть, — и где в ролике стоят склейки,
+        # секундами по возрастанию: теми же, что `layout.starts` кладёт на раскладку и что
+        # приложение рисует штрихами под роликом. Ролик без музыки говорит это честно: список треков
+        # пуст, склейки идут по смыслу, и подгонять было не подо что.
         journal.finish(
             conn,
             ref,
             "music",
-            tracks=ordered_music,
+            tracks=played,
             bpm=rhythm.tempo(moments),
             cut_seconds=[round(at, 2) for at in layout.starts(chosen)[1:]],
         )
