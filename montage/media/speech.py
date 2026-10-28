@@ -34,8 +34,13 @@ SOUND_ONLY = ("-vn", "-ac", "1", "-ar", "16000", "-c:a", "aac", "-b:a", "64k")
 log = logging.getLogger("montage.speech")
 
 
-def transcribe(conn, ref):
-    """One clip: the sound out of it, its words into `media_speech` — once, and never again."""
+def transcribe(conn, ref, original=None):
+    """One clip: the sound out of it, its words into `media_speech` — once, and never again.
+
+    `original` is the clip's file when the caller already has it on disk: the order's preparation
+    downloads every clip before the analysis stage and hands it here, so the file does not come out
+    of the bucket a second time. Without it the original is downloaded as usual.
+    """
     if _remembered(conn, ref):
         log.info("clip %s is transcribed already, asking nobody", ref)
         return
@@ -65,8 +70,10 @@ def transcribe(conn, ref):
 
     with tempfile.TemporaryDirectory() as workdir:
         workdir = pathlib.Path(workdir)
-        original, sound = workdir / "original", workdir / "speech.m4a"
-        storage.download(original_key, original)
+        sound = workdir / "speech.m4a"
+        if original is None:
+            original = workdir / "original"
+            storage.download(original_key, original)
         # Before ffmpeg is pointed at it: these bytes came off somebody's phone, and a playlist
         # dressed up as a clip would have ffmpeg read this worker's own disk into a prompt.
         ffmpeg.refuse_playlists(original)

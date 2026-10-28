@@ -66,7 +66,7 @@ def media_screening(conn, ref):
         _duplicates(conn, memory_id)
 
 
-def screen_memory(conn, memory_id):
+def screen_memory(conn, memory_id, judged=None):
     """Judge every ready, visible item of a memory that has no verdict yet, then count its series
     once — not once per file.
 
@@ -75,6 +75,11 @@ def screen_memory(conn, memory_id):
     both is done, and the legacy case of a verdict without a frame is the exception the second half
     of the condition catches. A frame the first question turned down takes no part in a series, so
     it is done with its verdict alone.
+
+    `judged` is the same judgement when the caller already has it: an order's preparation judges
+    every file before this stage (`montage.py`), and fetching the whole memory again to judge it
+    twice would be a second download and a second decode of every video. Only the items still
+    missing a verdict are written.
 
     The series are recounted over the whole memory from what is stored (`_duplicates`), whether or
     not a file was judged now: a neighbour may have moved while nothing was left to read.
@@ -93,9 +98,13 @@ def screen_memory(conn, memory_id):
     if not missing:
         _duplicates(conn, memory_id)
         return
-    # The files are read outside the transaction: a download is slow, and holding a lock over the
-    # whole memory while one ffmpeg runs would block the other worker that is screening it.
-    judged = [_judged(*row) for row in missing]
+    if judged is None:
+        # The files are read outside the transaction: a download is slow, and holding a lock over
+        # the whole memory while one ffmpeg runs would block the other worker that is screening it.
+        judged = [_judged(*row) for row in missing]
+    else:
+        waiting = {str(row[0]) for row in missing}
+        judged = [piece for piece in judged if str(piece.media_id) in waiting]
     with conn.transaction():
         conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (str(memory_id),))
         for one in judged:

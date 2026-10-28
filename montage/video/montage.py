@@ -149,6 +149,9 @@ def montage(conn, ref):
     with tempfile.TemporaryDirectory() as workdir:
         workdir = pathlib.Path(workdir)
         pieces, originals = [], {}
+        # Every file as `judge` saw it, before the отсев's verdict is thrown away below: the
+        # analysis stage writes these onto the gallery's proposal instead of fetching them again.
+        screened = []
         # Подготовка: скачать каждый файл заказа и сказать в журнал, если взять его нельзя.
         # Счётчики идут в итог этапа с самого начала и растут по ходу — «фото 98 из 168» видно
         # в тот же момент, когда идёт скачивание (контракт api, «prep»).
@@ -197,6 +200,7 @@ def montage(conn, ref):
                     captured_at=captured_at,
                 )
             )
+            screened.append(prepared)
             # Отсева внутри сборки нет: смазанный и тёмный кадр в ролик идёт так же, как резкий и
             # светлый — брак предлагается убрать при выборе кадров, и там решает человек (doc-03,
             # «What it doesn't»). Взять нельзя только файл, в котором нет ни кадра, ни звука: это
@@ -249,7 +253,7 @@ def montage(conn, ref):
         # (`analysis`). Кадр, описанный раньше, в нейросеть повторно не уходит: `describe_missing`
         # отдаёт его журналу готовым, помеченным «описан ранее», и по этому делению считается счёт
         # этапа.
-        earlier = analysis(conn, memory_id, pieces)
+        earlier = analysis(conn, memory_id, pieces, screened, originals)
         story.what_was_seen(conn, ref, pieces, earlier)
 
         # Музыка раньше режиссёра: под что собирают ролик — часть того, из чего он строит план.
@@ -490,7 +494,7 @@ def montage(conn, ref):
     _tell_the_api(ref)
 
 
-def analysis(conn, memory_id, pieces):
+def analysis(conn, memory_id, pieces, judged=None, originals=None):
     """The first stage: what the order's material still needs, got now — отсев, transcripts,
     descriptions — and the frames described before, for the journal's «описан ранее».
 
@@ -499,11 +503,16 @@ def analysis(conn, memory_id, pieces):
     the series over the memory), so it costs no model. Speech is asked only of a clip that has no
     transcript yet, and a description only of a frame nobody described; everything already done is
     reused and never paid for twice (`speech.transcribe`, `understanding.describe_missing`).
+
+    `judged` and `originals` are what preparation already has — every file judged, every original on
+    disk. Given them, the отсев writes those verdicts instead of fetching the memory a second time,
+    and a clip is not downloaded again to be heard. A clip preparation found unreadable is not
+    transcribed: the same bytes would fail here too, and this time the whole order with them.
     """
-    screening.screen_memory(conn, memory_id)
+    screening.screen_memory(conn, memory_id, judged)
     for piece in pieces:
-        if piece.kind == "video":
-            speech.transcribe(conn, piece.media_id)
+        if piece.kind == "video" and piece.rejected is None:
+            speech.transcribe(conn, piece.media_id, (originals or {}).get(piece.media_id))
     return understanding.describe_missing(conn, [piece.media_id for piece in pieces])
 
 
