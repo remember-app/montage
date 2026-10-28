@@ -55,7 +55,7 @@ def media_understanding(conn, ref):
     if brain.provider is None:
         # Today's state — a model is nobody's until the human buys a key (decision-10). Checked
         # before anything is downloaded, and nothing is stored: the item is simply undescribed, and
-        # the sweep describes it for real the hour after a key appears.
+        # the analysis of the next order describes it for real once a key exists.
         log.info("no cloud model: media item %s stays undescribed", ref)
         return
 
@@ -66,8 +66,8 @@ def media_understanding(conn, ref):
     ).fetchone()
     if row is None:
         # Deleted, still being previewed, failed — or an old photo whose large copy is not made yet
-        # (`worker.sweep_photos_without_previews` is making it). Nothing to describe and nothing
-        # wrong: the sweep comes back for it once there is something to look at.
+        # (`sweeps.sweep_photos_without_previews` is making it). Nothing to describe and nothing
+        # wrong: the next analysis comes back for it once there is something to look at.
         log.info("media item %s has nothing ready to describe, leaving it", ref)
         return
     memory_id, kind, preview_key = row

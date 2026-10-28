@@ -287,6 +287,25 @@ def test_an_order_gets_the_screening_nobody_asked_for(conn, s3, memory, tmp_path
     )
 
 
+def test_a_memory_the_order_already_judged_is_not_fetched_again(conn, memory, monkeypatch):
+    """The order's preparation judges every file before the analysis stage, so screening is handed
+    those verdicts: the memory is not downloaded and decoded a second time for the same answer."""
+    item_id, _ = add_item(conn, memory, "photo", status="ready")  # nothing in the bucket
+
+    def refuse(*_, **__):
+        raise AssertionError("the memory was fetched a second time")
+
+    monkeypatch.setattr(storage, "download", refuse)
+    monkeypatch.setattr(storage, "large_copy", refuse)
+    judged = selection.Piece(
+        media_id=item_id, kind="photo", rejected=selection.BLUR, frame=b"frame", sharpness=0.1
+    )
+
+    screening.screen_memory(conn, str(memory[0]), [judged])
+
+    assert screening_of(conn, item_id) == (True, selection.BLUR)
+
+
 def test_the_hourly_sweeps_do_not_start_analysis(conn, s3, memory, tmp_path):
     """An item nobody analysed is not analysed by the hour (m-43, decision-22): the отсев and
     everything a cloud model answers are a person's request — «Analyze» or an order. The preview

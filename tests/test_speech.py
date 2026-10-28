@@ -210,6 +210,45 @@ def test_an_order_transcribes_a_clip_nobody_wrote_the_words_of(
     assert stored(conn, item_id) is not None
 
 
+def test_an_order_transcribes_the_clip_preparation_already_downloaded(
+    conn, s3, memory, tmp_path, monkeypatch
+):
+    """The order's preparation downloads every clip; the analysis stage hands the file it already
+    has to the transcriber, so the same bytes do not come out of the bucket twice (m-43)."""
+    on_disk = video(tmp_path / "on-disk.mp4")
+    item_id, _ = add_item(conn, memory, "video", status="ready")  # nothing in the bucket at all
+    listens(monkeypatch, Recorded("gemini_transcribe.json"))
+
+    montages.analysis(
+        conn,
+        str(memory[0]),
+        [selection.Piece(media_id=item_id, kind="video")],
+        judged=[],  # preparation looked at everything; this test is about the words alone
+        originals={item_id: on_disk},
+    )
+
+    assert stored(conn, item_id) is not None
+
+
+def test_an_order_does_not_transcribe_a_clip_preparation_found_unreadable(
+    conn, memory, monkeypatch
+):
+    """The отсев struck the file out — the same bytes would fail the transcriber too, and inline in
+    the order that failure takes the whole film with it. One bad file costs the film that file's
+    words, not the film (m-43)."""
+    item_id, _ = add_item(conn, memory, "video", status="ready")  # nothing in the bucket at all
+    listens(monkeypatch, Recorded("gemini_transcribe.json"))  # nobody to ask is not the point
+
+    montages.analysis(
+        conn,
+        str(memory[0]),
+        [selection.Piece(media_id=item_id, kind="video", rejected=selection.UNREADABLE)],
+        judged=[],  # preparation looked at everything, and struck this one out
+    )
+
+    assert stored(conn, item_id) is None
+
+
 @pytest.mark.parametrize("kind", ["video", "photo"])
 def test_a_preview_queues_no_transcription(conn, s3, memory, tmp_path, kind):
     """An upload transcribes nothing (m-43, decision-22): the words are asked for by the analysis
