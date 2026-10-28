@@ -78,8 +78,9 @@ ALTER TABLE ai_requests
 CREATE INDEX IF NOT EXISTS ai_requests_ref_idx ON ai_requests (ref) WHERE ref IS NOT NULL;
 
 -- What is said in one clip, word for word: one row per media item, written by the `media_speech`
--- job (`speech.py`) once a video is ready, and read from then on by everything that needs the words
--- instead of asking for them again (doc-03, «выходы шагов пайплайна переиспользуются»).
+-- job (`speech.py`) when an order's analysis first needs it, and read from then on by everything
+-- that needs the words instead of asking for them again (doc-03, «выходы шагов пайплайна
+-- переиспользуются»).
 --
 -- There is no column for who said it, and that is the design: speech is transcribed, speakers are
 -- not identified (decision-11). An empty `transcript` is an answer and not a gap — the clip has no

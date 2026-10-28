@@ -1,19 +1,15 @@
-"""The `media_screening` job: what the отсев makes of one file, long before a video is ordered.
+"""The отсев: what the analysis makes of a memory's material, asked for only when somebody asks.
 
-The organizer picks the material for a video out of a gallery that already says what the analysis
-thinks of every frame in it — «автоматический анализ, который отмечает за организатора» (doc-03,
-«Автоматический отсев брака как предложение»). That judgement therefore cannot wait for the order:
-it is passed on each item as it becomes `ready` and kept on the row, in `screening_rejected` and
-`screening_reason` (the api's migration `060.do.media-screening.sql`).
+Nothing here runs at upload. Two things start it, and both are a person's request: the organizer's
+«Analyze» on the order screen (the api queues `media_analysis` with the memory's id in `ref`) and an
+order itself, whose first stage fills in what is missing before anything is chosen (`montage.py`,
+`analysis`). An order nobody analysed must still be assembled, so the montage gets the отсев it
+needs itself.
 
-Two questions are asked, one after the other. The first is of the file alone — `selection.judge`,
-the one place that looks at a frame — and its answers are `unreadable`, `blur`, `exposure` or kept.
-The second is of its neighbours: whether it is one more shot of a moment another file stands for,
-`duplicate`. That is `selection._dedup`, the one the order runs, over the same material — ready,
-not hidden, kept by the first question, read in the same order — so a frame marked here is the one
-the montage folds into its series. A verdict that leans on neighbours changes when a neighbour
-comes, so it is counted over the whole memory afresh every time a file is screened, and a frame a
-new shot took the mark off is simply kept again.
+Every verdict is local — `selection.judge` reads a file with ffmpeg and `selection._dedup` counts
+the series — and no cloud model is asked. It is written onto the row in `screening_rejected` and
+`screening_reason` (the api's migration `060.do.media-screening.sql`) and the card it is counted by
+in `media_frames` (`schema.sql`).
 
 What comes back is a **proposal**: the organizer overrules it in either direction before pressing
 «смонтировать», and what actually goes into a video is still `selection.choose`'s answer at the
@@ -32,65 +28,129 @@ from montage.video import selection
 log = logging.getLogger("montage.screening")
 
 
+def media_analysis(conn, ref):
+    """The `media_analysis` job: one memory's ready, visible material screened in one pass.
+
+    `ref` is the memory's id — the api puts nothing smaller in the queue, because a series is a
+    verdict about a frame *among its neighbours* and half a memory cannot answer for it.
+    """
+    screen_memory(conn, ref)
+
+
 def media_screening(conn, ref):
     """One item: the file out of R2, `judge`'s verdict onto the row — and its memory's retakes
-    counted again with it among them."""
+    counted again with it among them.
+
+    Kept as a job of its own for a single-frame request; the analysis job below is what screens a
+    whole memory without paying for the same recount per file.
+    """
     row = conn.execute(
-        "SELECT kind, original_key, preview_key, memory_id FROM media_items WHERE id = %s", (ref,)
+        "SELECT id, kind, original_key, preview_key, memory_id FROM media_items WHERE id = %s",
+        (ref,),
     ).fetchone()
     if row is None:
         # Deleted while the job waited — a member left and took their material with them. Nothing to
         # screen and nothing wrong: retrying would only fail three times.
         log.info("media item %s is gone, nothing to screen", ref)
         return
-    kind, original_key, preview_key, memory_id = row
+    media_id, kind, original_key, preview_key, memory_id = row
 
+    judged = _judged(media_id, kind, original_key, preview_key)
+    with conn.transaction():
+        # One memory's screenings one after another, each over what the ones before it wrote: two
+        # shots of one moment screened at once by two workers would otherwise each count the series
+        # without the other, and whichever wrote last would leave its half-answer standing.
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (str(memory_id),))
+        if not _written(conn, judged):
+            return
+        _duplicates(conn, memory_id)
+
+
+def screen_memory(conn, memory_id):
+    """Judge every ready, visible item of a memory that has no verdict yet, then count its series
+    once — not once per file.
+
+    The material is the order's: `ready`, not hidden, in the gallery's order. A file already judged
+    is not fetched or decoded again; a kept file always leaves its frame behind, so one that has
+    both is done, and the legacy case of a verdict without a frame is the exception the second half
+    of the condition catches. A frame the first question turned down takes no part in a series, so
+    it is done with its verdict alone.
+
+    The series are recounted over the whole memory from what is stored (`_duplicates`), whether or
+    not a file was judged now: a neighbour may have moved while nothing was left to read.
+    """
+    missing = conn.execute(
+        """SELECT item.id, item.kind, item.original_key, item.preview_key
+           FROM media_items item
+           WHERE item.memory_id = %s AND item.status = 'ready' AND NOT item.hidden
+             AND (item.screening_rejected IS NULL
+                  OR (item.screening_rejected = false AND NOT EXISTS (
+                    SELECT 1 FROM media_frames seen WHERE seen.media_id = item.id::text)))
+           ORDER BY coalesce(item.captured_at, item.created_at), item.id""",
+        (str(memory_id),),
+    ).fetchall()
+
+    if not missing:
+        _duplicates(conn, memory_id)
+        return
+    # The files are read outside the transaction: a download is slow, and holding a lock over the
+    # whole memory while one ffmpeg runs would block the other worker that is screening it.
+    judged = [_judged(*row) for row in missing]
+    with conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (str(memory_id),))
+        for one in judged:
+            _written(conn, one)
+        _duplicates(conn, memory_id)
+
+
+def _judged(media_id, kind, original_key, preview_key):
+    """One file looked at, on the copy the piece would be cut from where there is one.
+
+    A photograph is judged on the large copy the preview made of it (2048px, `media_preview`) and
+    not on the forty megapixels it was uploaded at: the same picture, decoded in a tenth of the
+    time — and the same file the montage cuts the piece from, so the proposal and the order are made
+    on one and the same frame. No copy yet, or one the bucket will not give back: the original.
+
+    A video stays on its original whatever copy exists beside it: its preview is a 720p re-encode,
+    which smooths away the very edges sharpness is measured in.
+    """
+    media_id = str(media_id)
     with tempfile.TemporaryDirectory() as workdir:
         workdir = pathlib.Path(workdir)
-        # A photograph is judged on the large copy the preview made of it (2048px, `media_preview`)
-        # and not on the forty megapixels it was uploaded at: the same picture, decoded in a tenth
-        # of the time — and the same file the montage cuts the piece from, so the proposal and the
-        # order are made on one and the same frame. No copy yet, or one the bucket will not give
-        # back: the original, which is what this job has always looked at.
-        #
-        # A video stays on its original whatever copy exists beside it: its preview is a 720p
-        # re-encode, which smooths away the very edges sharpness is measured in.
         looked_at = None
         if kind == "photo" and preview_key:
             looked_at = storage.large_copy(preview_key, workdir / "large.jpg")
         if looked_at is None:
             looked_at = workdir / "original"
             storage.download(original_key, looked_at)
-        judged = selection.judge(selection.Piece(media_id=str(ref), kind=kind, path=looked_at))
+        return selection.judge(selection.Piece(media_id=media_id, kind=kind, path=looked_at))
 
-    with conn.transaction():
-        # One memory's screenings one after another, each over what the ones before it wrote: two
-        # shots of one moment screened at once by two workers would otherwise each count the series
-        # without the other, and whichever wrote last would leave its half-answer standing.
-        conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (str(memory_id),))
-        # `false` and not `null` for a frame that passed: null is «the analysis has not looked yet»,
-        # and the gallery has to be able to tell the two apart (the api's migration 060).
-        written = conn.execute(
-            """UPDATE media_items
-               SET screening_rejected = %s, screening_reason = %s, updated_at = now()
-               WHERE id = %s""",
-            (judged.rejected is not None, judged.rejected, ref),
-        ).rowcount
-        if not written:
-            log.info("media item %s went away mid-screening, nothing to write", ref)
-            return
-        if judged.frame:
-            conn.execute(
-                """INSERT INTO media_frames (media_id, frame, sharpness) VALUES (%s, %s, %s)
-                   ON CONFLICT (media_id)
-                   DO UPDATE SET frame = excluded.frame, sharpness = excluded.sharpness""",
-                (str(ref), judged.frame, judged.sharpness),
-            )
-        # The row's own `status` is not touched, unlike a preview that gives up: a file the analysis
-        # throws out is still in the gallery, still downloadable, and still one «включить» away from
-        # the video. Rubbish in somebody's eyes, maybe; broken, no.
-        log.info("media item %s screened: %s", ref, judged.rejected or "kept")
-        _duplicates(conn, memory_id)
+
+def _written(conn, judged):
+    """The verdict and the frame onto the item's row — false when the item went away mid-screen."""
+    # `false` and not `null` for a frame that passed: null is «the analysis has not looked yet»,
+    # and the gallery has to be able to tell the two apart (the api's migration 060).
+    written = conn.execute(
+        """UPDATE media_items
+           SET screening_rejected = %s, screening_reason = %s, updated_at = now()
+           WHERE id = %s""",
+        (judged.rejected is not None, judged.rejected, judged.media_id),
+    ).rowcount
+    if not written:
+        log.info("media item %s went away mid-screening, nothing to write", judged.media_id)
+        return False
+    if judged.frame:
+        conn.execute(
+            """INSERT INTO media_frames (media_id, frame, sharpness) VALUES (%s, %s, %s)
+               ON CONFLICT (media_id)
+               DO UPDATE SET frame = excluded.frame, sharpness = excluded.sharpness""",
+            (judged.media_id, judged.frame, judged.sharpness),
+        )
+    # The row's own `status` is not touched, unlike a preview that gives up: a file the analysis
+    # throws out is still in the gallery, still downloadable, and still one «включить» away from
+    # the video. Rubbish in somebody's eyes, maybe; broken, no.
+    log.info("media item %s screened: %s", judged.media_id, judged.rejected or "kept")
+    return True
 
 
 def _duplicates(conn, memory_id):

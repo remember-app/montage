@@ -13,7 +13,7 @@ import json
 
 import pytest
 
-from montage import ai, storage, sweeps, worker
+from montage import ai, storage, worker
 from montage.ai import providers
 from montage.media import understanding
 
@@ -240,9 +240,6 @@ def test_without_a_cloud_model_nothing_is_described_and_nobody_is_asked(
     assert conn.execute("SELECT count(*) FROM ai_requests").fetchone()[0] == 0, (
         "the gateway was never entered, so it has nothing to journal"
     )
-    assert sweeps.sweep_media_without_ai_answers(conn) == 0, (
-        "nor is the whole library queued every hour to be told the same thing"
-    )
 
 
 def test_the_fields_the_model_answers_with_are_asked_for_and_kept(
@@ -355,6 +352,12 @@ def test_the_analysis_stage_asks_about_a_frame_only_once(conn, s3, memory, tmp_p
     assert len(net.requests) == 1, "спрошено ровно об одном кадре — о том, кого ещё не описывали"
     assert described(conn, fresh) is not None, "и второй кадр описан на этот раз"
 
+    # A second order out of the same memory: both frames are described already, and neither is
+    # asked about again — the model is not paid twice for what it has already said.
+    again = understanding.describe_missing(conn, [known, fresh])
+    assert again == {known, fresh}, "the second order takes both descriptions ready"
+    assert len(net.requests) == 1, "and asks the model about neither of them again"
+
 
 def test_the_analysis_stage_describes_nothing_when_there_is_no_cloud_model(
     conn, s3, memory, tmp_path, no_model
@@ -370,77 +373,13 @@ def test_the_analysis_stage_describes_nothing_when_there_is_no_cloud_model(
     assert conn.execute("SELECT count(*) FROM ai_requests").fetchone()[0] == 0
 
 
-def test_a_fresh_item_is_queued_for_understanding_as_soon_as_its_preview_is_made(
-    conn, s3, memory, tmp_path
-):
-    """A frame is describable the moment the copies exist, and the director wants it described long
-    before anybody orders a video — so the preview job queues the understanding one."""
+def test_a_preview_queues_no_description(conn, s3, memory, tmp_path):
+    """An upload describes nothing (m-43, decision-22): the cloud model is only asked by the
+    analysis stage of an order, or by an order that found a frame undescribed."""
     item_id, key = add_item(conn, memory, "photo")
     s3.upload_file(str(jpeg(tmp_path / "original.jpg")), storage.client().bucket, key)
     worker.enqueue(conn, "media_preview", item_id)
 
     assert worker.run_once(conn) is True
 
-    assert queued_understanding_for(conn, item_id) == 1
-
-
-def test_the_sweep_picks_up_media_that_was_ready_before_there_was_anybody_to_ask(
-    conn, s3, memory, tmp_path, model
-):
-    """Everything that became ready while there was no key: nothing was ever queued for it, and
-    nothing about the row changes on its own. Once described, it is not asked for again."""
-    model("gemini_describe.json")
-    item_id = ready_media(conn, s3, memory, jpeg(tmp_path / "preview.jpg"))
-
-    sweeps.sweep_media_without_ai_answers(conn)
-    assert queued_understanding_for(conn, item_id) == 1
-    assert worker.run_once(conn) is True
-    assert described(conn, item_id) is not None
-
-    sweeps.sweep_media_without_ai_answers(conn)
-    assert queued_understanding_for(conn, item_id) == 0, "an hour later it is not asked for again"
-
-
-def test_the_sweep_picks_up_frames_the_model_refused_to_describe(
-    conn, s3, memory, tmp_path, monkeypatch
-):
-    """The live case this catch-up was written for: a free-tier account answering «429» to every
-    call. Three attempts go in a minute, the job is `failed` for good, and nothing else will ever
-    come for that frame — ordering a video describes nothing, it only reads what is in the tables.
-
-    So the sweep comes back for it. Not the same hour, though: a model that refuses refuses every
-    frame, and asking again an hour later is three paid calls an hour per frame for as long as the
-    worker runs. A day later, once — by which time the account's limit has rolled over, or the
-    human has bought a bigger one.
-    """
-    over_the_limit = [True]
-
-    def answering_429(request):
-        if over_the_limit[0]:
-            raise RuntimeError("HTTP Error 429: Too Many Requests")
-        return (FIXTURES / "gemini_describe.json").read_bytes()
-
-    item_id = ready_media(conn, s3, memory, jpeg(tmp_path / "preview.jpg"))
-    monkeypatch.setattr(
-        ai, "from_env", lambda *_, **__: providers.Gemini("test-key", transport=answering_429)
-    )
-
-    sweeps.sweep_media_without_ai_answers(conn)
-    assert queued_understanding_for(conn, item_id) == 1
-    for _ in range(worker.MAX_ATTEMPTS):
-        conn.execute("UPDATE jobs SET run_after = now() WHERE ref = %s", (item_id,))
-        assert worker.run_once(conn) is True
-    assert described(conn, item_id) is None
-
-    sweeps.sweep_media_without_ai_answers(conn)
-    assert queued_understanding_for(conn, item_id) == 0, "an hour later it is not asked all over"
-
-    conn.execute(
-        "UPDATE jobs SET updated_at = now() - make_interval(hours => %s) WHERE ref = %s",
-        (sweeps.CATCH_UP_AFTER_HOURS + 1, item_id),
-    )
-    sweeps.sweep_media_without_ai_answers(conn)
-    assert queued_understanding_for(conn, item_id) == 1, "the day after, it is given one more go"
-    over_the_limit[0] = False  # the paid tier is on: the refused frame is described for real
-    assert worker.run_once(conn) is True
-    assert described(conn, item_id)[0].startswith("Женщина")
+    assert queued_understanding_for(conn, item_id) == 0

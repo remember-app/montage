@@ -281,6 +281,9 @@ def test_what_they_wrote_about_a_frame_reaches_the_director(
     said(conn, memory, ids[1], "Это бабушка, не Лиза", minutes=10)
     said(conn, memory, ids[1], "Лизу видно со спины", minutes=30)
     said(conn, memory, ids[2], "Собака под столом — не снимать", minutes=20)
+    # The clip's words are recorded as silence, so the analysis stage asks nobody for them and the
+    # one request below is the director's own.
+    conn.execute("INSERT INTO media_speech (media_id, transcript) VALUES (%s, '')", (ids[3],))
     asked_of = planning_over(monkeypatch, ids[:3], "gemini_plan_thoughts.json")
     montage_id = order(
         conn,

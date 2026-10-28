@@ -1,9 +1,10 @@
 """The `media_speech` job: what is said in one clip, written down once and read by everyone after.
 
-A video that becomes `ready` gets this job queued beside its preview (`preview.media_preview`): the
-original comes back out of the bucket, `ffmpeg` strips the sound out of it, and the gateway
-(`montage.ai`) puts it to whichever cloud model is configured. What comes back is one plain text on
-`media_speech`, under the id of the media item — the words, and nothing but.
+A clip's first stage of analysis is where this runs: the montage's `analysis` asks for the words of
+every clip in the order that has none yet (`montage.py`), so nothing is listened to at upload
+(m-43, decision-22). The original comes back out of the bucket, `ffmpeg` strips the sound out of it,
+and the gateway (`montage.ai`) puts it to whichever cloud model is configured. What comes back is
+one plain text on `media_speech`, under the id of the media item — the words, and nothing but.
 
 Who said them is deliberately not asked and deliberately not kept (decision-11): a transcript here
 is never tied to a person in the frame, and there is nowhere in the table to tie it to one.
@@ -13,7 +14,7 @@ finishes, so the second and every later montage out of the same material costs n
 «выходы других шагов пайплайна тоже переиспользуются»). Silence is an answer and is kept as one —
 an empty text, whether the clip carries no sound at all or carries nobody speaking. What is *not*
 written is the clip nobody was asked about: with no cloud model configured the job leaves no row,
-so the words are really fetched the day a key arrives.
+so the words are fetched by the next analysis once a key exists.
 
 `media_items` belongs to the api's migrations; `media_speech` is this worker's own (`schema.sql`).
 """

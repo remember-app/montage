@@ -145,19 +145,18 @@ def media_preview(conn, ref):
     log.info("media item %s (%s) is ready", ref, kind)
     # What comes after the copies, queued by hand rather than through `worker.enqueue` — `worker`
     # imports this module, and the import cannot go both ways:
-    #   the screening proposal, every kind's (`screening.py`): the organizer meets it in the gallery
-    #   long before any video is ordered;
-    #   speech, a clip's alone (`speech.py`) — a cloud model listening to one takes minutes, which
-    #   the gallery does not wait on;
     #   what the camera wrote into the original — its model, the optics, the place — for the sheet
-    #   «Сведения о кадре» (`frame_info.py`);
-    #   and what is in the frame (`understanding.py`): it is describable the moment the copies
-    #   exist, and the director wants it described long before anybody orders a video.
+    #   «Сведения о кадре» (`frame_info.py`). It is read without a model and the sheet wants it as
+    #   soon as the file is in the gallery.
+    #
+    # Nothing else: the отсев, the description and the transcript are analysis, and analysis runs
+    # only when somebody asks for it — «Analyze» (the api's `media_analysis`, one job per memory)
+    # or an order, whose first stage gets what is missing (`montage.py`, `analysis`). An upload no
+    # longer sends anything to a cloud model (decision-22, m-43).
+    #
     # Only what is not already waiting: this job runs again whenever its worker died between here
-    # and marking it done (`worker.reap`), and must not queue each of them twice.
-    follow_ups = ["media_screening", "media_speech", "media_frame_info", "media_understanding"]
-    if kind != "video":
-        follow_ups.remove("media_speech")
+    # and marking it done (`worker.reap`), and must not queue it twice.
+    follow_ups = ["media_frame_info"]
     conn.execute(
         """INSERT INTO jobs (type, ref)
            SELECT follow_up, %(ref)s FROM unnest(%(types)s::text[]) follow_up

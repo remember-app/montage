@@ -49,7 +49,7 @@ import tempfile
 import urllib.request
 
 from montage import ffmpeg, journal, photo, storage
-from montage.media import preview, understanding
+from montage.media import preview, screening, speech, understanding
 from montage.video import assembly, director, layout, library, music, rhythm, selection, story
 
 MIN_ITEMS = 3  # «Меньше 3 → сразу failed» — the api refuses the order at this number too
@@ -245,10 +245,11 @@ def montage(conn, ref):
             )
         journal.finish(conn, ref, "prep", video_seconds=round(video_seconds, 1), **ready)
 
-        # Разбор кадров — описание каждого, кто ещё не описан, и чтение всего, что уже есть. Кадр,
-        # описанный раньше, в нейросеть повторно не уходит: `describe_missing` отдаёт его журналу
-        # готовым, помеченным «описан ранее», и по этому же делению считается счёт этапа.
-        earlier = understanding.describe_missing(conn, [piece.media_id for piece in pieces])
+        # Первый этап — анализ: отсев, речь и описание того, чего у материала заказа ещё нет
+        # (`analysis`). Кадр, описанный раньше, в нейросеть повторно не уходит: `describe_missing`
+        # отдаёт его журналу готовым, помеченным «описан ранее», и по этому делению считается счёт
+        # этапа.
+        earlier = analysis(conn, memory_id, pieces)
         story.what_was_seen(conn, ref, pieces, earlier)
 
         # Музыка раньше режиссёра: под что собирают ролик — часть того, из чего он строит план.
@@ -487,6 +488,23 @@ def montage(conn, ref):
         return
     log.info("montage %s is ready: %s clips, %.1fs", ref, len(clips), duration or 0)
     _tell_the_api(ref)
+
+
+def analysis(conn, memory_id, pieces):
+    """The first stage: what the order's material still needs, got now — отсев, transcripts,
+    descriptions — and the frames described before, for the journal's «описан ранее».
+
+    An order is the second place analysis runs, after «Analyze» (m-43, decision-22), and an order
+    nobody analysed must still be assembled. The отсев is local (`selection.judge`, one recount of
+    the series over the memory), so it costs no model. Speech is asked only of a clip that has no
+    transcript yet, and a description only of a frame nobody described; everything already done is
+    reused and never paid for twice (`speech.transcribe`, `understanding.describe_missing`).
+    """
+    screening.screen_memory(conn, memory_id)
+    for piece in pieces:
+        if piece.kind == "video":
+            speech.transcribe(conn, piece.media_id)
+    return understanding.describe_missing(conn, [piece.media_id for piece in pieces])
 
 
 def _back_to_originals(chosen, originals, orientation, workdir):
