@@ -13,9 +13,13 @@ from montage.video import layout, selection
 # (`montage.ai`, промпт описания). Журналу они нужны только чтобы сказать, скольких этап разобрал.
 PEOPLE_LABEL, ANIMAL_LABEL = "человек", "животное"
 
+# Кадр, который не удалось описать, стоит в рассказе этими словами (decision-31), а не пропуском:
+# участник видит, что кадр в ролике есть, а разбора у него нет. Причина — в логе и `ai_requests`.
+UNDESCRIBED = "Не удалось разобрать кадр"
+
 
 @journal.quiet
-def what_was_seen(conn, ref, judged, earlier):
+def what_was_seen(conn, ref, judged, earlier, undescribed=()):
     """Этап «разбираем, что на кадрах» в журнал: описание каждого кадра — и на тот, что описан
     сейчас, и на взятый готовым.
 
@@ -29,6 +33,9 @@ def what_was_seen(conn, ref, judged, earlier):
     (контракт api, `faces`, `people`, `animals`). Лица — сколько раз человек попал в кадр, то есть
     сумма меток людей по всем разобранным кадрам; люди и животные — сколько их всего, по разным
     меткам: один и тот же «человек-1» на двадцати кадрах — двадцать лиц и один человек.
+
+    `undescribed` — кадры, которые разобрать не удалось. Им достаётся реплика словами вместо
+    описания (decision-31): честнее показать, что разбора нет, чем выдать их за неописанные молча.
     """
     seen = conn.execute(
         """SELECT media_id, description, cast_labels, details FROM media_understandings
@@ -71,6 +78,8 @@ def what_was_seen(conn, ref, judged, earlier):
                 **({"comments": comments[media_id]} if comments.get(media_id) else {}),
             },
         )
+    for media_id in undescribed:
+        journal.entry(conn, ref, "analysis", media_id=media_id, thought=UNDESCRIBED)
     journal.finish(
         conn,
         ref,

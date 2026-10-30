@@ -128,7 +128,7 @@ def frame_comments(conn, media_ids):
     return said
 
 
-def describe_missing(conn, media_ids):
+def describe_missing(conn, media_ids, failed=None):
     """Описать те из этих кадров, которых ещё никто не описывал; вернуть взятые готовыми.
 
     Тот же `media_understanding`, что и у задачи из очереди, — поэтому кадр, описанный месяц назад
@@ -136,6 +136,11 @@ def describe_missing(conn, media_ids):
     в задаче начинается с одной и той же проверки. Возвращается множество тех, чьё описание взято
     из таблицы, — журнал помечает их «описан ранее», и по нему же считает, сколько описано
     сейчас (контракт api, «analysis»).
+
+    Кадр, разобрать который не удалось, не уносит с собой ни остальные кадры, ни ролик
+    (decision-31): сбой одного вызова — это один неописанный кадр, а режиссёр соберёт фильм из
+    того, что есть. Названный `failed` список получает такие кадры, чтобы журнал сказал о них
+    словами; причина остаётся в логе и в `ai_requests`, где её и ищут.
     """
     earlier = {
         (row[0],)
@@ -144,7 +149,12 @@ def describe_missing(conn, media_ids):
         )
     }
     for media_id in media_ids:
-        media_understanding(conn, media_id)
+        try:
+            media_understanding(conn, media_id)
+        except Exception as exc:
+            log.warning("media item %s is left undescribed: %s", media_id, exc)
+            if failed is not None:
+                failed.append(media_id)
     return {media_id for (media_id,) in earlier}
 
 
