@@ -359,6 +359,37 @@ def test_the_analysis_stage_asks_about_a_frame_only_once(conn, s3, memory, tmp_p
     assert len(net.requests) == 1, "and asks the model about neither of them again"
 
 
+def test_a_frame_the_model_fails_to_describe_does_not_stop_the_analysis(
+    conn, s3, memory, tmp_path, monkeypatch
+):
+    """Сбой модели на одном кадре — один неописанный кадр, а не мёртвый ролик (decision-31).
+
+    Без этой правки исключение из первого кадра уносило весь этап: заказ повторялся, падал снова
+    и сборки не было вовсе. Теперь кадр остаётся неописанным, называется в `failed` — журналу есть
+    что сказать словами, — а остальные кадры разбираются дальше.
+    """
+    good = (FIXTURES / "gemini_describe.json").read_bytes()
+    replies = [saying("Конечно! Вот описание кадра — и вовсе не JSON."), lambda _: good]
+    calls = []
+
+    def transport(request):
+        calls.append(request)
+        return replies[min(len(calls), len(replies)) - 1](request)
+
+    monkeypatch.setattr(
+        ai, "from_env", lambda *_, **__: providers.Gemini("test-key", transport=transport)
+    )
+    broken = ready_media(conn, s3, memory, jpeg(tmp_path / "one.jpg"))
+    fine = ready_media(conn, s3, memory, jpeg(tmp_path / "two.jpg"))
+    failed = []
+
+    understanding.describe_missing(conn, [broken, fine], failed)
+
+    assert failed == [broken], "упавший кадр назван — журнал скажет о нём словами"
+    assert described(conn, broken) is None, "и остался неописанным"
+    assert described(conn, fine) is not None, "а следующий кадр разобран — этап пошёл дальше"
+
+
 def test_the_analysis_stage_describes_nothing_when_there_is_no_cloud_model(
     conn, s3, memory, tmp_path, no_model
 ):

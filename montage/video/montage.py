@@ -253,8 +253,9 @@ def montage(conn, ref):
         # (`analysis`). Кадр, описанный раньше, в нейросеть повторно не уходит: `describe_missing`
         # отдаёт его журналу готовым, помеченным «описан ранее», и по этому делению считается счёт
         # этапа.
-        earlier = analysis(conn, memory_id, pieces, screened, originals)
-        story.what_was_seen(conn, ref, pieces, earlier)
+        undescribed = []
+        earlier = analysis(conn, memory_id, pieces, screened, originals, undescribed)
+        story.what_was_seen(conn, ref, pieces, earlier, undescribed)
 
         # Музыка раньше режиссёра: под что собирают ролик — часть того, из чего он строит план.
         # Дорожка нужна ему файлами уже здесь, а вот отказ по ней — не здесь: он принадлежит стадии
@@ -494,7 +495,7 @@ def montage(conn, ref):
     _tell_the_api(ref)
 
 
-def analysis(conn, memory_id, pieces, judged=None, originals=None):
+def analysis(conn, memory_id, pieces, judged=None, originals=None, failed=None):
     """The first stage: what the order's material still needs, got now — отсев, transcripts,
     descriptions — and the frames described before, for the journal's «описан ранее».
 
@@ -508,12 +509,15 @@ def analysis(conn, memory_id, pieces, judged=None, originals=None):
     disk. Given them, the отсев writes those verdicts instead of fetching the memory a second time,
     and a clip is not downloaded again to be heard. A clip preparation found unreadable is not
     transcribed: the same bytes would fail here too, and this time the whole order with them.
+
+    A frame the model fails to describe is collected into `failed` and left undescribed rather than
+    raising (decision-31): the film is built from what there is, and the journal says it in words.
     """
     screening.screen_memory(conn, memory_id, judged)
     for piece in pieces:
         if piece.kind == "video" and piece.rejected is None:
             speech.transcribe(conn, piece.media_id, (originals or {}).get(piece.media_id))
-    return understanding.describe_missing(conn, [piece.media_id for piece in pieces])
+    return understanding.describe_missing(conn, [piece.media_id for piece in pieces], failed)
 
 
 def _back_to_originals(chosen, originals, orientation, workdir):

@@ -342,6 +342,44 @@ def test_a_character_the_journal_cannot_hold_is_dropped_and_the_answer_kept(conn
     assert (status, response, error) == ("answered", described, None)
 
 
+def test_a_list_of_one_object_is_that_object():
+    """Some models answer `[{...}]` where one object was asked for. That is the answer, not a
+    failed call: a film must not fall over the brackets around it."""
+    assert answers.as_json('[{"camera": "общий план", "cast": ["человек-1"]}]') == {
+        "camera": "общий план",
+        "cast": ["человек-1"],
+    }
+
+
+def test_a_list_of_objects_folds_into_one():
+    """Several objects are several attempts at the same description: the first word on each field
+    is the answer, the description is the first that says anything, and everyone named is cast."""
+    answered = json.dumps(
+        [
+            {"camera": "общий план", "cast": ["человек-1"], "description": ""},
+            {
+                "camera": "крупный план",
+                "cast": ["человек-1", "человек-2"],
+                "description": "накрывают на стол",
+                "mood": "тепло",
+            },
+        ],
+        ensure_ascii=False,
+    )
+
+    assert answers.as_json(answered) == {
+        "camera": "общий план",
+        "cast": ["человек-1", "человек-2"],
+        "description": "накрывают на стол",
+        "mood": "тепло",
+    }
+
+
+def test_prose_is_not_a_list_of_objects_either():
+    with pytest.raises(RuntimeError, match="JSON object"):
+        answers.as_json("Конечно! Вот описание кадра")
+
+
 def nested(depth, inside=""):
     return "[" * depth + inside + "]" * depth
 

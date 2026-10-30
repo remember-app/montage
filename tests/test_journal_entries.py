@@ -99,6 +99,22 @@ def test_the_analysis_stage_tells_what_was_seen_and_who_was_in_frame(conn, memor
     )
 
 
+def test_a_frame_that_could_not_be_described_is_named_in_the_journal(conn, memory):
+    """Кадр, разбор которого не удался, остаётся в рассказе словами (decision-31), а не пропадает:
+    в ролик он попадёт, и участник должен видеть, что описания у него нет."""
+    journal_ready(conn)
+    montage_id = order(conn, memory, {})
+    unknown, _ = add_item(conn, memory, "photo", status="ready")
+
+    journal.begin(conn, montage_id, 1, 60)
+    story.what_was_seen(conn, montage_id, [selection.Piece(media_id=unknown)], set(), [unknown])
+
+    (written,) = entries_of(conn, montage_id, "analysis")
+    assert written.media_id == unknown and written.thought == story.UNDESCRIBED
+    assert written.decision is None and written.labels is None
+    assert stages_of(conn, montage_id)["analysis"]["outcome"]["described"] == 0
+
+
 def test_a_frame_described_now_is_not_marked_as_described_earlier(conn, memory):
     """«Описан ранее» — только про то описание, которое взято готовым. Кадр, описанный этим же
     этапом, помеченства не должен: иначе на экране «описано 1 сейчас, ещё 1 ранее» стояло бы на

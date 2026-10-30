@@ -23,8 +23,13 @@ def as_json(answer):
     place anyone will look for why.
 
     An object and not merely valid JSON: every caller here reads fields off what comes back, and a
-    bare `null` or a list parses perfectly well and then fails three handlers down as an
-    `AttributeError` about `NoneType`, with the answer that caused it nowhere to be seen.
+    bare `null` parses perfectly well and then fails three handlers down as an `AttributeError`
+    about `NoneType`, with the answer that caused it nowhere to be seen.
+
+    A list is the same answer in another shape: models do return `[{...}]` where one object was
+    asked for, and a film must not fail over that. One object in it is the object; several fold
+    into one (`_folded`). Anything else — prose, a string, a bare `null` — is still a failure, and
+    its text is what the journal keeps.
 
     Read by `loaded`, the same as the provider's envelope the text came in.
     """
@@ -33,9 +38,41 @@ def as_json(answer):
     except (ValueError, TypeError):
         # A JSONDecodeError is a ValueError; a TypeError is an answer that is no text at all.
         parsed = None
-    if not isinstance(parsed, dict):
-        raise RuntimeError(f"the model did not answer with a JSON object: {str(answer)[:500]}")
-    return parsed
+    if isinstance(parsed, list):
+        objects = [one for one in parsed if isinstance(one, dict)]
+        if objects:
+            return objects[0] if len(objects) == 1 else _folded(objects)
+    elif isinstance(parsed, dict):
+        return parsed
+    raise RuntimeError(f"the model did not answer with a JSON object: {str(answer)[:500]}")
+
+
+def _folded(objects):
+    """Several objects from a list answer, as the one object they were asked to be.
+
+    `description` — the first one that says anything, since an empty one from the first element
+    would hide what the model actually described. `cast` — every person named, in order, once:
+    `described` and the prompt above it take the names from here. Every other field — from the
+    first element that has it, as the first object is the answer and the rest only repeat or add.
+    """
+    folded = {}
+    for one in objects:
+        for name, value in one.items():
+            if name not in folded:
+                folded[name] = value
+    description = next(
+        (one.get("description") for one in objects if said(one.get("description"))), None
+    )
+    if description is not None:
+        folded["description"] = description
+    cast = []
+    for one in objects:
+        for person in listed(one.get("cast")):
+            if isinstance(person, str) and person not in cast:
+                cast.append(person)
+    if cast:
+        folded["cast"] = cast
+    return folded
 
 
 # NUL, and half of a UTF-16 pair: `\u0000` and a lone `\ud800` both parse into a `str`, and neither
