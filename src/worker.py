@@ -3,11 +3,14 @@ import logging
 import os
 import signal
 import threading
+import time
 
 import psycopg
 
+from src import config
 from src.integrations.db import connect
 from src.jobs import derive, montage
+from src.schedules import SCHEDULES
 
 MAX_ATTEMPTS = 3
 BACKOFF_SECONDS = 30
@@ -201,8 +204,16 @@ def run() -> None:
     conn = connect()
     conn.execute("listen jobs")
     log.info("waiting for jobs: %s", ", ".join(HANDLERS))
+    next_sweep = 0.0
     with Shutdown() as shutdown:
         while not shutdown.asked:
+            if time.monotonic() >= next_sweep:
+                next_sweep = time.monotonic() + config.sweep_interval_seconds()
+                for schedule in SCHEDULES:
+                    try:
+                        schedule(conn)
+                    except Exception:
+                        log.exception("%s failed", schedule.__name__)
             reap(conn)
             if not shutdown.asked and not run_once(conn):
                 shutdown.waiting = True

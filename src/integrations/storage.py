@@ -21,6 +21,10 @@ def client() -> BaseClient:
     )
 
 
+def media_key(media_id: str, file_format: str) -> str:
+    return f"remember/{file_format}/{media_id}"
+
+
 def download(key: str, path: pathlib.Path) -> None:
     client().download_file(config.s3_bucket(), key, str(path))
 
@@ -33,6 +37,14 @@ def upload(path: pathlib.Path, key: str, content_type: str) -> None:
 
 def delete(key: str) -> None:
     client().delete_object(Bucket=config.s3_bucket(), Key=key)
+
+
+def abort_multipart(key: str, upload_id: str) -> None:
+    try:
+        client().abort_multipart_upload(Bucket=config.s3_bucket(), Key=key, UploadId=upload_id)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") not in ("NoSuchUpload", "404"):
+            raise
 
 
 def exists(key: str) -> bool:

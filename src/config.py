@@ -47,6 +47,18 @@ def s3_secret_access_key() -> str:
     return required("S3_SECRET_ACCESS_KEY")
 
 
+def sweep_interval_seconds() -> int:
+    return positive("SWEEP_INTERVAL_SECONDS", 3600)
+
+
+def upload_stale_seconds() -> int:
+    return positive("UPLOAD_STALE_SECONDS", 24 * 3600)
+
+
+def audio_cover_media_id() -> str | None:
+    return env("AUDIO_COVER_MEDIA_ID")
+
+
 def api_url() -> str | None:
     return env("API_URL")
 
