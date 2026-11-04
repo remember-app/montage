@@ -1,15 +1,3 @@
-"""Очередь: одна задача за раз из общей таблицы `jobs` в Postgres, по обработчику на тип.
-
-The loop claims a due job, runs the handler `HANDLERS` names for its type, and marks the row done
-or retries it — three attempts, then `failed`. Between jobs it sleeps on a notification from the
-table itself, and once an hour it lets `sweeps` catch up on what nobody queued.
-
-A job whose worker died holding it goes back to the queue (`reap`), and a worker told to stop hands
-back the job it cannot finish in time (`_Shutdown`) — see docs/queue.md.
-
-Commands to run all this by hand are `__main__.py`: `python -m montage run`.
-"""
-
 import contextlib
 import logging
 import os
@@ -23,24 +11,15 @@ import psycopg
 
 from montage import ai, storage, sweeps
 from montage.media import frame_info, preview, screening, speech, understanding
-
-# Модуль и задача, которую он выполняет, зовутся одинаково — отсюда второе имя.
 from montage.video import montage as montages
 
 MAX_ATTEMPTS = 3
-BACKOFF_SECONDS = 30  # attempt n is retried after BACKOFF_SECONDS * 2 ** (n - 1)
-IDLE_POLL_SECONDS = 30  # fallback only: a queued job normally wakes the worker by NOTIFY
-SWEEP_INTERVAL_SECONDS = 3600  # «раз в час» (architecture.md, «Обработка ошибок»)
-# The job in hand says it is alive this often, and one silent for STALE_SECONDS belongs to a worker
-# that is gone. Ten beats and not two: a beat can be late behind a database hiccup or a stretch of C
-# code holding the GIL, and taking a live montage off its worker would have two of them cut it.
+BACKOFF_SECONDS = 30
+IDLE_POLL_SECONDS = 30
+SWEEP_INTERVAL_SECONDS = 3600
 HEARTBEAT_SECONDS = 30
 STALE_SECONDS = 300
-# Of the 30 s Kubernetes allows between SIGTERM and SIGKILL (`terminationGracePeriodSeconds`): the
-# job in hand gets this much to finish, the rest is for handing it back and closing up.
 GRACE_SECONDS = 20
-# Рядом с pyproject.toml, а не в пакете: этот же файл по этому же пути читает миграция api
-# (`projects/api/scripts/migrate.ts`) — таблица задач общая, и заводит её тот, кто раньше.
 SCHEMA = pathlib.Path(__file__).parents[1] / "schema.sql"
 
 log = logging.getLogger("montage")
@@ -63,12 +42,7 @@ def enqueue(conn, type_, ref=None):
     ).fetchone()[0]
 
 
-# --- handlers ---------------------------------------------------------------
-# Every handler takes the worker's connection and the job's `ref`.
-
-
 def dummy(conn, ref):
-    """Does nothing and succeeds — unless ref is 'fail', which exercises the retry path."""
     if ref == "fail":
         raise RuntimeError("dummy job was asked to fail")
     log.info("dummy job did nothing, successfully")
@@ -86,17 +60,7 @@ HANDLERS = {
 }
 
 
-# --- the loop ---------------------------------------------------------------
-
-
 def run_once(conn):
-    """Claim one due job and run it. Returns False when nothing is due.
-
-    Interrupted — Ctrl-C, or the grace after SIGTERM run out (`_Shutdown`) — it hands the job back
-    to the queue on the way out, as it was: the worker stopped, the job did not fail, and no attempt
-    is counted against it.
-    """
-    # One statement: the row is locked, marked running and returned, so a second worker skips it.
     job = conn.execute(
         """
         UPDATE jobs SET status = 'running', updated_at = now()
@@ -135,7 +99,6 @@ def run_once(conn):
 
 
 def _failed(conn, job_id, type_, ref, attempts, exc):
-    """One more attempt gone: the job is retried after a backoff, or given up on after the last."""
     delay = BACKOFF_SECONDS * 2 ** (attempts - 1)
     status = "failed" if attempts >= MAX_ATTEMPTS else "queued"
     conn.execute(
@@ -159,24 +122,13 @@ def _failed(conn, job_id, type_, ref, attempts, exc):
 
 
 def _give_up(conn, type_, ref):
-    """The job is out of attempts, and the object it was about has to say so too."""
     if type_ == "media_preview":
-        # The gallery would otherwise wait on `processing` forever.
         preview.give_up(conn, ref)
     elif type_ == "montage":
-        # Same for the video that was ordered: the organizer's «повторить» has to appear, and it
-        # only appears under a montage that says it failed. Not the error itself though — the api
-        # serves `error_text` to every member of the memory, and this one is an ffmpeg stderr tail
-        # or the storage's: temp paths, and the bucket's address with the object's name in it. The
-        # full text stays in `jobs.last_error`, which is the operator's to read.
-        #
-        # Код причины — `internal`, и назван здесь явно: сюда попадает всё, что не разобрано
-        # отдельно, потому что очередь исчерпала попытки на ролике, который падал по-разному.
         montages.give_up(conn, ref, "не удалось собрать ролик", "internal")
 
 
 def _hand_back(conn, job_id, type_):
-    """The job in hand back in the queue as it was — first in line, since it was due first."""
     handed = conn.execute(
         """UPDATE jobs SET status = 'queued', updated_at = now()
            WHERE id = %s AND status = 'running'""",
@@ -188,8 +140,6 @@ def _hand_back(conn, job_id, type_):
 
 @contextlib.contextmanager
 def _heartbeat(job_id):
-    """The job's `updated_at` kept fresh for as long as the handler holds it — the sign of life
-    `reap` goes by. A montage runs for many minutes, and nothing else about it says it is alive."""
     stop = threading.Event()
     threading.Thread(
         target=_beat, args=(job_id, stop), name=f"heartbeat-{job_id}", daemon=True
@@ -201,9 +151,6 @@ def _heartbeat(job_id):
 
 
 def _beat(job_id, stop):
-    # A connection of its own, opened at the first beat: the handler's may be inside a transaction
-    # (`layout.write`), which would hold a beat back until it commits, and most jobs are over before
-    # the first beat is due.
     beat = None
     try:
         while not stop.wait(HEARTBEAT_SECONDS):
@@ -226,15 +173,6 @@ def _beat(job_id, stop):
 
 
 def reap(conn):
-    """Jobs left `running` by a worker that died holding them, back in the queue — or failed, when
-    that was their last attempt. Returns how many.
-
-    A live worker keeps the job it holds fresh (`_heartbeat`), so one silent for STALE_SECONDS
-    belongs to a worker that is gone: killed on a deploy past its grace, taken down with its node,
-    or by running out of memory. That counts as an attempt — a file that takes the worker down with
-    it would otherwise take it down forever — but costs no backoff: it was due long ago, and is
-    first in line again.
-    """
     reaped = conn.execute(
         """UPDATE jobs
            SET status = CASE WHEN attempts + 1 >= %(max)s THEN 'failed' ELSE 'queued' END,
@@ -260,25 +198,12 @@ def reap(conn):
 
 
 def wait_for_job(conn):
-    """Block until the queue says there is something new — or until the fallback poll is due.
-
-    A notification sent while this worker was busy (or lost with the connection) is a normal case,
-    not a stuck queue: the timeout makes the loop look again anyway.
-    """
     next(conn.notifies(timeout=IDLE_POLL_SECONDS), None)
 
 
 class _Shutdown:
-    """SIGTERM — how Kubernetes stops a pod, SIGKILL following 30 seconds later.
-
-    Waiting for work, the worker just goes. Holding a job, it takes no new one and gives the one in
-    hand GRACE_SECONDS: a preview is done by then, a montage that runs for minutes is not, and is
-    interrupted the way Ctrl-C interrupts it — `run_once` hands it back to the queue on the way out.
-    """
-
     def __init__(self):
         self.asked = False
-        # For a job, with none in hand: nothing to finish, nothing to hand back.
         self.waiting = False
 
     def __enter__(self):
@@ -309,16 +234,11 @@ def _interrupt(signum, frame):
 
 
 def run(conn):
-    """The loop, until SIGTERM ends it (`_Shutdown`) or Ctrl-C raises out of it."""
     log.info("waiting for jobs, handlers: %s", ", ".join(HANDLERS))
-    # Says which cloud model this worker has, or says out loud that it has none — the job that
-    # then quietly cuts a montage without one is otherwise indistinguishable from one that had it.
     log.info("cloud model: %s", ai.from_env() or "none, every call to it will be skipped")
-    # Which bucket, and — built here rather than at the first job — a setting that is missing or
-    # wrong (a broken key, the google driver with no prefix) stops the worker as it starts.
     log.info("storage: %s", storage.client())
-    conn.execute("LISTEN jobs")  # every insert into `jobs` notifies this channel — see schema.sql
-    next_sweep = 0.0  # once at start-up, then hourly
+    conn.execute("LISTEN jobs")
+    next_sweep = 0.0
     with _Shutdown() as shutdown:
         while not shutdown.asked:
             if time.monotonic() >= next_sweep:
@@ -327,12 +247,8 @@ def run(conn):
                     try:
                         sweep(conn)
                     except Exception:
-                        # Housekeeping rides along with the queue rather than in a process of its
-                        # own, so a bucket that is unreachable must not take the queue down with it
-                        # — nor one sweep take the other with it.
                         log.exception("%s failed, trying again in an hour", sweep.__name__)
             reap(conn)
-            # Asked again: SIGTERM may have come while the sweeps ran, and no job is taken after it.
             if not shutdown.asked and not run_once(conn):
                 shutdown.waiting = True
                 wait_for_job(conn)

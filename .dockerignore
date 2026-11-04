@@ -2,7 +2,6 @@
 # мимо, чтобы ни секрет, ни лишний файл не попали в слой случайно.
 *
 !requirements.txt
-!schema.sql
-!montage
+!src
 **/__pycache__
 **/*.pyc
