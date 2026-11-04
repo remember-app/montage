@@ -3,11 +3,13 @@ import uuid
 
 import psycopg
 
+from src.media import derive
+
 log = logging.getLogger("jobs.derive")
 
 
 def run(conn: psycopg.Connection, ref: uuid.UUID) -> None:
-    raise NotImplementedError("media_derive is not implemented yet")
+    derive.run(conn, ref)
 
 
 def give_up(conn: psycopg.Connection, ref: uuid.UUID) -> None:
