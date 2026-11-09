@@ -38,3 +38,45 @@ class MusicCommand(TypedDict):
 
 EditCommand = ShotCommand | MusicCommand
 EditPlan = list[EditCommand]
+
+
+class ReportDimensions(TypedDict):
+    width: int
+    height: int
+
+
+class ReportMovie(TypedDict):
+    targetSeconds: int
+    dimensions: ReportDimensions
+    story: str | None
+    requiredItemIds: list[str]
+
+
+class ReportShot(TypedDict):
+    itemId: str
+    mediaId: str
+    kind: ShotKind
+    capturedAt: str | None
+    width: int | None
+    height: int | None
+    durationSeconds: float | None
+    hasAudio: bool
+    shownWithCover: bool
+    description: str | None
+    labels: list[str]
+    analysis: dict | None
+
+
+class ReportMusic(TypedDict):
+    songId: str
+    mediaId: str
+    name: str
+    author: str
+    durationSeconds: float | None
+    analysis: dict | None
+
+
+class MontageReport(TypedDict):
+    movie: ReportMovie
+    shots: list[ReportShot]
+    music: list[ReportMusic]

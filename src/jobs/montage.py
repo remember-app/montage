@@ -3,9 +3,14 @@ import uuid
 
 import psycopg
 
-from src.movie import editor, notify
+from src.movie import directing, editor, notify, preparation
 
 log = logging.getLogger("jobs.montage")
+
+
+def _manifest(conn: psycopg.Connection, ref: uuid.UUID) -> dict:
+    row = conn.execute("select manifest from montages where id = %s", (ref,)).fetchone()
+    return (row[0] if row else None) or {}
 
 
 def run(conn: psycopg.Connection, ref: uuid.UUID) -> None:
@@ -17,10 +22,19 @@ def run(conn: psycopg.Connection, ref: uuid.UUID) -> None:
     if status == "done":
         log.info("montage %s is ready already, nothing to assemble", ref)
         return
-    commands = ((manifest or {}).get("editingParams") or {}).get("commands") or []
+    conn.execute("update montages set status = 'processing' where id = %s", (ref,))
+
+    manifest = manifest or {}
+    if not ((manifest.get("directingInput") or {}).get("mergedMontageData")):
+        preparation.build(conn, ref)
+        manifest = _manifest(conn, ref)
+    if not ((manifest.get("editingParams") or {}).get("commands")):
+        directing.direct(conn, ref, manifest["directingInput"]["mergedMontageData"])
+        manifest = _manifest(conn, ref)
+
+    commands = (manifest.get("editingParams") or {}).get("commands") or []
     if not commands:
         raise RuntimeError("montage has no editing plan")
-    conn.execute("update montages set status = 'processing' where id = %s", (ref,))
     editor.render(conn, ref, commands)
 
 

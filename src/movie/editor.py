@@ -595,6 +595,14 @@ def _store(
         raise
 
 
+def validate(conn: psycopg.Connection, montage_id: uuid.UUID, plan: EditPlan) -> None:
+    montage = _load(conn, montage_id)
+    shots = [command for command in plan if command.get("type") == "shot"]
+    items = _items(conn, [str(shot["itemId"]) for shot in shots])
+    songs = _songs(conn, [str(cue["mediaId"]) for cue in plan if cue.get("type") == "music"])
+    _validate(plan, montage, items, songs)
+
+
 def render(conn: psycopg.Connection, montage_id: uuid.UUID, plan: EditPlan) -> None:
     montage = _load(conn, montage_id)
     shots = [command for command in plan if command.get("type") == "shot"]
