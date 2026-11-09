@@ -9,7 +9,7 @@ import psycopg
 
 from src import config
 from src.integrations.db import connect
-from src.jobs import derive, montage
+from src.jobs import analysis, derive, montage
 from src.schedules import SCHEDULES
 
 MAX_ATTEMPTS = 3
@@ -19,7 +19,7 @@ HEARTBEAT_SECONDS = 30
 STALE_SECONDS = 300
 GRACE_SECONDS = 20
 
-HANDLERS = {"media_derive": derive.run, "montage": montage.run}
+HANDLERS = {"media_derive": derive.run, "media_analysis": analysis.run, "montage": montage.run}
 
 log = logging.getLogger("worker")
 
@@ -29,9 +29,16 @@ def run_once(conn: psycopg.Connection) -> bool:
         """
         update jobs set status = 'running', updated_at = now()
         where id = (
-            select id from jobs
-            where status = 'queued' and run_after <= now()
-            order by run_after
+            select j.id from jobs j
+            where j.status = 'queued' and j.run_after <= now()
+              and (
+                  j.depends_on is null
+                  or not exists (
+                      select 1 from jobs d
+                      where d.id = any(j.depends_on) and d.status in ('queued', 'running')
+                  )
+              )
+            order by j.run_after, j.id
             limit 1
             for update skip locked
         )

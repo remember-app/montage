@@ -52,6 +52,10 @@ def format_tags(path: pathlib.Path) -> dict:
     return probe(path).get("format", {}).get("tags", {})
 
 
+def has_audio(path: pathlib.Path) -> bool:
+    return any(stream.get("codec_type") == "audio" for stream in probe(path).get("streams", []))
+
+
 def refuse_playlists(path: pathlib.Path) -> None:
     with path.open("rb") as file:
         head = file.read(64).lstrip()

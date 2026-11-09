@@ -3,6 +3,8 @@ import os
 
 def env(name: str) -> str | None:
     value = os.environ.get(name, "").strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        value = value[1:-1]
     return value or None
 
 
@@ -65,3 +67,15 @@ def api_url() -> str | None:
 
 def worker_token() -> str | None:
     return env("INTERNAL_WORKER_TOKEN")
+
+
+def gemini_api_key() -> str:
+    return required("GEMINI_API_KEY")
+
+
+def gemini_model() -> str:
+    return env("GEMINI_MODEL") or "gemini-3.8-flash"
+
+
+def ai_timeout_seconds() -> int:
+    return positive("AI_TIMEOUT_SECONDS", 180)
