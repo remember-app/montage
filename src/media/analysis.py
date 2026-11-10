@@ -1,4 +1,5 @@
 import logging
+import math
 import pathlib
 import tempfile
 import uuid
@@ -11,11 +12,13 @@ from src.integrations import ai, ai_usage, ffmpeg, storage
 
 log = logging.getLogger("media.analysis")
 
-FRAMES = 3
+IMAGE_SIDE = 768
+FRAME_STEP_SECONDS = 5
+FRAME_MIN = 3
+FRAME_MAX = 60
 DESCRIPTION_LIMIT = 2000
 SEGMENT_LIMIT = 500
 
-PHOTO_MIME = {"jpeg": "image/jpeg", "jpg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
 
 INSTRUCTION = (
     "You analyze frames shot by people at the same event. Answer in English and reply with a "
@@ -133,11 +136,19 @@ def _audio_blob(source: pathlib.Path, workdir: pathlib.Path, speech: bool) -> ai
     return ai.Blob("audio/mp4", sound.read_bytes())
 
 
-def _image_blob(source: pathlib.Path, file_format: str, workdir: pathlib.Path) -> ai.Blob:
-    if file_format in PHOTO_MIME:
-        return ai.Blob(PHOTO_MIME[file_format], source.read_bytes())
+def _image_blob(source: pathlib.Path, workdir: pathlib.Path) -> ai.Blob:
     jpeg = workdir / "still.jpg"
-    ffmpeg.run("-i", str(source), "-frames:v", "1", "-q:v", "3", str(jpeg))
+    ffmpeg.run(
+        "-i",
+        str(source),
+        "-vf",
+        f"scale={IMAGE_SIDE}:{IMAGE_SIDE}:force_original_aspect_ratio=decrease",
+        "-frames:v",
+        "1",
+        "-q:v",
+        "3",
+        str(jpeg),
+    )
     return ai.Blob("image/jpeg", jpeg.read_bytes())
 
 
@@ -145,26 +156,39 @@ def _frame_blobs(
     source: pathlib.Path, duration: float | None, workdir: pathlib.Path
 ) -> tuple[list[ai.Blob], list[float]]:
     length = duration or ffmpeg.duration(source) or 0.0
-    moments = [round(length * (index + 1) / (FRAMES + 1), 2) for index in range(FRAMES)]
+    count = (
+        FRAME_MIN
+        if length <= 0
+        else max(FRAME_MIN, min(FRAME_MAX, math.ceil(length / FRAME_STEP_SECONDS)))
+    )
+    moments = [round(length * (index + 0.5) / count, 2) for index in range(count)]
     blobs, seconds = [], []
     for index, moment in enumerate(moments):
         frame = workdir / f"frame-{index}.jpg"
-        ffmpeg.run("-ss", f"{moment:.3f}", "-i", str(source), "-frames:v", "1", str(frame))
+        ffmpeg.run(
+            "-ss",
+            f"{moment:.3f}",
+            "-i",
+            str(source),
+            "-frames:v",
+            "1",
+            "-vf",
+            f"scale={IMAGE_SIDE}:{IMAGE_SIDE}:force_original_aspect_ratio=decrease",
+            "-q:v",
+            "3",
+            str(frame),
+        )
         blobs.append(ai.Blob("image/jpeg", frame.read_bytes()))
         seconds.append(moment)
     return blobs, seconds
 
 
 def _photo_analysis(
-    conn: psycopg.Connection,
-    media_id: uuid.UUID,
-    source: pathlib.Path,
-    file_format: str,
-    workdir: pathlib.Path,
+    conn: psycopg.Connection, media_id: uuid.UUID, source: pathlib.Path, workdir: pathlib.Path
 ) -> dict:
     if config.ai_mock():
         return {"description": "Mock: a frame from the event.", "score": 0.5}
-    blob = _image_blob(source, file_format, workdir)
+    blob = _image_blob(source, workdir)
     answer = ai_usage.as_json(
         conn,
         operation="photo",
@@ -321,13 +345,10 @@ def run(conn: psycopg.Connection, ref: uuid.UUID) -> None:
 
     row = conn.execute(
         """
-        select m.kind, m.format, m.storage_key, m.duration,
+        select m.kind, m.storage_key, m.duration,
                (select pm.storage_key from project_items pi
                   join media_items pm on pm.id = pi.preview_id
-                 where pi.media_id = m.id limit 1) as preview_key,
-               (select pm.format from project_items pi
-                  join media_items pm on pm.id = pi.preview_id
-                 where pi.media_id = m.id limit 1) as preview_format
+                 where pi.media_id = m.id limit 1) as preview_key
         from media_items m where m.id = %s
         """,
         (ref,),
@@ -335,16 +356,15 @@ def run(conn: psycopg.Connection, ref: uuid.UUID) -> None:
     if row is None:
         log.info("media %s is gone, nothing to analyze", ref)
         return
-    kind, file_format, original_key, duration, preview_key, preview_format = row
+    kind, storage_key, duration, preview_key = row
 
     with tempfile.TemporaryDirectory() as directory:
         workdir = pathlib.Path(directory)
         if item:
-            source_key = preview_key or original_key
-            source_format = (preview_format or file_format).lower()
+            source_key = preview_key or storage_key
             source = _download(source_key, workdir, "item-source")
             if kind == "photo":
-                analysis = _photo_analysis(conn, ref, source, source_format, workdir)
+                analysis = _photo_analysis(conn, ref, source, workdir)
             elif kind == "video":
                 analysis = _video_analysis(conn, ref, source, duration, workdir)
             else:
@@ -356,7 +376,7 @@ def run(conn: psycopg.Connection, ref: uuid.UUID) -> None:
             log.info("media %s analyzed for %s item(s)", ref, landed)
 
         if song:
-            source = _download(original_key, workdir, "song-source")
+            source = _download(storage_key, workdir, "song-source")
             analysis = _music_analysis(conn, ref, source, duration, workdir)
             landed = conn.execute(
                 "update songs set analysis = %s where media_id = %s and analysis is null",
