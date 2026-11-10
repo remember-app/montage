@@ -37,7 +37,13 @@ def _text(payload: dict) -> str:
     )
 
 
-def ask(instruction: str, prompt: str, blobs: tuple[Blob, ...] = ()) -> str:
+class AnswerError(RuntimeError):
+    def __init__(self, message: str, usage: dict | None = None) -> None:
+        super().__init__(message)
+        self.usage = usage
+
+
+def ask(instruction: str, prompt: str, blobs: tuple[Blob, ...] = ()) -> tuple[str, dict | None]:
     parts = [{"type": "text", "text": f"{instruction}\n\n{prompt}".strip()}]
     parts += [
         {"type": blob.kind, "mime_type": blob.mime_type, "data": blob.encoded()} for blob in blobs
@@ -59,18 +65,21 @@ def ask(instruction: str, prompt: str, blobs: tuple[Blob, ...] = ()) -> str:
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode(errors="replace")[:500]
         raise RuntimeError(f"model request failed: {exc.code} {detail}") from None
+    usage = payload.get("usage") if isinstance(payload, dict) else None
     answer = _text(payload if isinstance(payload, dict) else {})
     if not answer:
-        raise RuntimeError("the model answered with nothing")
-    return answer
+        raise AnswerError("the model answered with nothing", usage)
+    return answer, usage
 
 
-def as_json(instruction: str, prompt: str, blobs: tuple[Blob, ...] = ()) -> dict:
-    answer = ask(instruction, prompt, blobs)
+def as_json(
+    instruction: str, prompt: str, blobs: tuple[Blob, ...] = ()
+) -> tuple[dict, dict | None]:
+    answer, usage = ask(instruction, prompt, blobs)
     try:
         parsed = json.loads(answer)
     except ValueError:
-        raise RuntimeError(f"the model did not answer with JSON: {answer[:500]}") from None
+        raise AnswerError(f"the model did not answer with JSON: {answer[:500]}", usage) from None
     if not isinstance(parsed, dict):
-        raise RuntimeError(f"the model answered with {type(parsed).__name__}, not an object")
-    return parsed
+        raise AnswerError(f"the model answered with {type(parsed).__name__}, not an object", usage)
+    return parsed, usage

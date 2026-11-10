@@ -7,7 +7,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from src import config
-from src.integrations import ai, ffmpeg, storage
+from src.integrations import ai, ai_usage, ffmpeg, storage
 
 log = logging.getLogger("media.analysis")
 
@@ -45,10 +45,12 @@ AUDIO_PROMPT = (
     '{"secStart": 0.0, "secEnd": 0.0, "text": "..."}]}'
 )
 MUSIC_PROMPT = (
-    "This is a music track. Split it into musical sections and briefly describe each: mood, "
-    "instruments, what changes. Transcribe the lyrics if any, with time segments in seconds. "
-    'Reply: {"transcription": [{"secStart": 0.0, "secEnd": 0.0, "text": "..."}], '
-    '"melody": [{"secStart": 0.0, "secEnd": 0.0, "text": "..."}]}'
+    "This is a music track. Describe it in one sentence and rate how useful it is for a movie "
+    "from 0 to 1. Split it into musical sections and briefly describe each: mood, instruments, "
+    "what changes. Transcribe the lyrics if any, with time segments in seconds. "
+    'Reply: {"description": "...", "score": 0.0, '
+    '"transcription": [{"secStart": 0.0, "secEnd": 0.0, "text": "..."}], '
+    '"mood": [{"secStart": 0.0, "secEnd": 0.0, "text": "..."}]}'
 )
 
 
@@ -153,18 +155,37 @@ def _frame_blobs(
     return blobs, seconds
 
 
-def _photo_analysis(source: pathlib.Path, file_format: str, workdir: pathlib.Path) -> dict:
+def _photo_analysis(
+    conn: psycopg.Connection,
+    media_id: uuid.UUID,
+    source: pathlib.Path,
+    file_format: str,
+    workdir: pathlib.Path,
+) -> dict:
     if config.ai_mock():
         return {"description": "Mock: a frame from the event.", "score": 0.5}
     blob = _image_blob(source, file_format, workdir)
-    answer = ai.as_json(INSTRUCTION, PHOTO_PROMPT, (blob,))
+    answer = ai_usage.as_json(
+        conn,
+        operation="photo",
+        media_id=media_id,
+        instruction=INSTRUCTION,
+        prompt=PHOTO_PROMPT,
+        blobs=(blob,),
+    )
     description = _said(answer.get("description"))
     if description is None:
         raise RuntimeError("the model described nothing")
     return {"description": description, "score": _score(answer.get("score"))}
 
 
-def _video_analysis(source: pathlib.Path, duration: float | None, workdir: pathlib.Path) -> dict:
+def _video_analysis(
+    conn: psycopg.Connection,
+    media_id: uuid.UUID,
+    source: pathlib.Path,
+    duration: float | None,
+    workdir: pathlib.Path,
+) -> dict:
     if config.ai_mock():
         return {
             "description": "Mock: a clip from the event.",
@@ -174,14 +195,26 @@ def _video_analysis(source: pathlib.Path, duration: float | None, workdir: pathl
         }
     blobs, seconds = _frame_blobs(source, duration, workdir)
     prompt = VIDEO_PROMPT.replace("{seconds}", ", ".join(f"{one:.2f}" for one in seconds))
-    answer = ai.as_json(INSTRUCTION, prompt, tuple(blobs))
+    answer = ai_usage.as_json(
+        conn,
+        operation="video",
+        media_id=media_id,
+        instruction=INSTRUCTION,
+        prompt=prompt,
+        blobs=tuple(blobs),
+    )
     description = _said(answer.get("description"))
     if description is None:
         raise RuntimeError("the model described nothing")
     transcription = []
     if _has_audio(source):
-        heard = ai.as_json(
-            INSTRUCTION, TRANSCRIBE_PROMPT, (_audio_blob(source, workdir, speech=True),)
+        heard = ai_usage.as_json(
+            conn,
+            operation="video",
+            media_id=media_id,
+            instruction=INSTRUCTION,
+            prompt=TRANSCRIBE_PROMPT,
+            blobs=(_audio_blob(source, workdir, speech=True),),
         )
         transcription = _segments(heard.get("transcription"), duration)
     return {
@@ -192,10 +225,28 @@ def _video_analysis(source: pathlib.Path, duration: float | None, workdir: pathl
     }
 
 
-def _audio_analysis(source: pathlib.Path, duration: float | None, workdir: pathlib.Path) -> dict:
+def _audio_analysis(
+    conn: psycopg.Connection,
+    media_id: uuid.UUID,
+    source: pathlib.Path,
+    duration: float | None,
+    workdir: pathlib.Path,
+) -> dict:
     if config.ai_mock():
-        return {"description": "Mock: a sound from the event.", "score": 0.5, "transcription": []}
-    answer = ai.as_json(INSTRUCTION, AUDIO_PROMPT, (_audio_blob(source, workdir, speech=True),))
+        return {
+            "description": "Mock: a sound from the event.",
+            "score": 0.5,
+            "transcription": [],
+            "mood": None,
+        }
+    answer = ai_usage.as_json(
+        conn,
+        operation="audio",
+        media_id=media_id,
+        instruction=INSTRUCTION,
+        prompt=AUDIO_PROMPT,
+        blobs=(_audio_blob(source, workdir, speech=True),),
+    )
     description = _said(answer.get("description"))
     if description is None:
         raise RuntimeError("the model described nothing")
@@ -203,16 +254,40 @@ def _audio_analysis(source: pathlib.Path, duration: float | None, workdir: pathl
         "description": description,
         "score": _score(answer.get("score")),
         "transcription": _segments(answer.get("transcription"), duration),
+        "mood": None,
     }
 
 
-def _music_analysis(source: pathlib.Path, duration: float | None, workdir: pathlib.Path) -> dict:
+def _music_analysis(
+    conn: psycopg.Connection,
+    media_id: uuid.UUID,
+    source: pathlib.Path,
+    duration: float | None,
+    workdir: pathlib.Path,
+) -> dict:
     if config.ai_mock():
-        return {"transcription": [], "melody": []}
-    answer = ai.as_json(INSTRUCTION, MUSIC_PROMPT, (_audio_blob(source, workdir, speech=False),))
+        return {
+            "description": "Mock: a music track.",
+            "score": 0.5,
+            "transcription": [],
+            "mood": [],
+        }
+    answer = ai_usage.as_json(
+        conn,
+        operation="audio",
+        media_id=media_id,
+        instruction=INSTRUCTION,
+        prompt=MUSIC_PROMPT,
+        blobs=(_audio_blob(source, workdir, speech=False),),
+    )
+    description = _said(answer.get("description"))
+    if description is None:
+        raise RuntimeError("the model described nothing")
     return {
+        "description": description,
+        "score": _score(answer.get("score")),
         "transcription": _segments(answer.get("transcription"), duration),
-        "melody": _segments(answer.get("melody"), duration),
+        "mood": _segments(answer.get("mood"), duration),
     }
 
 
@@ -269,11 +344,11 @@ def run(conn: psycopg.Connection, ref: uuid.UUID) -> None:
             source_format = (preview_format or file_format).lower()
             source = _download(source_key, workdir, "item-source")
             if kind == "photo":
-                analysis = _photo_analysis(source, source_format, workdir)
+                analysis = _photo_analysis(conn, ref, source, source_format, workdir)
             elif kind == "video":
-                analysis = _video_analysis(source, duration, workdir)
+                analysis = _video_analysis(conn, ref, source, duration, workdir)
             else:
-                analysis = _audio_analysis(source, duration, workdir)
+                analysis = _audio_analysis(conn, ref, source, duration, workdir)
             landed = conn.execute(
                 "update project_items set analysis = %s where media_id = %s and analysis is null",
                 (Jsonb(analysis), ref),
@@ -282,7 +357,7 @@ def run(conn: psycopg.Connection, ref: uuid.UUID) -> None:
 
         if song:
             source = _download(original_key, workdir, "song-source")
-            analysis = _music_analysis(source, duration, workdir)
+            analysis = _music_analysis(conn, ref, source, duration, workdir)
             landed = conn.execute(
                 "update songs set analysis = %s where media_id = %s and analysis is null",
                 (Jsonb(analysis), ref),

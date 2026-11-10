@@ -5,7 +5,7 @@ import uuid
 import psycopg
 
 from src import config
-from src.integrations import ai
+from src.integrations import ai_usage
 from src.movie import editor
 
 log = logging.getLogger("movie.directing")
@@ -155,7 +155,10 @@ def direct(
                 "Fix the plan and answer with the schema again."
             )
         try:
-            summary, commands = _answer(ai.ask(SYSTEM, prompt))
+            answer = ai_usage.text(
+                conn, operation="text", montage_id=montage_id, instruction=SYSTEM, prompt=prompt
+            )
+            summary, commands = _answer(answer)
             editor.validate(conn, montage_id, commands)
         except RuntimeError as exc:
             problem = str(exc)
