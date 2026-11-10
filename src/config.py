@@ -69,6 +69,10 @@ def worker_token() -> str | None:
     return env("INTERNAL_WORKER_TOKEN")
 
 
+def ai_mock() -> bool:
+    return (env("AI_MOCK") or "").lower() in ("1", "true")
+
+
 def gemini_api_key() -> str:
     return required("GEMINI_API_KEY")
 

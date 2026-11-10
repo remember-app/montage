@@ -76,7 +76,8 @@ def _load(conn: psycopg.Connection, montage_id: uuid.UUID) -> Montage:
         raise RuntimeError(f"montage {montage_id} is gone")
     identifier, project_id, created_by, manifest, title = row
     settings = (manifest or {}).get("preparationConfig") or {}
-    return Montage(identifier, project_id, created_by, title or "Movie", settings)
+    name = settings.get("name") or title or "Movie"
+    return Montage(identifier, project_id, created_by, name, settings)
 
 
 def _items(conn: psycopg.Connection, item_ids: list[str]) -> dict[str, Item]:

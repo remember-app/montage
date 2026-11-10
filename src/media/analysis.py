@@ -6,6 +6,7 @@ import uuid
 import psycopg
 from psycopg.types.json import Jsonb
 
+from src import config
 from src.integrations import ai, ffmpeg, storage
 
 log = logging.getLogger("media.analysis")
@@ -153,6 +154,8 @@ def _frame_blobs(
 
 
 def _photo_analysis(source: pathlib.Path, file_format: str, workdir: pathlib.Path) -> dict:
+    if config.ai_mock():
+        return {"description": "Mock: a frame from the event.", "score": 0.5}
     blob = _image_blob(source, file_format, workdir)
     answer = ai.as_json(INSTRUCTION, PHOTO_PROMPT, (blob,))
     description = _said(answer.get("description"))
@@ -162,6 +165,13 @@ def _photo_analysis(source: pathlib.Path, file_format: str, workdir: pathlib.Pat
 
 
 def _video_analysis(source: pathlib.Path, duration: float | None, workdir: pathlib.Path) -> dict:
+    if config.ai_mock():
+        return {
+            "description": "Mock: a clip from the event.",
+            "score": 0.5,
+            "transcription": [],
+            "frames": [],
+        }
     blobs, seconds = _frame_blobs(source, duration, workdir)
     prompt = VIDEO_PROMPT.replace("{seconds}", ", ".join(f"{one:.2f}" for one in seconds))
     answer = ai.as_json(INSTRUCTION, prompt, tuple(blobs))
@@ -183,6 +193,8 @@ def _video_analysis(source: pathlib.Path, duration: float | None, workdir: pathl
 
 
 def _audio_analysis(source: pathlib.Path, duration: float | None, workdir: pathlib.Path) -> dict:
+    if config.ai_mock():
+        return {"description": "Mock: a sound from the event.", "score": 0.5, "transcription": []}
     answer = ai.as_json(INSTRUCTION, AUDIO_PROMPT, (_audio_blob(source, workdir, speech=True),))
     description = _said(answer.get("description"))
     if description is None:
@@ -195,6 +207,8 @@ def _audio_analysis(source: pathlib.Path, duration: float | None, workdir: pathl
 
 
 def _music_analysis(source: pathlib.Path, duration: float | None, workdir: pathlib.Path) -> dict:
+    if config.ai_mock():
+        return {"transcription": [], "melody": []}
     answer = ai.as_json(INSTRUCTION, MUSIC_PROMPT, (_audio_blob(source, workdir, speech=False),))
     return {
         "transcription": _segments(answer.get("transcription"), duration),
