@@ -19,6 +19,7 @@ AUDIO_RATE = "44100"
 AUDIO_BITRATE = "192k"
 TARGET_ALLOWANCE = 0.1
 TARGET_ALLOWANCE_MIN = 2.0
+ZOOM_SMOOTH = 4
 
 
 @dataclasses.dataclass
@@ -222,7 +223,21 @@ def _validate(
         raise RuntimeError("; ".join(issues))
 
 
-def _video_filters(shot: ShotCommand, width: int, height: int) -> list[str]:
+def _fit_size(
+    shot: ShotCommand, source: pathlib.Path, width: int, height: int
+) -> tuple[int, int]:
+    source_width, source_height = ffmpeg.dimensions(source) or (width, height)
+    framing = shot.get("framing")
+    if framing:
+        source_width *= float(framing["w"])
+        source_height *= float(framing["h"])
+    scale = min(width / source_width, height / source_height)
+    return max(1, round(source_width * scale)), max(1, round(source_height * scale))
+
+
+def _video_filters(
+    shot: ShotCommand, width: int, height: int, fit_width: int, fit_height: int
+) -> list[str]:
     filters = []
     framing = shot.get("framing")
     if framing:
@@ -231,16 +246,18 @@ def _video_filters(shot: ShotCommand, width: int, height: int) -> list[str]:
                 x=_f(framing["x"]), y=_f(framing["y"]), w=_f(framing["w"]), h=_f(framing["h"])
             )
         )
-    filters.append(f"scale={width}:{height}:force_original_aspect_ratio=increase")
-    filters.append(f"crop={width}:{height}")
-    filters.append("setsar=1")
     motion = shot.get("motion") or "none"
     if motion != "none" and shot.get("kind") in ("photo", "audio"):
+        filters.append(f"scale={fit_width * ZOOM_SMOOTH}:{fit_height * ZOOM_SMOOTH}")
         zoom = "min(1.0+0.0008*on,1.15)" if motion == "zoom_in" else "max(1.15-0.0008*on,1.0)"
         filters.append(
             f"zoompan=z='{zoom}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
-            f":d=1:s={width}x{height}:fps={FPS}"
+            f":d=1:s={fit_width}x{fit_height}:fps={FPS}"
         )
+    else:
+        filters.append(f"scale={fit_width}:{fit_height}")
+    filters.append("setsar=1")
+    filters.append(f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black")
     filters.append(f"fps={FPS}")
     return filters
 
@@ -263,10 +280,12 @@ def _clip(
     ffmpeg.refuse_playlists(source)
 
     if shot.get("kind") == "photo":
+        picture = source
         inputs = ["-loop", "1", "-framerate", str(FPS), "-t", _f(seconds), "-i", str(source)]
         inputs += ["-f", "lavfi", "-t", _f(seconds), "-i", "anullsrc=r=44100:cl=stereo"]
         audio_map, audio_filter = "1:a:0", None
     elif shot.get("kind") == "video":
+        picture = source
         inputs = ["-ss", _f(start), "-t", _f(seconds), "-i", str(source)]
         if live > 0 and ffmpeg.has_audio(source):
             audio_map, audio_filter = "0:a:0", f"volume={_f(live)},apad"
@@ -279,14 +298,16 @@ def _clip(
             raise RuntimeError(f"audio item {item.item_id} has no cover")
         image = workdir / f"cover-{uuid.uuid4().hex}"
         storage.download(picture, image)
+        picture = image
         inputs = ["-loop", "1", "-framerate", str(FPS), "-t", _f(seconds), "-i", str(image)]
         inputs += ["-ss", _f(start), "-t", _f(seconds), "-i", str(source)]
         audio_map, audio_filter = "1:a:0", f"volume={_f(live)},apad"
 
+    fit_width, fit_height = _fit_size(shot, picture, width, height)
     args = [
         *inputs,
         "-vf",
-        ",".join(_video_filters(shot, width, height)),
+        ",".join(_video_filters(shot, width, height, fit_width, fit_height)),
         "-map",
         "0:v:0",
         "-map",
