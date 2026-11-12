@@ -4,7 +4,6 @@ import uuid
 
 import psycopg
 
-from src import config
 from src.integrations import ai_usage
 from src.movie import editor
 
@@ -90,68 +89,9 @@ def _store(conn: psycopg.Connection, montage_id: uuid.UUID, commands: list, summ
         raise RuntimeError(f"montage {montage_id} went away while directing")
 
 
-def _mock_plan(report: dict) -> list:
-    shots = report.get("shots") or []
-    target = float((report.get("movie") or {}).get("targetSeconds") or 0)
-    overlap = 0.25
-    if target > 0 and shots:
-        each = (target + overlap * (len(shots) - 1)) / len(shots)
-    else:
-        each = 2.5
-    commands = []
-    for shot in shots:
-        kind = shot.get("kind")
-        seconds = each if kind == "photo" else min(each, float(shot.get("durationSeconds") or each))
-        commands.append(
-            {
-                "type": "shot",
-                "itemId": shot["itemId"],
-                "mediaId": shot["mediaId"],
-                "kind": kind,
-                "sourceStartSeconds": 0.0,
-                "seconds": round(max(seconds, 0.5), 3),
-                "liveLevel": 0.0 if kind == "photo" else 0.6,
-                "framing": None,
-                "motion": "none",
-                "transitionSeconds": overlap,
-            }
-        )
-    total = sum(command["seconds"] for command in commands) - overlap * max(len(commands) - 1, 0)
-    tracks = report.get("music") or []
-    if tracks and total > 0:
-        track = tracks[0]
-        seconds = min(float(track.get("durationSeconds") or total), total)
-        fade = min(0.5, seconds)
-        commands.append(
-            {
-                "type": "music",
-                "songId": track["songId"],
-                "mediaId": track["mediaId"],
-                "sourceStartSeconds": 0.0,
-                "seconds": round(seconds, 3),
-                "atSeconds": 0.0,
-                "gain": 0.8,
-                "fadeInSeconds": fade,
-                "fadeOutSeconds": fade,
-            }
-        )
-    return commands
-
-
 def direct(
     conn: psycopg.Connection, montage_id: uuid.UUID, data: dict | str, attempts: int = 2
 ) -> list:
-    if config.ai_mock():
-        parsed = data if isinstance(data, dict) else json.loads(data)
-        commands = _mock_plan(parsed)
-        music = any(one.get("type") == "music" for one in commands)
-        summary = (
-            f"Mock edit: {len(_used(commands))} shots, {'with music' if music else 'no music'}."
-        )
-        editor.validate(conn, montage_id, commands)
-        _store(conn, montage_id, commands, summary)
-        log.info("montage %s directed in mock mode: %s commands", montage_id, len(commands))
-        return commands
     report = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False)
     problem = None
     for _ in range(attempts):

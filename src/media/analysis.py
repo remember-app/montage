@@ -7,7 +7,6 @@ import uuid
 import psycopg
 from psycopg.types.json import Jsonb
 
-from src import config
 from src.integrations import ai, ai_usage, ffmpeg, storage
 
 log = logging.getLogger("media.analysis")
@@ -219,8 +218,6 @@ def _photo_analysis(
     grading: str,
     comment: str | None,
 ) -> dict:
-    if config.ai_mock():
-        return {"description": "Mock: a frame from the event.", "score": 5.0}
     blob = _image_blob(source, workdir)
     answer = ai_usage.as_json(
         conn,
@@ -245,13 +242,6 @@ def _video_analysis(
     grading: str,
     comment: str | None,
 ) -> dict:
-    if config.ai_mock():
-        return {
-            "description": "Mock: a clip from the event.",
-            "score": 5.0,
-            "transcription": [],
-            "frames": [],
-        }
     blobs, seconds = _frame_blobs(source, duration, workdir)
     prompt = VIDEO_PROMPT.replace("{seconds}", ", ".join(f"{one:.2f}" for one in seconds))
     answer = ai_usage.as_json(
@@ -293,13 +283,6 @@ def _audio_analysis(
     grading: str,
     comment: str | None,
 ) -> dict:
-    if config.ai_mock():
-        return {
-            "description": "Mock: a sound from the event.",
-            "score": 5.0,
-            "transcription": [],
-            "mood": None,
-        }
     answer = ai_usage.as_json(
         conn,
         operation="audio",
@@ -326,13 +309,6 @@ def _music_analysis(
     duration: float | None,
     workdir: pathlib.Path,
 ) -> dict:
-    if config.ai_mock():
-        return {
-            "description": "Mock: a music track.",
-            "score": 5.0,
-            "transcription": [],
-            "mood": [],
-        }
     answer = ai_usage.as_json(
         conn,
         operation="audio",

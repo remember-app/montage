@@ -9,9 +9,6 @@ from src import config
 
 log = logging.getLogger("integrations.ai")
 
-ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions"
-
-
 @dataclass(frozen=True)
 class Blob:
     mime_type: str
@@ -54,7 +51,7 @@ def ask(instruction: str, prompt: str, blobs: tuple[Blob, ...] = ()) -> tuple[st
         "response_format": {"type": "text", "mime_type": "application/json"},
     }
     request = urllib.request.Request(
-        ENDPOINT,
+        config.ai_endpoint(),
         data=json.dumps(body).encode(),
         method="POST",
         headers={"x-goog-api-key": config.gemini_api_key(), "Content-Type": "application/json"},
