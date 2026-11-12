@@ -17,7 +17,8 @@ FPS = 30
 CRF = "20"
 AUDIO_RATE = "44100"
 AUDIO_BITRATE = "192k"
-MIN_TRANSITION = 0.01
+TARGET_ALLOWANCE = 0.1
+TARGET_ALLOWANCE_MIN = 2.0
 
 
 @dataclasses.dataclass
@@ -52,7 +53,7 @@ def _f(value) -> str:
 
 
 def _transition(shot: ShotCommand) -> float:
-    return max(float(shot.get("transitionSeconds") or 0), MIN_TRANSITION)
+    return float(shot.get("transitionSeconds") or 0)
 
 
 def _total(shots: list[ShotCommand]) -> float:
@@ -173,13 +174,26 @@ def _validate(
             issues.append(f"item {item.item_id} has an unknown motion")
     for index, shot in enumerate(shots[:-1]):
         following = float(shots[index + 1]["seconds"])
-        if _transition(shot) >= min(float(shot["seconds"]), following):
+        transition = _transition(shot)
+        if transition < 0:
+            issues.append(f"item {shot.get('itemId')} has a negative transition")
+        elif 0 < transition < 1 / FPS:
+            issues.append(f"item {shot.get('itemId')} has a transition shorter than one frame")
+        elif transition >= min(float(shot["seconds"]), following):
             issues.append(f"item {shot.get('itemId')} overlaps the next shot entirely")
     required = set(montage.settings.get("requiredItemIds") or [])
     used = {str(shot.get("itemId")) for shot in shots}
     for item_id in required - used:
         issues.append(f"required item {item_id} is missing")
     total = _total(shots)
+    target = float(montage.settings.get("targetSeconds") or 0)
+    if target > 0:
+        allowance = max(TARGET_ALLOWANCE_MIN, target * TARGET_ALLOWANCE)
+        if abs(total - target) > allowance:
+            issues.append(
+                f"the plan is {total:.1f} seconds long but the movie was ordered for "
+                f"{target:.0f} seconds"
+            )
     pool = set(montage.settings.get("musicIds") or [])
     for cue in music:
         song = songs.get(str(cue.get("mediaId")))
@@ -313,20 +327,27 @@ def _concat(clips: list[pathlib.Path], shots: list[ShotCommand], out: pathlib.Pa
     args: list[str] = []
     for clip in clips:
         args += ["-i", str(clip)]
-    filters = []
-    last_video, last_audio = "0:v", "0:a"
+    filters = [f"[{index}:v]settb=1/{FPS}[n{index}]" for index in range(len(clips))]
+    last_video, last_audio = "n0", "0:a"
     total = float(shots[0]["seconds"])
     for index in range(1, len(clips)):
         duration = _transition(shots[index - 1])
-        offset = total - duration
         video, audio = f"v{index}", f"a{index}"
-        filters.append(
-            f"[{last_video}][{index}:v]xfade=transition=fade"
-            f":duration={_f(duration)}:offset={_f(offset)}[{video}]"
-        )
-        filters.append(f"[{last_audio}][{index}:a]acrossfade=d={_f(duration)}[{audio}]")
+        if duration <= 0:
+            filters.append(f"[{last_video}][n{index}]concat=n=2:v=1:a=0[cv{index}]")
+            filters.append(f"[cv{index}]settb=1/{FPS}[{video}]")
+            filters.append(f"[{last_audio}][{index}:a]concat=n=2:v=0:a=1[{audio}]")
+            total += float(shots[index]["seconds"])
+        else:
+            offset = total - duration
+            filters.append(
+                f"[{last_video}][n{index}]xfade=transition=fade"
+                f":duration={_f(duration)}:offset={_f(offset)}[cv{index}]"
+            )
+            filters.append(f"[cv{index}]settb=1/{FPS}[{video}]")
+            filters.append(f"[{last_audio}][{index}:a]acrossfade=d={_f(duration)}[{audio}]")
+            total = total + float(shots[index]["seconds"]) - duration
         last_video, last_audio = video, audio
-        total = total + float(shots[index]["seconds"]) - duration
     args += [
         "-filter_complex",
         ";".join(filters),

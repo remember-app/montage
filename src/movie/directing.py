@@ -91,10 +91,17 @@ def _store(conn: psycopg.Connection, montage_id: uuid.UUID, commands: list, summ
 
 
 def _mock_plan(report: dict) -> list:
+    shots = report.get("shots") or []
+    target = float((report.get("movie") or {}).get("targetSeconds") or 0)
+    overlap = 0.25
+    if target > 0 and shots:
+        each = (target + overlap * (len(shots) - 1)) / len(shots)
+    else:
+        each = 2.5
     commands = []
-    for shot in report.get("shots") or []:
+    for shot in shots:
         kind = shot.get("kind")
-        seconds = 2.5 if kind == "photo" else min(3.0, float(shot.get("durationSeconds") or 3.0))
+        seconds = each if kind == "photo" else min(each, float(shot.get("durationSeconds") or each))
         commands.append(
             {
                 "type": "shot",
@@ -106,10 +113,10 @@ def _mock_plan(report: dict) -> list:
                 "liveLevel": 0.0 if kind == "photo" else 0.6,
                 "framing": None,
                 "motion": "none",
-                "transitionSeconds": 0.25,
+                "transitionSeconds": overlap,
             }
         )
-    total = sum(command["seconds"] for command in commands) - 0.25 * max(len(commands) - 1, 0)
+    total = sum(command["seconds"] for command in commands) - overlap * max(len(commands) - 1, 0)
     tracks = report.get("music") or []
     if tracks and total > 0:
         track = tracks[0]
