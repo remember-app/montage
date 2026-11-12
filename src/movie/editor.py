@@ -20,6 +20,7 @@ AUDIO_BITRATE = "192k"
 TARGET_ALLOWANCE = 0.1
 TARGET_ALLOWANCE_MIN = 2.0
 ZOOM_SMOOTH = 4
+CONCAT_GROUP = 4
 
 
 @dataclasses.dataclass
@@ -341,7 +342,16 @@ def _clip(
     ffmpeg.run(*args)
 
 
-def _concat(clips: list[pathlib.Path], shots: list[ShotCommand], out: pathlib.Path) -> None:
+def _video_duration(path: pathlib.Path) -> float | None:
+    for stream in ffmpeg.probe(path).get("streams", []):
+        if stream.get("codec_type") != "video":
+            continue
+        value = stream.get("duration")
+        return float(value) if value else None
+    return None
+
+
+def _join(clips: list[pathlib.Path], transitions: list[float], out: pathlib.Path) -> None:
     if len(clips) == 1:
         ffmpeg.run("-i", str(clips[0]), "-c", "copy", "-movflags", "+faststart", str(out))
         return
@@ -350,15 +360,16 @@ def _concat(clips: list[pathlib.Path], shots: list[ShotCommand], out: pathlib.Pa
         args += ["-i", str(clip)]
     filters = [f"[{index}:v]settb=1/{FPS}[n{index}]" for index in range(len(clips))]
     last_video, last_audio = "n0", "0:a"
-    total = float(shots[0]["seconds"])
+    durations = [_video_duration(clip) or ffmpeg.duration(clip) or 0.0 for clip in clips]
+    total = durations[0]
     for index in range(1, len(clips)):
-        duration = _transition(shots[index - 1])
+        duration = transitions[index - 1]
         video, audio = f"v{index}", f"a{index}"
         if duration <= 0:
             filters.append(f"[{last_video}][n{index}]concat=n=2:v=1:a=0[cv{index}]")
             filters.append(f"[cv{index}]settb=1/{FPS}[{video}]")
             filters.append(f"[{last_audio}][{index}:a]concat=n=2:v=0:a=1[{audio}]")
-            total += float(shots[index]["seconds"])
+            total += durations[index]
         else:
             offset = total - duration
             filters.append(
@@ -367,7 +378,7 @@ def _concat(clips: list[pathlib.Path], shots: list[ShotCommand], out: pathlib.Pa
             )
             filters.append(f"[cv{index}]settb=1/{FPS}[{video}]")
             filters.append(f"[{last_audio}][{index}:a]acrossfade=d={_f(duration)}[{audio}]")
-            total = total + float(shots[index]["seconds"]) - duration
+            total = total + durations[index] - duration
         last_video, last_audio = video, audio
     args += [
         "-filter_complex",
@@ -399,6 +410,31 @@ def _concat(clips: list[pathlib.Path], shots: list[ShotCommand], out: pathlib.Pa
         str(out),
     ]
     ffmpeg.run(*args)
+
+
+def _join_tree(
+    clips: list[pathlib.Path], transitions: list[float], out: pathlib.Path, level: int = 0
+) -> None:
+    if len(clips) <= CONCAT_GROUP:
+        _join(clips, transitions, out)
+        return
+    groups = [clips[index : index + CONCAT_GROUP] for index in range(0, len(clips), CONCAT_GROUP)]
+    outputs: list[pathlib.Path] = []
+    boundaries: list[float] = []
+    for index, group in enumerate(groups):
+        start = index * CONCAT_GROUP
+        end = start + len(group)
+        group_out = out.parent / f"group-{level}-{index}-{uuid.uuid4().hex[:8]}.mp4"
+        _join(group, transitions[start : end - 1], group_out)
+        outputs.append(group_out)
+        if index > 0:
+            boundaries.append(transitions[start - 1])
+    _join_tree(outputs, boundaries, out, level + 1)
+
+
+def _concat(clips: list[pathlib.Path], shots: list[ShotCommand], out: pathlib.Path) -> None:
+    transitions = [_transition(shots[index]) for index in range(len(shots) - 1)]
+    _join_tree(clips, transitions, out)
 
 
 def _music(
