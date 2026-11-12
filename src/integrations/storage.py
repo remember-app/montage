@@ -17,7 +17,13 @@ def client() -> BaseClient:
         region_name=config.s3_region(),
         aws_access_key_id=config.s3_access_key_id(),
         aws_secret_access_key=config.s3_secret_access_key(),
-        config=BotoConfig(connect_timeout=10, read_timeout=60, retries={"max_attempts": 3}),
+        config=BotoConfig(
+            connect_timeout=10,
+            read_timeout=60,
+            retries={"max_attempts": 3},
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
+        ),
     )
 
 

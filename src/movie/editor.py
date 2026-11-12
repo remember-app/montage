@@ -28,6 +28,7 @@ class Item:
     key: str
     duration: float | None
     cover_key: str | None
+    preview_key: str | None
 
 
 @dataclasses.dataclass
@@ -86,15 +87,18 @@ def _items(conn: psycopg.Connection, item_ids: list[str]) -> dict[str, Item]:
     rows = conn.execute(
         """
         select pi.id, pi.media_id, pi.kind, m.storage_key, m.duration,
-               (select pm.storage_key from media_items pm where pm.id = pi.thumbnail_id)
+               (select pm.storage_key from media_items pm where pm.id = pi.thumbnail_id),
+               (select pm.storage_key from media_items pm where pm.id = pi.preview_id)
         from project_items pi join media_items m on m.id = pi.media_id
         where pi.id = any(%s)
         """,
         ([uuid.UUID(item_id) for item_id in item_ids],),
     ).fetchall()
     return {
-        str(item_id): Item(str(item_id), str(media_id), kind, key, duration, cover_key)
-        for item_id, media_id, kind, key, duration, cover_key in rows
+        str(item_id): Item(
+            str(item_id), str(media_id), kind, key, duration, cover_key, preview_key
+        )
+        for item_id, media_id, kind, key, duration, cover_key, preview_key in rows
     }
 
 
@@ -240,20 +244,21 @@ def _clip(
     start = float(shot["sourceStartSeconds"])
     live = float(shot.get("liveLevel") or 0)
     source = workdir / f"source-{uuid.uuid4().hex}"
-    storage.download(item.key, source)
+    key = (item.preview_key or item.key) if shot.get("kind") == "photo" else item.key
+    storage.download(key, source)
     ffmpeg.refuse_playlists(source)
 
     if shot.get("kind") == "photo":
         inputs = ["-loop", "1", "-framerate", str(FPS), "-t", _f(seconds), "-i", str(source)]
         inputs += ["-f", "lavfi", "-t", _f(seconds), "-i", "anullsrc=r=44100:cl=stereo"]
-        audio_map, audio_filter = "1:a", None
+        audio_map, audio_filter = "1:a:0", None
     elif shot.get("kind") == "video":
         inputs = ["-ss", _f(start), "-t", _f(seconds), "-i", str(source)]
         if live > 0 and ffmpeg.has_audio(source):
-            audio_map, audio_filter = "0:a", f"volume={_f(live)},apad"
+            audio_map, audio_filter = "0:a:0", f"volume={_f(live)},apad"
         else:
             inputs += ["-f", "lavfi", "-t", _f(seconds), "-i", "anullsrc=r=44100:cl=stereo"]
-            audio_map, audio_filter = "1:a", None
+            audio_map, audio_filter = "1:a:0", None
     else:
         picture = item.cover_key or cover
         if not picture:
@@ -262,14 +267,14 @@ def _clip(
         storage.download(picture, image)
         inputs = ["-loop", "1", "-framerate", str(FPS), "-t", _f(seconds), "-i", str(image)]
         inputs += ["-ss", _f(start), "-t", _f(seconds), "-i", str(source)]
-        audio_map, audio_filter = "1:a", f"volume={_f(live)},apad"
+        audio_map, audio_filter = "1:a:0", f"volume={_f(live)},apad"
 
     args = [
         *inputs,
         "-vf",
         ",".join(_video_filters(shot, width, height)),
         "-map",
-        "0:v",
+        "0:v:0",
         "-map",
         audio_map,
     ]

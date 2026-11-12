@@ -18,6 +18,9 @@ FRAME_MIN = 3
 FRAME_MAX = 60
 DESCRIPTION_LIMIT = 2000
 SEGMENT_LIMIT = 500
+COMMENT_LIMIT = 500
+
+GRADING_KEY = "analysis.grading"
 
 
 INSTRUCTION = (
@@ -25,15 +28,13 @@ INSTRUCTION = (
     "JSON object only."
 )
 PHOTO_PROMPT = (
-    "Describe in one or two sentences what is happening in the photo. Rate how interesting the "
-    "frame is for a movie from 0 to 1: 0 is empty or blurry, 1 is a bright key moment. "
+    "Describe in one or two sentences what is happening in the photo. "
     'Reply: {"description": "...", "score": 0.0}'
 )
 VIDEO_PROMPT = (
     "These are several frames from one video, taken at seconds {seconds}. Describe in one or two "
-    "sentences what is happening in the video and rate how interesting it is for a movie from 0 to "
-    "1. Describe each frame separately, in the same order, with its second. "
-    'Reply: {"description": "...", "score": 0.0, "frames": ['
+    "sentences what is happening in the video. Describe each frame separately, in the same order, "
+    'with its second. Reply: {"description": "...", "score": 0.0, "frames": ['
     '{"second": 0.0, "text": "..."}]}'
 )
 TRANSCRIBE_PROMPT = (
@@ -42,15 +43,15 @@ TRANSCRIBE_PROMPT = (
     'Reply: {"transcription": [{"secStart": 0.0, "secEnd": 0.0, "text": "..."}]}'
 )
 AUDIO_PROMPT = (
-    "Describe in one sentence what is heard in the recording and rate how interesting it is for a "
-    "movie from 0 to 1. Transcribe the speech and split it into time segments in seconds. "
-    'Reply: {"description": "...", "score": 0.0, "transcription": ['
+    "Describe in one sentence what is heard in the recording. Transcribe the speech and split it "
+    'into time segments in seconds. Reply: {"description": "...", "score": 0.0, "transcription": ['
     '{"secStart": 0.0, "secEnd": 0.0, "text": "..."}]}'
 )
 MUSIC_PROMPT = (
-    "This is a music track. Describe it in one sentence and rate how useful it is for a movie "
-    "from 0 to 1. Split it into musical sections and briefly describe each: mood, instruments, "
-    "what changes. Transcribe the lyrics if any, with time segments in seconds. "
+    "This is a music track. Describe it in one sentence and score how useful it is for a movie "
+    "from 0.00 to 10.00 with two decimal places: 0 is unusable, 10 is a perfect fit. Split it into "
+    "musical sections and briefly describe each: mood, instruments, what changes. Transcribe the "
+    "lyrics if any, with time segments in seconds. "
     'Reply: {"description": "...", "score": 0.0, '
     '"transcription": [{"secStart": 0.0, "secEnd": 0.0, "text": "..."}], '
     '"mood": [{"secStart": 0.0, "secEnd": 0.0, "text": "..."}]}'
@@ -68,8 +69,35 @@ def _score(value) -> float:
     try:
         number = float(value)
     except (TypeError, ValueError):
-        return 0.5
-    return round(min(max(number, 0.0), 1.0), 3)
+        return 5.0
+    return round(min(max(number, 0.0), 10.0), 2)
+
+
+def _grading(conn: psycopg.Connection) -> str:
+    row = conn.execute("select value from settings where key = %s", (GRADING_KEY,)).fetchone()
+    if row is None or not isinstance(row[0], list):
+        raise RuntimeError(f"setting {GRADING_KEY} is missing")
+    lines = []
+    for one in row[0]:
+        if not isinstance(one, dict):
+            continue
+        points, question = one.get("points"), one.get("question")
+        if isinstance(points, (int, float)) and isinstance(question, str) and question.strip():
+            unit = "point" if points == 1 else "points"
+            lines.append(f"- ({points:g} {unit}) {question.strip()}")
+    if not lines:
+        raise RuntimeError(f"setting {GRADING_KEY} has no usable questions")
+    return "\n".join(lines)
+
+
+def _graded(grading: str, comment: str | None) -> str:
+    block = (
+        "Score the frame from 0.00 to 10.00 with two decimal places, answering these questions:\n"
+        + grading
+    )
+    if comment:
+        block += f'\nThe uploader wrote about this frame: "{comment}"'
+    return block
 
 
 def _segments(value, duration: float | None) -> list[dict]:
@@ -184,17 +212,22 @@ def _frame_blobs(
 
 
 def _photo_analysis(
-    conn: psycopg.Connection, media_id: uuid.UUID, source: pathlib.Path, workdir: pathlib.Path
+    conn: psycopg.Connection,
+    media_id: uuid.UUID,
+    source: pathlib.Path,
+    workdir: pathlib.Path,
+    grading: str,
+    comment: str | None,
 ) -> dict:
     if config.ai_mock():
-        return {"description": "Mock: a frame from the event.", "score": 0.5}
+        return {"description": "Mock: a frame from the event.", "score": 5.0}
     blob = _image_blob(source, workdir)
     answer = ai_usage.as_json(
         conn,
         operation="photo",
         media_id=media_id,
         instruction=INSTRUCTION,
-        prompt=PHOTO_PROMPT,
+        prompt=f"{PHOTO_PROMPT}\n{_graded(grading, comment)}",
         blobs=(blob,),
     )
     description = _said(answer.get("description"))
@@ -209,11 +242,13 @@ def _video_analysis(
     source: pathlib.Path,
     duration: float | None,
     workdir: pathlib.Path,
+    grading: str,
+    comment: str | None,
 ) -> dict:
     if config.ai_mock():
         return {
             "description": "Mock: a clip from the event.",
-            "score": 0.5,
+            "score": 5.0,
             "transcription": [],
             "frames": [],
         }
@@ -224,7 +259,7 @@ def _video_analysis(
         operation="video",
         media_id=media_id,
         instruction=INSTRUCTION,
-        prompt=prompt,
+        prompt=f"{prompt}\n{_graded(grading, comment)}",
         blobs=tuple(blobs),
     )
     description = _said(answer.get("description"))
@@ -255,11 +290,13 @@ def _audio_analysis(
     source: pathlib.Path,
     duration: float | None,
     workdir: pathlib.Path,
+    grading: str,
+    comment: str | None,
 ) -> dict:
     if config.ai_mock():
         return {
             "description": "Mock: a sound from the event.",
-            "score": 0.5,
+            "score": 5.0,
             "transcription": [],
             "mood": None,
         }
@@ -268,7 +305,7 @@ def _audio_analysis(
         operation="audio",
         media_id=media_id,
         instruction=INSTRUCTION,
-        prompt=AUDIO_PROMPT,
+        prompt=f"{AUDIO_PROMPT}\n{_graded(grading, comment)}",
         blobs=(_audio_blob(source, workdir, speech=True),),
     )
     description = _said(answer.get("description"))
@@ -292,7 +329,7 @@ def _music_analysis(
     if config.ai_mock():
         return {
             "description": "Mock: a music track.",
-            "score": 0.5,
+            "score": 5.0,
             "transcription": [],
             "mood": [],
         }
@@ -348,7 +385,9 @@ def run(conn: psycopg.Connection, ref: uuid.UUID) -> None:
         select m.kind, m.storage_key, m.duration,
                (select pm.storage_key from project_items pi
                   join media_items pm on pm.id = pi.preview_id
-                 where pi.media_id = m.id limit 1) as preview_key
+                 where pi.media_id = m.id limit 1) as preview_key,
+               (select pi.description from project_items pi
+                 where pi.media_id = m.id and pi.description is not null limit 1) as comment
         from media_items m where m.id = %s
         """,
         (ref,),
@@ -356,19 +395,21 @@ def run(conn: psycopg.Connection, ref: uuid.UUID) -> None:
     if row is None:
         log.info("media %s is gone, nothing to analyze", ref)
         return
-    kind, storage_key, duration, preview_key = row
+    kind, storage_key, duration, preview_key, raw_comment = row
+    comment = _said(raw_comment, COMMENT_LIMIT)
 
     with tempfile.TemporaryDirectory() as directory:
         workdir = pathlib.Path(directory)
         if item:
+            grading = _grading(conn)
             source_key = preview_key or storage_key
             source = _download(source_key, workdir, "item-source")
             if kind == "photo":
-                analysis = _photo_analysis(conn, ref, source, workdir)
+                analysis = _photo_analysis(conn, ref, source, workdir, grading, comment)
             elif kind == "video":
-                analysis = _video_analysis(conn, ref, source, duration, workdir)
+                analysis = _video_analysis(conn, ref, source, duration, workdir, grading, comment)
             else:
-                analysis = _audio_analysis(conn, ref, source, duration, workdir)
+                analysis = _audio_analysis(conn, ref, source, duration, workdir, grading, comment)
             landed = conn.execute(
                 "update project_items set analysis = %s where media_id = %s and analysis is null",
                 (Jsonb(analysis), ref),
