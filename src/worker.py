@@ -42,19 +42,19 @@ def run_once(conn: psycopg.Connection) -> bool:
             limit 1
             for update skip locked
         )
-        returning id, kind, ref, attempts
+        returning id, kind, ref, attempts, level
         """
     ).fetchone()
     if job is None:
         return False
 
-    job_id, kind, ref, attempts = job
+    job_id, kind, ref, attempts, level = job
     try:
         handler = HANDLERS.get(kind)
         if handler is None:
             raise LookupError(f"no handler for job kind {kind!r}")
         with heartbeat(job_id):
-            handler(conn, ref)
+            handler(conn, ref, level)
     except KeyboardInterrupt:
         hand_back(conn, job_id, kind)
         raise

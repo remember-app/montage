@@ -174,6 +174,9 @@ def _validate(
                     issues.append(f"item {item.item_id} has framing outside the frame")
         if shot.get("motion") not in ("none", "zoom_in", "zoom_out"):
             issues.append(f"item {item.item_id} has an unknown motion")
+        role = shot.get("role")
+        if not isinstance(role, str) or not role.strip():
+            issues.append(f"item {item.item_id} has no role")
     for index, shot in enumerate(shots[:-1]):
         following = float(shots[index + 1]["seconds"])
         transition = _transition(shot)

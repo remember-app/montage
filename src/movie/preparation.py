@@ -8,11 +8,21 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from src.integrations import ffmpeg, storage
-from src.movie.types import MontageReport
+from src.movie.types import MontageLevel, MontageReport
 
 log = logging.getLogger("movie.preparation")
 
 THRESHOLD = 0.95
+
+REPORT_SUMMARY_LIMIT = 500
+REPORT_DESCRIPTION_LIMIT = 1500
+REPORT_SEGMENT_LIMIT = 40
+REPORT_SEGMENT_TEXT_LIMIT = 400
+
+
+def level(settings: dict) -> MontageLevel:
+    value = settings.get("level")
+    return value if value in ("low", "medium", "high") else "low"
 
 
 @dataclasses.dataclass
@@ -171,6 +181,63 @@ def _coverage(shots: list[ShotRow], music: list[SongRow]) -> None:
         )
 
 
+def _text(value, limit: int) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = "".join(character for character in value if character >= " ").strip()
+    return text[:limit] or None
+
+
+def _tags(value) -> dict[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    tags = {
+        str(key): str(item)
+        for key, item in value.items()
+        if isinstance(key, str) and item is not None
+    }
+    return tags or None
+
+
+def _segments(value) -> list[dict] | None:
+    if not isinstance(value, list):
+        return None
+    items = [one for one in value if isinstance(one, dict)]
+    if len(items) > REPORT_SEGMENT_LIMIT:
+        step = len(items) / REPORT_SEGMENT_LIMIT
+        items = [items[int(index * step)] for index in range(REPORT_SEGMENT_LIMIT)]
+    trimmed = []
+    for one in items:
+        text = _text(one.get("description"), REPORT_SEGMENT_TEXT_LIMIT)
+        start, end = one.get("secStart"), one.get("secEnd")
+        if text is None or not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
+            continue
+        trimmed.append(
+            {
+                "secStart": round(float(start), 2),
+                "secEnd": round(float(end), 2),
+                "description": text,
+                "tags": _tags(one.get("tags")),
+            }
+        )
+    return trimmed or None
+
+
+def _analysis(value) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    fields = {
+        "score": value.get("score"),
+        "summary": _text(value.get("summary"), REPORT_SUMMARY_LIMIT),
+        "description": _text(value.get("description"), REPORT_DESCRIPTION_LIMIT),
+        "tags": _tags(value.get("tags")),
+        "frames": _segments(value.get("frames")),
+        "sounds": _segments(value.get("sounds")),
+        "words": _segments(value.get("words")),
+    }
+    return {key: item for key, item in fields.items() if item is not None}
+
+
 def _report(settings: dict, shots: list[ShotRow], music: list[SongRow]) -> MontageReport:
     dimensions = settings.get("dimensions") or {}
     return {
@@ -182,6 +249,7 @@ def _report(settings: dict, shots: list[ShotRow], music: list[SongRow]) -> Monta
             },
             "story": settings.get("prompt"),
             "requiredItemIds": [str(one) for one in settings.get("requiredItemIds") or []],
+            "level": level(settings),
         },
         "shots": [
             {
@@ -194,9 +262,9 @@ def _report(settings: dict, shots: list[ShotRow], music: list[SongRow]) -> Monta
                 "durationSeconds": shot.duration,
                 "hasAudio": _has_audio(shot),
                 "shownWithCover": shot.kind == "audio",
-                "description": shot.description,
+                "comment": shot.description,
                 "labels": shot.labels,
-                "analysis": shot.analysis,
+                **_analysis(shot.analysis),
             }
             for shot in shots
         ],
@@ -207,7 +275,7 @@ def _report(settings: dict, shots: list[ShotRow], music: list[SongRow]) -> Monta
                 "name": song.name,
                 "author": song.author,
                 "durationSeconds": song.duration,
-                "analysis": song.analysis,
+                **_analysis(song.analysis),
             }
             for song in music
         ],

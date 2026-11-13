@@ -155,7 +155,7 @@ def _files(
     return []
 
 
-def run(conn: psycopg.Connection, ref: uuid.UUID) -> None:
+def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None = None) -> None:
     upload = conn.execute("select media_id from uploads where id = %s", (ref,)).fetchone()
     if upload is None or upload[0] is None:
         log.info("upload %s has no media, nothing to derive", ref)

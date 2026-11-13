@@ -1,7 +1,8 @@
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 ShotKind = Literal["photo", "video", "audio"]
 Motion = Literal["none", "zoom_in", "zoom_out"]
+MontageLevel = Literal["low", "medium", "high"]
 
 
 class Framing(TypedDict):
@@ -22,6 +23,7 @@ class ShotCommand(TypedDict):
     framing: Framing | None
     motion: Motion
     transitionSeconds: float
+    role: str
 
 
 class MusicCommand(TypedDict):
@@ -50,6 +52,7 @@ class ReportMovie(TypedDict):
     dimensions: ReportDimensions
     story: str | None
     requiredItemIds: list[str]
+    level: MontageLevel
 
 
 class ReportShot(TypedDict):
@@ -62,9 +65,15 @@ class ReportShot(TypedDict):
     durationSeconds: float | None
     hasAudio: bool
     shownWithCover: bool
-    description: str | None
+    comment: str | None
     labels: list[str]
-    analysis: dict | None
+    score: NotRequired[float]
+    summary: NotRequired[str]
+    description: NotRequired[str]
+    tags: NotRequired[dict[str, str]]
+    frames: NotRequired[list[dict]]
+    sounds: NotRequired[list[dict]]
+    words: NotRequired[list[dict]]
 
 
 class ReportMusic(TypedDict):
@@ -73,7 +82,12 @@ class ReportMusic(TypedDict):
     name: str
     author: str
     durationSeconds: float | None
-    analysis: dict | None
+    score: NotRequired[float]
+    summary: NotRequired[str]
+    description: NotRequired[str]
+    tags: NotRequired[dict[str, str]]
+    sounds: NotRequired[list[dict]]
+    words: NotRequired[list[dict]]
 
 
 class MontageReport(TypedDict):

@@ -13,7 +13,7 @@ def _manifest(conn: psycopg.Connection, ref: uuid.UUID) -> dict:
     return (row[0] if row else None) or {}
 
 
-def run(conn: psycopg.Connection, ref: uuid.UUID) -> None:
+def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None = None) -> None:
     row = conn.execute("select status, manifest from montages where id = %s", (ref,)).fetchone()
     if row is None:
         log.info("montage %s is gone, nothing to assemble", ref)
@@ -22,9 +22,14 @@ def run(conn: psycopg.Connection, ref: uuid.UUID) -> None:
     if status == "done":
         log.info("montage %s is ready already, nothing to assemble", ref)
         return
-    conn.execute("update montages set status = 'processing' where id = %s", (ref,))
-
     manifest = manifest or {}
+    settings = manifest.get("preparationConfig") or {}
+    level = preparation.level(settings)
+    if level != "low":
+        raise RuntimeError(f"montage level {level!r} is not implemented yet; only low is available")
+    conn.execute("update montages set status = 'processing' where id = %s", (ref,))
+    log.info("montage %s level: %s", ref, level)
+
     if not ((manifest.get("directingInput") or {}).get("mergedMontageData")):
         preparation.build(conn, ref)
         manifest = _manifest(conn, ref)
