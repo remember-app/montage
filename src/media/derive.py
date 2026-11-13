@@ -9,7 +9,7 @@ import psycopg
 
 from src import config
 from src.integrations import ffmpeg, storage
-from src.media import probe
+from src.media import perceptual, probe
 
 log = logging.getLogger("media.derive")
 
@@ -176,6 +176,8 @@ def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None = None) -> N
         ffmpeg.refuse_playlists(original)
         info = probe.read(original, kind)
         derivatives = _files(original, work, media_id, kind, info.get("duration"))
+        thumbnail_file = work / "thumbnail.jpg"
+        perceptual_hash = perceptual.hash_of(thumbnail_file) if thumbnail_file.exists() else None
         cover = _cover_id(conn) if kind == "audio" else None
 
         for derivative in derivatives:
@@ -198,7 +200,8 @@ def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None = None) -> N
                     exposure_ev = coalesce(exposure_ev, %s),
                     shutter = coalesce(shutter, %s),
                     latitude = coalesce(latitude, %s),
-                    longitude = coalesce(longitude, %s)
+                    longitude = coalesce(longitude, %s),
+                    perceptual_hash = coalesce(%s, perceptual_hash)
                 where id = %s
                 returning id
                 """,
@@ -215,6 +218,7 @@ def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None = None) -> N
                     info.get("shutter"),
                     info.get("latitude"),
                     info.get("longitude"),
+                    perceptual_hash,
                     media_id,
                 ),
             ).fetchone()
