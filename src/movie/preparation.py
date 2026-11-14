@@ -223,18 +223,20 @@ def _segments(value) -> list[dict] | None:
     return trimmed or None
 
 
-def _analysis(value) -> dict:
+def _analysis(value, scores: tuple[str, ...]) -> dict:
     if not isinstance(value, dict):
         return {}
-    fields = {
-        "score": value.get("score"),
-        "summary": _text(value.get("summary"), REPORT_SUMMARY_LIMIT),
-        "description": _text(value.get("description"), REPORT_DESCRIPTION_LIMIT),
-        "tags": _tags(value.get("tags")),
-        "frames": _segments(value.get("frames")),
-        "sounds": _segments(value.get("sounds")),
-        "words": _segments(value.get("words")),
-    }
+    fields = {key: value.get(key) for key in scores}
+    fields.update(
+        {
+            "summary": _text(value.get("summary"), REPORT_SUMMARY_LIMIT),
+            "description": _text(value.get("description"), REPORT_DESCRIPTION_LIMIT),
+            "tags": _tags(value.get("tags")),
+            "frames": _segments(value.get("frames")),
+            "sounds": _segments(value.get("sounds")),
+            "words": _segments(value.get("words")),
+        }
+    )
     return {key: item for key, item in fields.items() if item is not None}
 
 
@@ -283,7 +285,7 @@ def _report(
                 "shownWithCover": shot.kind == "audio",
                 "comment": shot.description,
                 "labels": shot.labels,
-                **_analysis(shot.analysis),
+                **_analysis(shot.analysis, ("scoreImportance", "scoreQuality")),
             }
             for shot in shots
         ],
@@ -294,7 +296,7 @@ def _report(
                 "name": song.name,
                 "author": song.author,
                 "durationSeconds": song.duration,
-                **_analysis(song.analysis),
+                **_analysis(song.analysis, ("score",)),
             }
             for song in music
         ],

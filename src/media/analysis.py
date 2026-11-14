@@ -45,7 +45,11 @@ COMMENT_LIMIT = 500
 LEVELS = ("low", "medium", "high")
 LEVEL_RANK = {"low": 0, "medium": 1, "high": 2}
 
-GRADING_KEY = "analysis.grading"
+IMPORTANCE_KEY = "analysis.grading.importance"
+QUALITY_KEY = "analysis.grading.quality"
+MUSIC_KEY = "music.grading"
+
+USABLE_QUALITY = 5.0  # ponytail: one calibration knob; the midpoint where a segment can be used
 
 
 def _text(value, limit: int = DESCRIPTION_LIMIT) -> str | None:
@@ -114,31 +118,15 @@ def _with_metrics(tags: dict[str, str] | None, measured: dict[str, str]) -> dict
     return merged
 
 
-def _grading(conn: psycopg.Connection) -> str:
-    row = conn.execute("select value from settings where key = %s", (GRADING_KEY,)).fetchone()
-    if row is None or not isinstance(row[0], list):
-        raise RuntimeError(f"setting {GRADING_KEY} is missing")
-    lines = []
-    for one in row[0]:
-        if not isinstance(one, dict):
-            continue
-        points, question = one.get("points"), one.get("question")
-        if isinstance(points, (int, float)) and isinstance(question, str) and question.strip():
-            unit = "point" if points == 1 else "points"
-            lines.append(f"- ({points:g} {unit}) {question.strip()}")
-    if not lines:
-        raise RuntimeError(f"setting {GRADING_KEY} has no usable questions")
-    return "\n".join(lines)
+def _grading(conn: psycopg.Connection, key: str) -> str:
+    row = conn.execute("select value from settings where key = %s", (key,)).fetchone()
+    if row is None or not isinstance(row[0], str) or not row[0].strip():
+        raise RuntimeError(f"setting {key} is missing")
+    return row[0].strip()
 
 
-def _graded(grading: str, comment: str | None) -> str:
-    block = (
-        "Score the frame from 0.00 to 10.00 with two decimal places, answering these questions:\n"
-        + grading
-    )
-    if comment:
-        block += f'\nThe uploader wrote about this frame: "{comment}"'
-    return block
+def _importance(grading: str, comment: str | None) -> str:
+    return grading.replace("{comment}", f'"{comment}"' if comment else "nothing")
 
 
 def _event_instruction(conn: psycopg.Connection, media_id: uuid.UUID) -> str:
@@ -147,26 +135,19 @@ def _event_instruction(conn: psycopg.Connection, media_id: uuid.UUID) -> str:
         select p.title, p.description
         from project_items pi
         join projects p on p.id = pi.project_id
-        where pi.media_id = %s and p.description <> ''
+        where pi.media_id = %s
+        order by (p.description <> '') desc, pi.created_at
         limit 1
         """,
         (media_id,),
     ).fetchone()
     if row is None:
-        row = conn.execute(
-            """
-            select p.title, p.description
-            from songs s
-            join projects p on p.id = s.project_id
-            where s.media_id = %s and p.description <> ''
-            limit 1
-            """,
-            (media_id,),
-        ).fetchone()
-    if row is None:
         return INSTRUCTION
     title, description = row
-    return f'{INSTRUCTION}\nWhat this event is: "{title}". {description.strip()}'
+    description = description.strip()
+    if description:
+        return f'{INSTRUCTION}\nWhat this event is: "{title}". {description}'
+    return f'{INSTRUCTION}\nWhat this event is: "{title}".'
 
 
 def _spans(value, duration: float | None) -> list[dict] | None:
@@ -280,8 +261,8 @@ def _photo_analysis(
     media_id: uuid.UUID,
     source: pathlib.Path,
     workdir: pathlib.Path,
-    grading: str,
-    comment: str | None,
+    importance: str,
+    quality: str,
 ) -> dict:
     blob = _image_blob(source, workdir)
     answer = ai_usage.as_json(
@@ -289,7 +270,7 @@ def _photo_analysis(
         operation="photo",
         media_id=media_id,
         instruction=_event_instruction(conn, media_id),
-        prompt=f"{PHOTO_PROMPT}\n{_graded(grading, comment)}",
+        prompt=f"{PHOTO_PROMPT}\n{importance}\n{quality}",
         blobs=(blob,),
     )
     description = _text(answer.get("description"))
@@ -299,7 +280,8 @@ def _photo_analysis(
         "level": "high",
         "summary": _summary(answer, description),
         "description": description,
-        "score": _score(answer.get("score")),
+        "scoreImportance": _score(answer.get("scoreImportance")),
+        "scoreQuality": _score(answer.get("scoreQuality")),
         "tags": _with_metrics(_tags(answer.get("tags")), _metrics(blob)),
     }
 
@@ -310,10 +292,10 @@ def _video_low(
     source: pathlib.Path,
     duration: float | None,
     workdir: pathlib.Path,
-    grading: str,
-    comment: str | None,
+    importance: str,
+    quality: str,
     instruction: str,
-) -> tuple[str, str, float, dict | None, list[dict]]:
+) -> dict:
     length = duration or ffmpeg.duration(source) or 0.0
     moments = _spaced_moments(length, FRAME_STEP_SECONDS, FRAME_MIN, FRAME_MAX)
     spans = [(moment, min(moment + FRAME_STEP_SECONDS, length or moment)) for moment in moments]
@@ -329,7 +311,7 @@ def _video_low(
         operation="video",
         media_id=media_id,
         instruction=instruction,
-        prompt=f"{prompt}\n{_graded(grading, comment)}",
+        prompt=f"{prompt}\n{importance}\n{quality}",
         blobs=tuple(blobs),
     )
     description = _text(answer.get("description"))
@@ -348,13 +330,14 @@ def _video_low(
                 "tags": _average_metrics(measured),
             }
         ]
-    return (
-        _summary(answer, description),
-        description,
-        _score(answer.get("score")),
-        _tags(answer.get("tags")),
-        frames,
-    )
+    return {
+        "summary": _summary(answer, description),
+        "description": description,
+        "scoreImportance": _score(answer.get("scoreImportance")),
+        "scoreQuality": _score(answer.get("scoreQuality")),
+        "tags": _tags(answer.get("tags")),
+        "frames": frames,
+    }
 
 
 def _segment_spans(length: float) -> list[tuple[float, float]]:
@@ -367,21 +350,34 @@ def _segment_spans(length: float) -> list[tuple[float, float]]:
     return spans
 
 
+def _file_quality(scored: list[tuple[float, float]]) -> float:
+    if len(scored) <= 1:
+        return scored[0][1] if scored else 5.0
+    total = sum(duration for duration, _ in scored)
+    if total <= 0:
+        return 5.0
+    usable = sum(duration for duration, quality in scored if quality >= USABLE_QUALITY)
+    return round(10.0 * usable / total, 2)
+
+
 def _video_medium(
     conn: psycopg.Connection,
     media_id: uuid.UUID,
     source: pathlib.Path,
     duration: float | None,
     workdir: pathlib.Path,
-    grading: str,
-    comment: str | None,
+    importance: str,
+    quality: str,
     instruction: str,
-) -> tuple[str, str, float, dict | None, list[dict]]:
+) -> dict:
     length = duration or ffmpeg.duration(source) or 0.0
     if length <= 0:
-        return _video_low(conn, media_id, source, duration, workdir, grading, comment, instruction)
+        return _video_low(
+            conn, media_id, source, duration, workdir, importance, quality, instruction
+        )
 
     frames = []
+    scored = []
     context = ""
     for index, (start, end) in enumerate(_segment_spans(length)):
         moments = _spaced_moments(end - start, SEGMENT_STEP_SECONDS, 2, SEGMENT_FRAME_MAX)
@@ -400,16 +396,18 @@ def _video_medium(
             operation="video",
             media_id=media_id,
             instruction=instruction,
-            prompt=f"{prompt}\n{_graded(grading, comment)}",
+            prompt=f"{prompt}\n{quality}",
             blobs=tuple(blobs),
         )
         description = _text(answer.get("description"))
         if description is None:
             raise RuntimeError(f"the model described nothing in segment {index}")
+        segment_quality = _score(answer.get("scoreQuality"))
         tags = _tags(answer.get("tags")) or {}
-        tags["score"] = str(_score(answer.get("score")))
+        tags["scoreQuality"] = str(segment_quality)
         tags = _with_metrics(tags, _average_metrics(measured)) or tags
         frames.append({"secStart": start, "secEnd": end, "description": description, "tags": tags})
+        scored.append((end - start, segment_quality))
         context = _text(answer.get("context"), SUMMARY_LIMIT) or description
 
     summary_input = json.dumps(
@@ -425,19 +423,20 @@ def _video_medium(
         operation="text",
         media_id=media_id,
         instruction=instruction,
-        prompt=f"{prompt}\n{_graded(grading, comment)}",
+        prompt=f"{prompt}\n{importance}",
     )
     description = _text(answer.get("description")) or frames[-1]["description"]
-    return (
-        _summary(answer, description),
-        description,
-        _score(answer.get("score")),
-        _tags(answer.get("tags")),
-        frames,
-    )
+    return {
+        "summary": _summary(answer, description),
+        "description": description,
+        "scoreImportance": _score(answer.get("scoreImportance")),
+        "scoreQuality": _file_quality(scored),
+        "tags": _tags(answer.get("tags")),
+        "frames": frames,
+    }
 
 
-def _video_high(*_args, **_kwargs) -> tuple[str, str, float, dict | None, list[dict]]:
+def _video_high(*_args, **_kwargs) -> dict:
     raise RuntimeError("high video analysis is not implemented yet")
 
 
@@ -471,24 +470,23 @@ def _video_analysis(
     source: pathlib.Path,
     duration: float | None,
     workdir: pathlib.Path,
-    grading: str,
-    comment: str | None,
+    importance: str,
+    quality: str,
     level: str,
 ) -> dict:
     instruction = _event_instruction(conn, media_id)
     if level == "high":
-        summary, description, score, tags, frames = _video_high(
-            conn, media_id, source, duration, workdir, grading, comment
-        )
+        result = _video_high(conn, media_id, source, duration, workdir, importance, quality)
     elif level == "medium":
-        summary, description, score, tags, frames = _video_medium(
-            conn, media_id, source, duration, workdir, grading, comment, instruction
+        result = _video_medium(
+            conn, media_id, source, duration, workdir, importance, quality, instruction
         )
     else:
-        summary, description, score, tags, frames = _video_low(
-            conn, media_id, source, duration, workdir, grading, comment, instruction
+        result = _video_low(
+            conn, media_id, source, duration, workdir, importance, quality, instruction
         )
 
+    tags = result["tags"]
     sounds = words = None
     if _has_audio(source):
         sound_description, sound_tags, sounds, words = _sound_analysis(
@@ -502,11 +500,12 @@ def _video_analysis(
 
     return {
         "level": level,
-        "summary": summary,
-        "description": description,
-        "score": score,
+        "summary": result["summary"],
+        "description": result["description"],
+        "scoreImportance": result["scoreImportance"],
+        "scoreQuality": result["scoreQuality"],
         "tags": tags,
-        "frames": frames,
+        "frames": result["frames"],
         "sounds": sounds,
         "words": words,
     }
@@ -518,15 +517,15 @@ def _audio_analysis(
     source: pathlib.Path,
     duration: float | None,
     workdir: pathlib.Path,
-    grading: str,
-    comment: str | None,
+    importance: str,
+    quality: str,
 ) -> dict:
     answer = ai_usage.as_json(
         conn,
         operation="audio",
         media_id=media_id,
         instruction=_event_instruction(conn, media_id),
-        prompt=f"{AUDIO_PROMPT}\n{_graded(grading, comment)}",
+        prompt=f"{AUDIO_PROMPT}\n{importance}\n{quality}",
         blobs=(_audio_blob(source, workdir, speech=True),),
     )
     description = _text(answer.get("description"))
@@ -536,7 +535,8 @@ def _audio_analysis(
         "level": "high",
         "summary": _summary(answer, description),
         "description": description,
-        "score": _score(answer.get("score")),
+        "scoreImportance": _score(answer.get("scoreImportance")),
+        "scoreQuality": _score(answer.get("scoreQuality")),
         "tags": _tags(answer.get("tags")),
         "sounds": _spans(answer.get("sounds"), duration),
         "words": _spans(answer.get("words"), duration),
@@ -549,13 +549,14 @@ def _music_analysis(
     source: pathlib.Path,
     duration: float | None,
     workdir: pathlib.Path,
+    grading: str,
 ) -> dict:
     answer = ai_usage.as_json(
         conn,
         operation="audio",
         media_id=media_id,
-        instruction=_event_instruction(conn, media_id),
-        prompt=MUSIC_PROMPT,
+        instruction=INSTRUCTION,
+        prompt=f"{MUSIC_PROMPT}\n{grading}",
         blobs=(_audio_blob(source, workdir, speech=False),),
     )
     description = _text(answer.get("description"))
@@ -663,22 +664,26 @@ def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None = None) -> N
     with tempfile.TemporaryDirectory() as directory:
         workdir = pathlib.Path(directory)
         if item:
-            grading = _grading(conn)
+            importance = _importance(_grading(conn, IMPORTANCE_KEY), comment)
+            quality = _grading(conn, QUALITY_KEY)
             source_key = preview_key or storage_key
             source = _download(source_key, workdir, "item-source")
             if kind == "photo":
-                analysis = _photo_analysis(conn, ref, source, workdir, grading, comment)
+                analysis = _photo_analysis(conn, ref, source, workdir, importance, quality)
             elif kind == "video":
                 analysis = _video_analysis(
-                    conn, ref, source, duration, workdir, grading, comment, _video_level(level)
+                    conn, ref, source, duration, workdir, importance, quality, _video_level(level)
                 )
             else:
-                analysis = _audio_analysis(conn, ref, source, duration, workdir, grading, comment)
+                analysis = _audio_analysis(
+                    conn, ref, source, duration, workdir, importance, quality
+                )
             landed = _store_item(conn, ref, analysis)
             log.info("media %s analyzed for %s item(s)", ref, landed)
 
         if song:
+            grading = _grading(conn, MUSIC_KEY)
             source = _download(storage_key, workdir, "song-source")
-            analysis = _music_analysis(conn, ref, source, duration, workdir)
+            analysis = _music_analysis(conn, ref, source, duration, workdir, grading)
             landed = _store_song(conn, ref, analysis)
             log.info("media %s analyzed for %s song(s)", ref, landed)

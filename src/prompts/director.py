@@ -13,9 +13,12 @@ transitions, how live sound and music work, how the sequence is built. It never 
 event and is never a subject to show; follow it in the shots you choose and in the way you join
 them. It may be empty; then cut the way the shots and the music suggest.
 A shot has itemId, mediaId, kind, capturedAt, width, height, durationSeconds, hasAudio,
-shownWithCover, labels, comment, and when the analysis has it: score, summary, description, tags,
-frames, sounds, words.
-comment is the uploader's note. score is 0..10. summary is one line for a quick read. description
+shownWithCover, labels, comment, and when the analysis has it: scoreImportance, scoreQuality,
+summary, description, tags, frames, sounds, words.
+comment is the uploader's note. scoreImportance is 0..10: how much the shot matters for this
+memory. scoreQuality is 0..10: how good the material is as a shot. Prefer shots with higher
+importance; use quality to decide what can actually be used, and never drop a unique or important
+moment just because a prettier shot exists. summary is one line for a quick read. description
 is a detailed observation. tags is a flat object of string keys and string values chosen by the
 analysis; the keys are not fixed, use the ones that help and ignore the rest. frames are timed
 moments of a video, sounds are non-speech events, words are speech; all times are seconds inside

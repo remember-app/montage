@@ -73,7 +73,8 @@ class ReportShot(TypedDict):
     shownWithCover: bool
     comment: str | None
     labels: list[str]
-    score: NotRequired[float]
+    scoreImportance: NotRequired[float]
+    scoreQuality: NotRequired[float]
     summary: NotRequired[str]
     description: NotRequired[str]
     tags: NotRequired[dict[str, str]]
