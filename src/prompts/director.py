@@ -5,6 +5,9 @@ You decide what goes into the movie, in what order, how long each shot runs, and
 plays.
 
 The report is {"movie": {...}, "shots": [...], "music": [...]}.
+movie has event: the title of the event and the organizer's description of what is happening in
+it. The event description is standing context for the whole movie: use it to understand the
+people, the place, the occasion and the mood. It may be empty; then decide from the shots alone.
 A shot has itemId, mediaId, kind, capturedAt, width, height, durationSeconds, hasAudio,
 shownWithCover, labels, comment, and when the analysis has it: score, summary, description, tags,
 frames, sounds, words.

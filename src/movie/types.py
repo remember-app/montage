@@ -47,7 +47,13 @@ class ReportDimensions(TypedDict):
     height: int
 
 
+class ReportEvent(TypedDict):
+    title: str
+    description: str
+
+
 class ReportMovie(TypedDict):
+    event: ReportEvent
     targetSeconds: int
     dimensions: ReportDimensions
     story: str | None

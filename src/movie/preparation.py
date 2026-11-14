@@ -238,10 +238,29 @@ def _analysis(value) -> dict:
     return {key: item for key, item in fields.items() if item is not None}
 
 
-def _report(settings: dict, shots: list[ShotRow], music: list[SongRow]) -> MontageReport:
+def _event(conn: psycopg.Connection, montage_id: uuid.UUID) -> dict:
+    row = conn.execute(
+        """
+        select p.title, p.description
+        from montages m
+        join projects p on p.id = m.project_id
+        where m.id = %s
+        """,
+        (montage_id,),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError(f"montage {montage_id} has no event")
+    title, description = row
+    return {"title": title, "description": description}
+
+
+def _report(
+    settings: dict, shots: list[ShotRow], music: list[SongRow], event: dict
+) -> MontageReport:
     dimensions = settings.get("dimensions") or {}
     return {
         "movie": {
+            "event": event,
             "targetSeconds": int(settings.get("targetSeconds") or 0),
             "dimensions": {
                 "width": int(dimensions.get("width") or 0),
@@ -287,7 +306,7 @@ def build(conn: psycopg.Connection, montage_id: uuid.UUID) -> MontageReport:
     shots = _shots(conn, settings)
     music = _music(conn, settings)
     _coverage(shots, music)
-    report: MontageReport = _report(settings, shots, music)
+    report: MontageReport = _report(settings, shots, music, _event(conn, montage_id))
     landed = conn.execute(
         """
         update montages

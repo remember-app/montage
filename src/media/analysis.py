@@ -141,6 +141,34 @@ def _graded(grading: str, comment: str | None) -> str:
     return block
 
 
+def _event_instruction(conn: psycopg.Connection, media_id: uuid.UUID) -> str:
+    row = conn.execute(
+        """
+        select p.title, p.description
+        from project_items pi
+        join projects p on p.id = pi.project_id
+        where pi.media_id = %s and p.description <> ''
+        limit 1
+        """,
+        (media_id,),
+    ).fetchone()
+    if row is None:
+        row = conn.execute(
+            """
+            select p.title, p.description
+            from songs s
+            join projects p on p.id = s.project_id
+            where s.media_id = %s and p.description <> ''
+            limit 1
+            """,
+            (media_id,),
+        ).fetchone()
+    if row is None:
+        return INSTRUCTION
+    title, description = row
+    return f'{INSTRUCTION}\nWhat this event is: "{title}". {description.strip()}'
+
+
 def _spans(value, duration: float | None) -> list[dict] | None:
     if not isinstance(value, list):
         return None
@@ -260,7 +288,7 @@ def _photo_analysis(
         conn,
         operation="photo",
         media_id=media_id,
-        instruction=INSTRUCTION,
+        instruction=_event_instruction(conn, media_id),
         prompt=f"{PHOTO_PROMPT}\n{_graded(grading, comment)}",
         blobs=(blob,),
     )
@@ -284,6 +312,7 @@ def _video_low(
     workdir: pathlib.Path,
     grading: str,
     comment: str | None,
+    instruction: str,
 ) -> tuple[str, str, float, dict | None, list[dict]]:
     length = duration or ffmpeg.duration(source) or 0.0
     moments = _spaced_moments(length, FRAME_STEP_SECONDS, FRAME_MIN, FRAME_MAX)
@@ -299,7 +328,7 @@ def _video_low(
         conn,
         operation="video",
         media_id=media_id,
-        instruction=INSTRUCTION,
+        instruction=instruction,
         prompt=f"{prompt}\n{_graded(grading, comment)}",
         blobs=tuple(blobs),
     )
@@ -346,10 +375,11 @@ def _video_medium(
     workdir: pathlib.Path,
     grading: str,
     comment: str | None,
+    instruction: str,
 ) -> tuple[str, str, float, dict | None, list[dict]]:
     length = duration or ffmpeg.duration(source) or 0.0
     if length <= 0:
-        return _video_low(conn, media_id, source, duration, workdir, grading, comment)
+        return _video_low(conn, media_id, source, duration, workdir, grading, comment, instruction)
 
     frames = []
     context = ""
@@ -369,7 +399,7 @@ def _video_medium(
             conn,
             operation="video",
             media_id=media_id,
-            instruction=INSTRUCTION,
+            instruction=instruction,
             prompt=f"{prompt}\n{_graded(grading, comment)}",
             blobs=tuple(blobs),
         )
@@ -394,7 +424,7 @@ def _video_medium(
         conn,
         operation="text",
         media_id=media_id,
-        instruction=INSTRUCTION,
+        instruction=instruction,
         prompt=f"{prompt}\n{_graded(grading, comment)}",
     )
     description = _text(answer.get("description")) or frames[-1]["description"]
@@ -417,12 +447,13 @@ def _sound_analysis(
     source: pathlib.Path,
     duration: float | None,
     workdir: pathlib.Path,
+    instruction: str,
 ) -> tuple[str | None, dict | None, list[dict] | None, list[dict] | None]:
     answer = ai_usage.as_json(
         conn,
         operation="video",
         media_id=media_id,
-        instruction=INSTRUCTION,
+        instruction=instruction,
         prompt=SOUND_PROMPT,
         blobs=(_audio_blob(source, workdir, speech=True),),
     )
@@ -444,23 +475,24 @@ def _video_analysis(
     comment: str | None,
     level: str,
 ) -> dict:
+    instruction = _event_instruction(conn, media_id)
     if level == "high":
         summary, description, score, tags, frames = _video_high(
             conn, media_id, source, duration, workdir, grading, comment
         )
     elif level == "medium":
         summary, description, score, tags, frames = _video_medium(
-            conn, media_id, source, duration, workdir, grading, comment
+            conn, media_id, source, duration, workdir, grading, comment, instruction
         )
     else:
         summary, description, score, tags, frames = _video_low(
-            conn, media_id, source, duration, workdir, grading, comment
+            conn, media_id, source, duration, workdir, grading, comment, instruction
         )
 
     sounds = words = None
     if _has_audio(source):
         sound_description, sound_tags, sounds, words = _sound_analysis(
-            conn, media_id, source, duration, workdir
+            conn, media_id, source, duration, workdir, instruction
         )
         tags = tags or {}
         if sound_description:
@@ -493,7 +525,7 @@ def _audio_analysis(
         conn,
         operation="audio",
         media_id=media_id,
-        instruction=INSTRUCTION,
+        instruction=_event_instruction(conn, media_id),
         prompt=f"{AUDIO_PROMPT}\n{_graded(grading, comment)}",
         blobs=(_audio_blob(source, workdir, speech=True),),
     )
@@ -522,7 +554,7 @@ def _music_analysis(
         conn,
         operation="audio",
         media_id=media_id,
-        instruction=INSTRUCTION,
+        instruction=_event_instruction(conn, media_id),
         prompt=MUSIC_PROMPT,
         blobs=(_audio_blob(source, workdir, speech=False),),
     )
