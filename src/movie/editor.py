@@ -54,16 +54,16 @@ def _f(value) -> str:
     return f"{float(value):.3f}"
 
 
-def _transition(shot: ShotCommand) -> float:
+def overlap(shot: ShotCommand) -> float:
     return float(shot.get("transitionSeconds") or 0)
 
 
-def _total(shots: list[ShotCommand]) -> float:
+def timeline_length(shots: list[ShotCommand]) -> float:
     total = 0.0
     for index, shot in enumerate(shots):
         total += float(shot["seconds"])
         if index < len(shots) - 1:
-            total -= _transition(shot)
+            total -= overlap(shot)
     return total
 
 
@@ -179,7 +179,7 @@ def _validate(
             issues.append(f"item {item.item_id} has no role")
     for index, shot in enumerate(shots[:-1]):
         following = float(shots[index + 1]["seconds"])
-        transition = _transition(shot)
+        transition = overlap(shot)
         if transition < 0:
             issues.append(f"item {shot.get('itemId')} has a negative transition")
         elif 0 < transition < 1 / FPS:
@@ -190,7 +190,7 @@ def _validate(
     used = {str(shot.get("itemId")) for shot in shots}
     for item_id in required - used:
         issues.append(f"required item {item_id} is missing")
-    total = _total(shots)
+    total = timeline_length(shots)
     target = float(montage.settings.get("targetSeconds") or 0)
     if target > 0:
         allowance = max(TARGET_ALLOWANCE_MIN, target * TARGET_ALLOWANCE)
@@ -436,7 +436,7 @@ def _join_tree(
 
 
 def _concat(clips: list[pathlib.Path], shots: list[ShotCommand], out: pathlib.Path) -> None:
-    transitions = [_transition(shots[index]) for index in range(len(shots) - 1)]
+    transitions = [overlap(shots[index]) for index in range(len(shots) - 1)]
     _join_tree(clips, transitions, out)
 
 
@@ -710,7 +710,7 @@ def render(conn: psycopg.Connection, montage_id: uuid.UUID, plan: EditPlan) -> N
             clips.append(clip)
         base = workdir / "base.mp4"
         _concat(clips, shots, base)
-        total = ffmpeg.duration(base) or _total(shots)
+        total = ffmpeg.duration(base) or timeline_length(shots)
         music = _music(plan, songs, total, workdir / "music.m4a", workdir)
         final = workdir / "final.mp4"
         _final(base, music, final)

@@ -3,7 +3,7 @@ import uuid
 
 import psycopg
 
-from src.movie import directing, editor, notify, preparation
+from src.movie import directing, editor, notify, preparation, rhythm
 
 log = logging.getLogger("jobs.montage")
 
@@ -40,6 +40,9 @@ def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None = None) -> N
     commands = (manifest.get("editingParams") or {}).get("commands") or []
     if not commands:
         raise RuntimeError("montage has no editing plan")
+    if not (manifest.get("editingParams") or {}).get("rhythm"):
+        commands = rhythm.apply(conn, ref, commands)
+
     editor.render(conn, ref, commands)
 
 
