@@ -1,5 +1,7 @@
 import dataclasses
+import json
 import logging
+import math
 import pathlib
 import tempfile
 import uuid
@@ -21,6 +23,14 @@ TARGET_ALLOWANCE = 0.1
 TARGET_ALLOWANCE_MIN = 2.0
 ZOOM_SMOOTH = 4
 CONCAT_GROUP = 4
+
+EDGE_FADE = 0.05
+MUSIC_TAIL = 1.5
+DUCK_THRESHOLD = 0.05  # ponytail: one calibration knob; tune it on real event audio
+DUCK_RATIO = 8
+DUCK_ATTACK = 20
+DUCK_RELEASE = 400
+LOUDNESS = "loudnorm=I=-14:TP=-1.5:LRA=11"
 
 
 @dataclasses.dataclass
@@ -52,6 +62,16 @@ class Montage:
 
 def _f(value) -> str:
     return f"{float(value):.3f}"
+
+
+def _gain(cue) -> float:
+    value = cue.get("gain")
+    return 1.0 if value is None else float(value)
+
+
+def _declick(seconds: float) -> str:
+    fade = min(EDGE_FADE, seconds / 2)
+    return f"afade=t=in:st=0:d={_f(fade)},afade=t=out:st={_f(max(seconds - fade, 0))}:d={_f(fade)}"
 
 
 def overlap(shot: ShotCommand) -> float:
@@ -216,7 +236,7 @@ def _validate(
             issues.append(f"song {song.media_id} runs past the file")
         if at + seconds > total + 0.05:
             issues.append(f"song {song.media_id} plays past the movie")
-        gain = float(cue.get("gain") or 0)
+        gain = _gain(cue)
         if not 0 <= gain <= 2:
             issues.append(f"song {song.media_id} has gain outside 0..2")
         for side in ("fadeInSeconds", "fadeOutSeconds"):
@@ -292,7 +312,7 @@ def _clip(
         picture = source
         inputs = ["-ss", _f(start), "-t", _f(seconds), "-i", str(source)]
         if live > 0 and ffmpeg.has_audio(source):
-            audio_map, audio_filter = "0:a:0", f"volume={_f(live)},apad"
+            audio_map, audio_filter = "0:a:0", f"volume={_f(live)},apad,{_declick(seconds)}"
         else:
             inputs += ["-f", "lavfi", "-t", _f(seconds), "-i", "anullsrc=r=44100:cl=stereo"]
             audio_map, audio_filter = "1:a:0", None
@@ -305,7 +325,7 @@ def _clip(
         picture = image
         inputs = ["-loop", "1", "-framerate", str(FPS), "-t", _f(seconds), "-i", str(image)]
         inputs += ["-ss", _f(start), "-t", _f(seconds), "-i", str(source)]
-        audio_map, audio_filter = "1:a:0", f"volume={_f(live)},apad"
+        audio_map, audio_filter = "1:a:0", f"volume={_f(live)},apad,{_declick(seconds)}"
 
     fit_width, fit_height = _fit_size(shot, picture, width, height)
     args = [
@@ -455,15 +475,20 @@ def _music(
         storage.download(song.key, path)
         ffmpeg.refuse_playlists(path)
         seconds = float(cue["seconds"])
+        at = float(cue.get("atSeconds") or 0)
         inputs += ["-ss", _f(cue["sourceStartSeconds"]), "-t", _f(seconds), "-i", str(path)]
-        filters = [f"volume={_f(cue.get('gain', 1))}"]
-        fade_in = float(cue.get("fadeInSeconds") or 0)
-        fade_out = float(cue.get("fadeOutSeconds") or 0)
+        filters = [f"volume={_f(_gain(cue))}"]
+        fade_in = float(cue.get("fadeInSeconds") or 0) or EDGE_FADE
+        fade_out = float(cue.get("fadeOutSeconds") or 0) or EDGE_FADE
+        if at + seconds >= total - 0.05:
+            fade_out = max(fade_out, min(MUSIC_TAIL, seconds))
+        fade_in = min(fade_in, seconds)
+        fade_out = min(fade_out, seconds)
         if fade_in > 0:
             filters.append(f"afade=t=in:st=0:d={_f(fade_in)}")
         if fade_out > 0:
             filters.append(f"afade=t=out:st={_f(max(seconds - fade_out, 0))}:d={_f(fade_out)}")
-        filters.append(f"adelay={int(float(cue.get('atSeconds') or 0) * 1000)}:all=1")
+        filters.append(f"adelay={int(at * 1000)}:all=1")
         label = f"m{index}"
         chains.append(f"[{index}:a]" + ",".join(filters) + f"[{label}]")
         labels.append(f"[{label}]")
@@ -496,17 +521,84 @@ def _music(
     return out
 
 
+def _loudness(path: pathlib.Path) -> str:
+    result = ffmpeg.run(
+        "-hide_banner", "-i", str(path), "-af", f"{LOUDNESS}:print_format=json", "-f", "null", "-"
+    )
+    text = result.stderr
+    try:
+        measured = json.loads(text[text.rfind("{") : text.rfind("}") + 1])
+        values = [
+            float(measured[key])
+            for key in ("input_i", "input_tp", "input_lra", "input_thresh", "target_offset")
+        ]
+    except (ValueError, KeyError):
+        log.warning("cannot measure the loudness of %s, the mix stays as it is", path)
+        return LOUDNESS
+    if not all(math.isfinite(value) for value in values):
+        log.info("%s is too quiet to measure, the mix stays as it is", path)
+        return LOUDNESS
+    return (
+        f"{LOUDNESS}:measured_I={measured['input_i']}:measured_TP={measured['input_tp']}"
+        f":measured_LRA={measured['input_lra']}:measured_thresh={measured['input_thresh']}"
+        f":offset={measured['target_offset']}:linear=true"
+    )
+
+
 def _final(base: pathlib.Path, music: pathlib.Path | None, out: pathlib.Path) -> None:
     if music is None:
-        ffmpeg.run("-i", str(base), "-c", "copy", "-movflags", "+faststart", str(out))
+        ffmpeg.run(
+            "-i",
+            str(base),
+            "-af",
+            _loudness(base),
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            AUDIO_BITRATE,
+            "-ar",
+            AUDIO_RATE,
+            "-ac",
+            "2",
+            "-movflags",
+            "+faststart",
+            str(out),
+        )
         return
+    mixed = out.parent / "mix.m4a"
     ffmpeg.run(
         "-i",
         str(base),
         "-i",
         str(music),
         "-filter_complex",
-        "[0:a][1:a]amix=inputs=2:normalize=0:duration=first,alimiter=limit=0.95[a]",
+        (
+            "[0:a]asplit=2[live][voice];"
+            f"[1:a][voice]sidechaincompress=threshold={DUCK_THRESHOLD}:ratio={DUCK_RATIO}"
+            f":attack={DUCK_ATTACK}:release={DUCK_RELEASE}[ducked];"
+            "[live][ducked]amix=inputs=2:normalize=0:duration=first,alimiter=limit=0.95[a]"
+        ),
+        "-map",
+        "[a]",
+        "-c:a",
+        "aac",
+        "-b:a",
+        AUDIO_BITRATE,
+        "-ar",
+        AUDIO_RATE,
+        "-ac",
+        "2",
+        str(mixed),
+    )
+    ffmpeg.run(
+        "-i",
+        str(base),
+        "-i",
+        str(mixed),
+        "-filter_complex",
+        f"[1:a]{_loudness(mixed)}[a]",
         "-map",
         "0:v",
         "-map",
@@ -517,6 +609,10 @@ def _final(base: pathlib.Path, music: pathlib.Path | None, out: pathlib.Path) ->
         "aac",
         "-b:a",
         AUDIO_BITRATE,
+        "-ar",
+        AUDIO_RATE,
+        "-ac",
+        "2",
         "-movflags",
         "+faststart",
         str(out),
@@ -723,3 +819,85 @@ def render(conn: psycopg.Connection, montage_id: uuid.UUID, plan: EditPlan) -> N
 
     log.info("montage %s is ready: %.1f seconds", montage_id, total)
     notify.ready(montage_id)
+
+
+if __name__ == "__main__":
+    import shutil
+    import wave
+
+    import numpy as np
+
+    with tempfile.TemporaryDirectory() as directory:
+        work = pathlib.Path(directory)
+        tone = work / "song.wav"
+        ffmpeg.run("-f", "lavfi", "-i", "sine=f=300:d=4", "-ar", AUDIO_RATE, "-ac", "2", str(tone))
+
+        def download(_key, path):
+            shutil.copy(tone, path)
+
+        original = storage.download
+        storage.download = download
+        try:
+            plan: EditPlan = [
+                {
+                    "type": "music",
+                    "songId": "s",
+                    "mediaId": "s",
+                    "sourceStartSeconds": 0.0,
+                    "seconds": 4.0,
+                    "atSeconds": 0.0,
+                    "gain": 1.0,
+                    "fadeInSeconds": 0.0,
+                    "fadeOutSeconds": 0.0,
+                }
+            ]
+            music = _music(plan, {"s": Song("s", "key", 4.0)}, 4.0, work / "music.m4a", work)
+            assert music is not None
+            base = work / "base.mp4"
+            ffmpeg.run(
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x64:d=4:r=30",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=44100:cl=stereo",
+                "-t",
+                "4",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                str(base),
+            )
+            final = work / "final.mp4"
+            _final(base, music, final)
+            assert abs((ffmpeg.duration(final) or 0) - 4.0) < 0.2
+
+            def rms(from_second: float) -> float:
+                wav = work / f"rms-{from_second}.wav"
+                ffmpeg.run(
+                    "-ss",
+                    f"{from_second}",
+                    "-t",
+                    "0.2",
+                    "-i",
+                    str(final),
+                    "-vn",
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "16000",
+                    str(wav),
+                )
+                with wave.open(str(wav)) as file:
+                    data = np.frombuffer(file.readframes(file.getnframes()), dtype=np.int16)
+                return float(np.sqrt(((data / 32768) ** 2).mean()))
+
+            assert rms(3.8) < rms(2.0) * 0.5, (rms(3.8), rms(2.0))
+        finally:
+            storage.download = original
+    print("ok")
