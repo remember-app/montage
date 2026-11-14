@@ -56,7 +56,7 @@ class ReportMovie(TypedDict):
     event: ReportEvent
     targetSeconds: int
     dimensions: ReportDimensions
-    story: str | None
+    direction: str | None
     requiredItemIds: list[str]
     level: MontageLevel
 

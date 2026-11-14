@@ -266,7 +266,7 @@ def _report(
                 "width": int(dimensions.get("width") or 0),
                 "height": int(dimensions.get("height") or 0),
             },
-            "story": settings.get("prompt"),
+            "direction": settings.get("prompt"),
             "requiredItemIds": [str(one) for one in settings.get("requiredItemIds") or []],
             "level": level(settings),
         },
