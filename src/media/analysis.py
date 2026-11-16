@@ -49,7 +49,7 @@ IMPORTANCE_KEY = "analysis.grading.importance"
 QUALITY_KEY = "analysis.grading.quality"
 MUSIC_KEY = "music.grading"
 
-USABLE_QUALITY = 5.0  # ponytail: one calibration knob; the midpoint where a segment can be used
+USABLE_QUALITY = 3.0  # ponytail: one calibration knob; the bottom of the usable band
 
 
 def _text(value, limit: int = DESCRIPTION_LIMIT) -> str | None:
@@ -356,8 +356,12 @@ def _file_quality(scored: list[tuple[float, float]]) -> float:
     total = sum(duration for duration, _ in scored)
     if total <= 0:
         return 5.0
-    usable = sum(duration for duration, quality in scored if quality >= USABLE_QUALITY)
-    return round(10.0 * usable / total, 2)
+    usable = [(duration, quality) for duration, quality in scored if quality >= USABLE_QUALITY]
+    if not usable:
+        return 0.0
+    usable_seconds = sum(duration for duration, _ in usable)
+    mean = sum(duration * quality for duration, quality in usable) / usable_seconds
+    return round(usable_seconds / total * mean, 2)
 
 
 def _video_medium(
