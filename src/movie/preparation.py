@@ -46,7 +46,7 @@ class SongRow:
     song_id: str
     media_id: str
     name: str
-    author: str
+    author: str | None
     duration: float | None
     analysis: dict | None
 

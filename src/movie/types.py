@@ -87,7 +87,7 @@ class ReportMusic(TypedDict):
     songId: str
     mediaId: str
     name: str
-    author: str
+    author: str | None
     durationSeconds: float | None
     score: NotRequired[float]
     summary: NotRequired[str]
