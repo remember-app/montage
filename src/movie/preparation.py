@@ -98,13 +98,16 @@ def _shots(conn: psycopg.Connection, settings: dict) -> list[ShotRow]:
     labels = _labels(conn, ids)
     rows = conn.execute(
         """
-        select pi.id, pi.media_id, pi.kind, pi.description, pi.analysis,
-               m.duration, m.width, m.height, m.captured_at,
-               (select pm.storage_key from media_items pm where pm.id = pi.preview_id),
+        select pi.id, pi.original_id, pi.kind, pi.comment, pi.analysis,
+               nullif(m.meta->>'duration', '')::float8 as duration,
+               (m.meta->'dimensions'->>'width')::int as width,
+               (m.meta->'dimensions'->>'height')::int as height,
+               (m.meta->>'at')::timestamptz as captured_at,
+               (select pm.storage_key from media_items pm where pm.id = pi.compressed_id),
                m.storage_key
-        from project_items pi join media_items m on m.id = pi.media_id
+        from project_items pi join media_items m on m.id = pi.original_id
         where pi.id = any(%s)
-        order by coalesce(m.captured_at, pi.created_at), m.id
+        order by coalesce((m.meta->>'at')::timestamptz, pi.created_at), m.id
         """,
         (ids,),
     ).fetchall()
@@ -149,9 +152,10 @@ def _music(conn: psycopg.Connection, settings: dict) -> list[SongRow]:
         return []
     rows = conn.execute(
         """
-        select s.id, s.media_id, s.name, s.author, s.analysis, m.duration
-        from songs s join media_items m on m.id = s.media_id
-        where s.media_id = any(%s)
+        select s.id, s.original_id, s.name, s.author, s.analysis,
+               nullif(m.meta->>'duration', '')::float8
+        from songs s join media_items m on m.id = s.original_id
+        where s.original_id = any(%s)
         """,
         (ids,),
     ).fetchall()

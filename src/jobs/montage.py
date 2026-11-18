@@ -13,7 +13,7 @@ def _manifest(conn: psycopg.Connection, ref: uuid.UUID) -> dict:
     return (row[0] if row else None) or {}
 
 
-def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None = None) -> None:
+def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None, job_id: int) -> None:
     row = conn.execute("select status, manifest from montages where id = %s", (ref,)).fetchone()
     if row is None:
         log.info("montage %s is gone, nothing to assemble", ref)
@@ -34,7 +34,7 @@ def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None = None) -> N
         preparation.build(conn, ref)
         manifest = _manifest(conn, ref)
     if not ((manifest.get("editingParams") or {}).get("commands")):
-        directing.direct(conn, ref, manifest["directingInput"]["mergedMontageData"])
+        directing.direct(conn, ref, manifest["directingInput"]["mergedMontageData"], job_id)
         manifest = _manifest(conn, ref)
 
     commands = (manifest.get("editingParams") or {}).get("commands") or []

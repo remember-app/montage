@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 from src import config
 from src.integrations import ffmpeg, storage
@@ -13,14 +14,15 @@ from src.media import perceptual, probe
 
 log = logging.getLogger("media.derive")
 
-THUMBNAIL_SIDE = 640
-PREVIEW_LONG_SIDE = 2048
-PREVIEW_HEIGHT = 720
+PREVIEW_SIDES = {"small": 160, "middle": 480, "large": 960}
+COMPRESSED_SIDE = 2048
+COMPRESSED_HEIGHT = 720
 
 
 @dataclasses.dataclass
 class Derivative:
     id: uuid.UUID
+    role: str
     kind: str
     format: str
     path: pathlib.Path
@@ -29,8 +31,8 @@ class Derivative:
     duration: float | None
 
 
-def _derivative_id(media_id: uuid.UUID, part: str) -> uuid.UUID:
-    return uuid.uuid5(uuid.NAMESPACE_URL, f"remember:{media_id}:{part}")
+def _derivative_id(media_id: uuid.UUID, role: str) -> uuid.UUID:
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"remember:{media_id}:{role}")
 
 
 def _time(value) -> datetime | None:
@@ -42,7 +44,25 @@ def _time(value) -> datetime | None:
         return None
 
 
-def _video_thumbnail(original: pathlib.Path, out: pathlib.Path, duration: float | None) -> None:
+def _meta(width: int | None, height: int | None, duration: float | None) -> dict:
+    return {
+        "dimensions": {"width": width, "height": height} if width and height else None,
+        "duration": duration,
+        "at": None,
+        "place": None,
+        "camera": None,
+    }
+
+
+def _content_type(file_format: str) -> str:
+    return {
+        "jpeg": "image/jpeg",
+        "mp4": "video/mp4",
+        "m4a": "audio/mp4",
+    }.get(file_format, "application/octet-stream")
+
+
+def _video_frame(original: pathlib.Path, out: pathlib.Path, duration: float | None) -> None:
     at = min(1.0, (duration or 2.0) / 2)
     ffmpeg.run(
         "-ss",
@@ -51,18 +71,16 @@ def _video_thumbnail(original: pathlib.Path, out: pathlib.Path, duration: float 
         str(original),
         "-frames:v",
         "1",
-        "-vf",
-        f"scale='min({THUMBNAIL_SIDE},iw)':-2",
         str(out),
     )
 
 
-def _video_preview(original: pathlib.Path, out: pathlib.Path) -> None:
+def _video_compressed(original: pathlib.Path, out: pathlib.Path) -> None:
     ffmpeg.run(
         "-i",
         str(original),
         "-vf",
-        f"scale=-2:'min({PREVIEW_HEIGHT},ih)'",
+        f"scale=-2:'min({COMPRESSED_HEIGHT},ih)'",
         "-c:v",
         "libx264",
         "-preset",
@@ -79,6 +97,10 @@ def _video_preview(original: pathlib.Path, out: pathlib.Path) -> None:
     )
 
 
+def _audio_compressed(original: pathlib.Path, out: pathlib.Path) -> None:
+    ffmpeg.run("-i", str(original), "-vn", "-c:a", "aac", "-b:a", "96k", str(out))
+
+
 def _cover_id(conn: psycopg.Connection) -> uuid.UUID | None:
     raw = config.audio_cover_media_id()
     if not raw:
@@ -88,8 +110,7 @@ def _cover_id(conn: psycopg.Connection) -> uuid.UUID | None:
     except ValueError:
         log.warning("AUDIO_COVER_MEDIA_ID is not a uuid: %r", raw)
         return None
-    found = conn.execute("select 1 from media_items where id = %s", (value,)).fetchone()
-    if found is None:
+    if conn.execute("select 1 from media_items where id = %s", (value,)).fetchone() is None:
         log.warning("AUDIO_COVER_MEDIA_ID %s is not a media item", value)
         return None
     return value
@@ -102,57 +123,122 @@ def _files(
     kind: str,
     duration: float | None,
 ) -> list[Derivative]:
+    result: list[Derivative] = []
     if kind == "photo":
-        thumbnail, preview = work / "thumbnail.jpg", work / "preview.jpg"
-        small = probe.render_photo(original, thumbnail, THUMBNAIL_SIDE)
-        large = probe.render_photo(original, preview, PREVIEW_LONG_SIDE)
-        return [
+        compressed = work / "compressed.jpg"
+        size = probe.render_photo(original, compressed, COMPRESSED_SIDE)
+        result.append(
             Derivative(
-                _derivative_id(media_id, "thumbnail"),
+                _derivative_id(media_id, "compressed"),
+                "compressed",
                 "photo",
                 "jpeg",
-                thumbnail,
-                small["width"],
-                small["height"],
+                compressed,
+                size["width"],
+                size["height"],
                 None,
-            ),
-            Derivative(
-                _derivative_id(media_id, "preview"),
-                "photo",
-                "jpeg",
-                preview,
-                large["width"],
-                large["height"],
-                None,
-            ),
-        ]
+            )
+        )
+        for role, side in PREVIEW_SIDES.items():
+            path = work / f"preview-{role}.jpg"
+            size = probe.render_photo(original, path, side)
+            result.append(
+                Derivative(
+                    _derivative_id(media_id, role),
+                    role,
+                    "photo",
+                    "jpeg",
+                    path,
+                    size["width"],
+                    size["height"],
+                    None,
+                )
+            )
+        return result
     if kind == "video":
-        thumbnail, preview = work / "thumbnail.jpg", work / "preview.mp4"
-        _video_thumbnail(original, thumbnail, duration)
-        _video_preview(original, preview)
-        small = ffmpeg.dimensions(thumbnail) or (None, None)
-        large = ffmpeg.dimensions(preview) or (None, None)
-        return [
+        compressed = work / "compressed.mp4"
+        _video_compressed(original, compressed)
+        cw, ch = ffmpeg.dimensions(compressed) or (None, None)
+        result.append(
             Derivative(
-                _derivative_id(media_id, "thumbnail"),
-                "photo",
-                "jpeg",
-                thumbnail,
-                small[0],
-                small[1],
-                None,
-            ),
-            Derivative(
-                _derivative_id(media_id, "preview"),
+                _derivative_id(media_id, "compressed"),
+                "compressed",
                 "video",
                 "mp4",
-                preview,
-                large[0],
-                large[1],
-                ffmpeg.duration(preview),
-            ),
-        ]
-    return []
+                compressed,
+                cw,
+                ch,
+                ffmpeg.duration(compressed),
+            )
+        )
+        frame = work / "frame.jpg"
+        _video_frame(original, frame, duration)
+        for role, side in PREVIEW_SIDES.items():
+            path = work / f"preview-{role}.jpg"
+            size = probe.render_photo(frame, path, side)
+            result.append(
+                Derivative(
+                    _derivative_id(media_id, role),
+                    role,
+                    "photo",
+                    "jpeg",
+                    path,
+                    size["width"],
+                    size["height"],
+                    None,
+                )
+            )
+        return result
+    if kind == "audio":
+        compressed = work / "compressed.m4a"
+        _audio_compressed(original, compressed)
+        result.append(
+            Derivative(
+                _derivative_id(media_id, "compressed"),
+                "compressed",
+                "audio",
+                "m4a",
+                compressed,
+                None,
+                None,
+                ffmpeg.duration(compressed),
+            )
+        )
+    return result
+
+
+def _camera(info: dict) -> dict | None:
+    keys = ("camera_model", "focal_length_mm", "aperture", "iso", "exposure_ev", "shutter")
+    if not any(info.get(key) is not None for key in keys):
+        return None
+    return {
+        "model": info.get("camera_model"),
+        "focalLengthMm": info.get("focal_length_mm"),
+        "exposure": {
+            "aperture": info.get("aperture"),
+            "iso": info.get("iso"),
+            "ev": info.get("exposure_ev"),
+            "shutter": info.get("shutter"),
+        },
+    }
+
+
+def _original_meta(info: dict, kind: str, current: dict) -> dict:
+    meta = dict(current)
+    updates = {
+        "dimensions": (
+            {"width": info.get("width"), "height": info.get("height")}
+            if info.get("width") is not None and info.get("height") is not None
+            else None
+        ),
+        "duration": info.get("duration") if kind != "photo" else None,
+        "at": _time(info.get("captured_at")),
+        "camera": _camera(info),
+    }
+    for key, value in updates.items():
+        if meta.get(key) is None and value is not None:
+            meta[key] = value
+    return meta
 
 
 def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None = None) -> None:
@@ -162,12 +248,25 @@ def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None = None) -> N
         return
     media_id = upload[0]
     row = conn.execute(
-        "select kind, storage_key, uploaded_by from media_items where id = %s", (media_id,)
+        "select kind, storage_key, meta from media_items where id = %s", (media_id,)
     ).fetchone()
     if row is None:
         log.info("media item %s is gone, nothing to derive", media_id)
         return
-    kind, storage_key, uploaded_by = row
+    kind, storage_key, current_meta = row
+    owner = conn.execute(
+        """
+        select 'item' as kind, id from project_items where original_id = %s
+        union all
+        select 'song' as kind, id from songs where original_id = %s
+        limit 1
+        """,
+        (media_id, media_id),
+    ).fetchone()
+    if owner is None:
+        log.info("media item %s has no owner, nothing to derive", media_id)
+        return
+    owner_kind, owner_id = owner
 
     with tempfile.TemporaryDirectory() as directory:
         work = pathlib.Path(directory)
@@ -176,100 +275,64 @@ def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None = None) -> N
         ffmpeg.refuse_playlists(original)
         info = probe.read(original, kind)
         derivatives = _files(original, work, media_id, kind, info.get("duration"))
-        thumbnail_file = work / "thumbnail.jpg"
-        perceptual_hash = perceptual.hash_of(thumbnail_file) if thumbnail_file.exists() else None
-        cover = _cover_id(conn) if kind == "audio" else None
+        middle = work / "preview-middle.jpg"
+        perceptual_hash = perceptual.hash_of(middle) if middle.exists() else None
+        meta = _original_meta(info, kind, current_meta or {})
 
         for derivative in derivatives:
             key = storage.media_key(str(derivative.id), derivative.format)
-            content_type = "video/mp4" if derivative.format == "mp4" else "image/jpeg"
-            storage.upload(derivative.path, key, content_type)
+            storage.upload(derivative.path, key, _content_type(derivative.format))
 
         with conn.transaction():
-            landed = conn.execute(
-                """
-                update media_items
-                set width = coalesce(%s, width),
-                    height = coalesce(%s, height),
-                    duration = coalesce(%s, duration),
-                    captured_at = coalesce(captured_at, %s),
-                    camera_model = coalesce(camera_model, %s),
-                    focal_length_mm = coalesce(focal_length_mm, %s),
-                    aperture = coalesce(aperture, %s),
-                    iso = coalesce(iso, %s),
-                    exposure_ev = coalesce(exposure_ev, %s),
-                    shutter = coalesce(shutter, %s),
-                    latitude = coalesce(latitude, %s),
-                    longitude = coalesce(longitude, %s),
-                    perceptual_hash = coalesce(%s, perceptual_hash)
-                where id = %s
-                returning id
-                """,
-                (
-                    info.get("width"),
-                    info.get("height"),
-                    info.get("duration"),
-                    _time(info.get("captured_at")),
-                    info.get("camera_model"),
-                    info.get("focal_length_mm"),
-                    info.get("aperture"),
-                    info.get("iso"),
-                    info.get("exposure_ev"),
-                    info.get("shutter"),
-                    info.get("latitude"),
-                    info.get("longitude"),
-                    perceptual_hash,
-                    media_id,
-                ),
-            ).fetchone()
-            if landed is None:
-                for derivative in derivatives:
-                    storage.delete(storage.media_key(str(derivative.id), derivative.format))
-                log.info("media item %s went away mid-derive", media_id)
-                return
-
+            conn.execute(
+                "update media_items set meta = %s, perceptual_hash = coalesce(%s, perceptual_hash) "
+                "where id = %s",
+                (Jsonb(meta), perceptual_hash, media_id),
+            )
             for derivative in derivatives:
                 conn.execute(
                     """
-                    insert into media_items (
-                        id, parent_media_id, kind, storage_key, uploaded_by, format, bytes,
-                        width, height, duration
-                    )
-                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    on conflict (id) do update
-                    set parent_media_id = excluded.parent_media_id,
+                    insert into media_items (id, kind, storage_key, format, bytes, meta)
+                    values (%s, %s, %s, %s, %s, %s)
+                    on conflict (id) do update set
                         kind = excluded.kind,
                         storage_key = excluded.storage_key,
-                        uploaded_by = excluded.uploaded_by,
                         format = excluded.format,
                         bytes = excluded.bytes,
-                        width = excluded.width,
-                        height = excluded.height,
-                        duration = excluded.duration
+                        meta = excluded.meta
                     """,
                     (
                         derivative.id,
-                        media_id,
                         derivative.kind,
                         storage.media_key(str(derivative.id), derivative.format),
-                        uploaded_by,
                         derivative.format,
                         derivative.path.stat().st_size,
-                        derivative.width,
-                        derivative.height,
-                        derivative.duration,
+                        Jsonb(
+                            _meta(derivative.width, derivative.height, derivative.duration)
+                        ),
                     ),
                 )
-
-            thumbnail = cover if kind == "audio" else _derivative_id(media_id, "thumbnail")
-            preview = None if kind == "audio" else _derivative_id(media_id, "preview")
-            conn.execute(
-                """
-                update project_items
-                set thumbnail_id = %s, preview_id = %s
-                where media_id = %s
-                """,
-                (thumbnail, preview, media_id),
-            )
+            compressed = next((item for item in derivatives if item.role == "compressed"), None)
+            previews = {
+                item.role: str(item.id) for item in derivatives if item.role in PREVIEW_SIDES
+            }
+            if kind == "audio":
+                cover = _cover_id(conn)
+                if cover is not None:
+                    previews = {role: str(cover) for role in PREVIEW_SIDES}
+            if owner_kind == "item":
+                conn.execute(
+                    """
+                    update project_items
+                    set compressed_id = %s, previews_ids = %s
+                    where id = %s
+                    """,
+                    (compressed.id if compressed else None, Jsonb(previews), owner_id),
+                )
+            else:
+                conn.execute(
+                    "update songs set compressed_id = %s where id = %s",
+                    (compressed.id if compressed else None, owner_id),
+                )
 
     log.info("media item %s (%s) derived: %s files", media_id, kind, len(derivatives))

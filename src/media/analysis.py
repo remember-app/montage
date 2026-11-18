@@ -135,7 +135,7 @@ def _event_instruction(conn: psycopg.Connection, media_id: uuid.UUID) -> str:
         select p.title, p.description
         from project_items pi
         join projects p on p.id = pi.project_id
-        where pi.media_id = %s
+        where pi.original_id = %s
         order by (p.description <> '') desc, pi.created_at
         limit 1
         """,
@@ -258,6 +258,7 @@ def _summary(answer: dict, description: str) -> str:
 
 def _photo_analysis(
     conn: psycopg.Connection,
+    job_id: int,
     media_id: uuid.UUID,
     source: pathlib.Path,
     workdir: pathlib.Path,
@@ -268,7 +269,7 @@ def _photo_analysis(
     answer = ai_usage.as_json(
         conn,
         operation="photo",
-        media_id=media_id,
+        job_id=job_id,
         instruction=_event_instruction(conn, media_id),
         prompt=f"{PHOTO_PROMPT}\n{importance}\n{quality}",
         blobs=(blob,),
@@ -288,6 +289,7 @@ def _photo_analysis(
 
 def _video_low(
     conn: psycopg.Connection,
+    job_id: int,
     media_id: uuid.UUID,
     source: pathlib.Path,
     duration: float | None,
@@ -309,7 +311,7 @@ def _video_low(
     answer = ai_usage.as_json(
         conn,
         operation="video",
-        media_id=media_id,
+        job_id=job_id,
         instruction=instruction,
         prompt=f"{prompt}\n{importance}\n{quality}",
         blobs=tuple(blobs),
@@ -366,6 +368,7 @@ def _file_quality(scored: list[tuple[float, float]]) -> float:
 
 def _video_medium(
     conn: psycopg.Connection,
+    job_id: int,
     media_id: uuid.UUID,
     source: pathlib.Path,
     duration: float | None,
@@ -377,7 +380,7 @@ def _video_medium(
     length = duration or ffmpeg.duration(source) or 0.0
     if length <= 0:
         return _video_low(
-            conn, media_id, source, duration, workdir, importance, quality, instruction
+            conn, job_id, media_id, source, duration, workdir, importance, quality, instruction
         )
 
     frames = []
@@ -398,7 +401,7 @@ def _video_medium(
         answer = ai_usage.as_json(
             conn,
             operation="video",
-            media_id=media_id,
+            job_id=job_id,
             instruction=instruction,
             prompt=f"{prompt}\n{quality}",
             blobs=tuple(blobs),
@@ -425,7 +428,7 @@ def _video_medium(
     answer = ai_usage.as_json(
         conn,
         operation="text",
-        media_id=media_id,
+        job_id=job_id,
         instruction=instruction,
         prompt=f"{prompt}\n{importance}",
     )
@@ -446,6 +449,7 @@ def _video_high(*_args, **_kwargs) -> dict:
 
 def _sound_analysis(
     conn: psycopg.Connection,
+    job_id: int,
     media_id: uuid.UUID,
     source: pathlib.Path,
     duration: float | None,
@@ -455,7 +459,7 @@ def _sound_analysis(
     answer = ai_usage.as_json(
         conn,
         operation="video",
-        media_id=media_id,
+        job_id=job_id,
         instruction=instruction,
         prompt=SOUND_PROMPT,
         blobs=(_audio_blob(source, workdir, speech=True),),
@@ -470,6 +474,7 @@ def _sound_analysis(
 
 def _video_analysis(
     conn: psycopg.Connection,
+    job_id: int,
     media_id: uuid.UUID,
     source: pathlib.Path,
     duration: float | None,
@@ -483,18 +488,18 @@ def _video_analysis(
         result = _video_high(conn, media_id, source, duration, workdir, importance, quality)
     elif level == "medium":
         result = _video_medium(
-            conn, media_id, source, duration, workdir, importance, quality, instruction
+            conn, job_id, media_id, source, duration, workdir, importance, quality, instruction
         )
     else:
         result = _video_low(
-            conn, media_id, source, duration, workdir, importance, quality, instruction
+            conn, job_id, media_id, source, duration, workdir, importance, quality, instruction
         )
 
     tags = result["tags"]
     sounds = words = None
     if _has_audio(source):
         sound_description, sound_tags, sounds, words = _sound_analysis(
-            conn, media_id, source, duration, workdir, instruction
+            conn, job_id, media_id, source, duration, workdir, instruction
         )
         tags = tags or {}
         if sound_description:
@@ -517,6 +522,7 @@ def _video_analysis(
 
 def _audio_analysis(
     conn: psycopg.Connection,
+    job_id: int,
     media_id: uuid.UUID,
     source: pathlib.Path,
     duration: float | None,
@@ -527,7 +533,7 @@ def _audio_analysis(
     answer = ai_usage.as_json(
         conn,
         operation="audio",
-        media_id=media_id,
+        job_id=job_id,
         instruction=_event_instruction(conn, media_id),
         prompt=f"{AUDIO_PROMPT}\n{importance}\n{quality}",
         blobs=(_audio_blob(source, workdir, speech=True),),
@@ -549,6 +555,7 @@ def _audio_analysis(
 
 def _music_analysis(
     conn: psycopg.Connection,
+    job_id: int,
     media_id: uuid.UUID,
     source: pathlib.Path,
     duration: float | None,
@@ -558,7 +565,7 @@ def _music_analysis(
     answer = ai_usage.as_json(
         conn,
         operation="audio",
-        media_id=media_id,
+        job_id=job_id,
         instruction=INSTRUCTION,
         prompt=f"{MUSIC_PROMPT}\n{grading}",
         blobs=(_audio_blob(source, workdir, speech=False),),
@@ -586,13 +593,13 @@ def _download(key: str, workdir: pathlib.Path, name: str) -> pathlib.Path:
 
 def _item_exists(conn: psycopg.Connection, media_id: uuid.UUID) -> bool:
     [row] = conn.execute(
-        "select count(*) from project_items where media_id = %s", (media_id,)
+        "select count(*) from project_items where original_id = %s", (media_id,)
     ).fetchone()
     return row > 0
 
 
 def _song_exists(conn: psycopg.Connection, media_id: uuid.UUID) -> bool:
-    [row] = conn.execute("select count(*) from songs where media_id = %s", (media_id,)).fetchone()
+    [row] = conn.execute("select count(*) from songs where original_id = %s", (media_id,)).fetchone()
     return row > 0
 
 
@@ -602,7 +609,7 @@ def _store_item(conn: psycopg.Connection, media_id: uuid.UUID, analysis: dict) -
         """
         update project_items
         set analysis = %s
-        where media_id = %s
+        where original_id = %s
           and (analysis is null
                or case analysis->>'level'
                     when 'low' then 0
@@ -622,7 +629,7 @@ def _store_song(conn: psycopg.Connection, media_id: uuid.UUID, analysis: dict) -
         """
         update songs
         set analysis = %s
-        where media_id = %s
+        where original_id = %s
           and (analysis is null
                or case analysis->>'level'
                     when 'low' then 0
@@ -640,7 +647,7 @@ def _video_level(level: str | None) -> str:
     return level if level in LEVELS else "medium"
 
 
-def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None = None) -> None:
+def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None, job_id: int) -> None:
     item = _item_exists(conn, ref)
     song = _song_exists(conn, ref)
     if not item and not song:
@@ -649,12 +656,12 @@ def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None = None) -> N
 
     row = conn.execute(
         """
-        select m.kind, m.storage_key, m.duration,
+        select m.kind, m.storage_key, nullif(m.meta->>'duration', '')::float8,
                (select pm.storage_key from project_items pi
-                  join media_items pm on pm.id = pi.preview_id
-                 where pi.media_id = m.id limit 1) as preview_key,
-               (select pi.description from project_items pi
-                 where pi.media_id = m.id and pi.description is not null limit 1) as comment
+                  join media_items pm on pm.id = pi.compressed_id
+                 where pi.original_id = m.id limit 1) as compressed_key,
+               (select pi.comment from project_items pi
+                 where pi.original_id = m.id and pi.comment is not null limit 1) as comment
         from media_items m where m.id = %s
         """,
         (ref,),
@@ -662,7 +669,7 @@ def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None = None) -> N
     if row is None:
         log.info("media %s is gone, nothing to analyze", ref)
         return
-    kind, storage_key, duration, preview_key, raw_comment = row
+    kind, storage_key, duration, compressed_key, raw_comment = row
     comment = _text(raw_comment, COMMENT_LIMIT)
 
     with tempfile.TemporaryDirectory() as directory:
@@ -670,17 +677,18 @@ def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None = None) -> N
         if item:
             importance = _importance(_grading(conn, IMPORTANCE_KEY), comment)
             quality = _grading(conn, QUALITY_KEY)
-            source_key = preview_key or storage_key
+            source_key = compressed_key or storage_key
             source = _download(source_key, workdir, "item-source")
             if kind == "photo":
-                analysis = _photo_analysis(conn, ref, source, workdir, importance, quality)
+                analysis = _photo_analysis(conn, job_id, ref, source, workdir, importance, quality)
             elif kind == "video":
                 analysis = _video_analysis(
-                    conn, ref, source, duration, workdir, importance, quality, _video_level(level)
+                    conn, job_id, ref, source, duration, workdir, importance, quality,
+                    _video_level(level),
                 )
             else:
                 analysis = _audio_analysis(
-                    conn, ref, source, duration, workdir, importance, quality
+                    conn, job_id, ref, source, duration, workdir, importance, quality
                 )
             landed = _store_item(conn, ref, analysis)
             log.info("media %s analyzed for %s item(s)", ref, landed)
@@ -688,6 +696,6 @@ def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None = None) -> N
         if song:
             grading = _grading(conn, MUSIC_KEY)
             source = _download(storage_key, workdir, "song-source")
-            analysis = _music_analysis(conn, ref, source, duration, workdir, grading)
+            analysis = _music_analysis(conn, job_id, ref, source, duration, workdir, grading)
             landed = _store_song(conn, ref, analysis)
             log.info("media %s analyzed for %s song(s)", ref, landed)

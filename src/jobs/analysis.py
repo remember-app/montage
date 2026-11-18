@@ -8,8 +8,8 @@ from src.media import analysis
 log = logging.getLogger("jobs.analysis")
 
 
-def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None = None) -> None:
-    analysis.run(conn, ref, level)
+def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None, job_id: int) -> None:
+    analysis.run(conn, ref, level, job_id)
 
 
 def give_up(conn: psycopg.Connection, ref: uuid.UUID) -> None:

@@ -54,7 +54,7 @@ def run_once(conn: psycopg.Connection) -> bool:
         if handler is None:
             raise LookupError(f"no handler for job kind {kind!r}")
         with heartbeat(job_id):
-            handler(conn, ref, level)
+            handler(conn, ref, level, job_id)
     except KeyboardInterrupt:
         hand_back(conn, job_id, kind)
         raise

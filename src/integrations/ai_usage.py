@@ -2,6 +2,7 @@ import logging
 import time
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 from src import config
 from src.integrations import ai
@@ -55,6 +56,21 @@ def _token(usage: object, name: str) -> int | None:
     return int(value) if isinstance(value, (int, float)) else None
 
 
+def _payload(conn: psycopg.Connection, model: str, usage: object, duration: int, error: str | None) -> dict:
+    return {
+        "tokens": {
+            "inputTokens": _token(usage, "total_input_tokens"),
+            "outputTokens": _token(usage, "total_output_tokens"),
+            "totalTokens": _token(usage, "total_tokens"),
+            "cachedTokens": _token(usage, "total_cached_tokens"),
+            "reasoningTokens": _token(usage, "total_thought_tokens"),
+        },
+        "duration": duration,
+        "costUsd": _cost(_rate(conn, model), usage),
+        "error": error[:500] if error else None,
+    }
+
+
 def record(
     conn: psycopg.Connection,
     *,
@@ -63,34 +79,15 @@ def record(
     usage: object,
     duration: int,
     error: str | None,
-    media_id=None,
-    montage_id=None,
+    job_id: int,
 ) -> None:
     model = config.gemini_model()
     conn.execute(
         """
-        insert into ai_requests (
-            media_id, montage_id, operation, provider, model, status,
-            input_tokens, output_tokens, total_tokens, cached_tokens, reasoning_tokens,
-            duration, cost_usd, error
-        )
-        values (%s, %s, %s, 'gemini', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        insert into ai_requests (job_id, operation, provider, model, status, usage)
+        values (%s, %s, 'gemini', %s, %s, %s)
         """,
-        (
-            media_id,
-            montage_id,
-            operation,
-            model,
-            status,
-            _token(usage, "total_input_tokens"),
-            _token(usage, "total_output_tokens"),
-            _token(usage, "total_tokens"),
-            _token(usage, "total_cached_tokens"),
-            _token(usage, "total_thought_tokens"),
-            duration,
-            _cost(_rate(conn, model), usage),
-            error[:500] if error else None,
-        ),
+        (job_id, operation, model, status, Jsonb(_payload(conn, model, usage, duration, error))),
     )
 
 
@@ -101,8 +98,7 @@ def text(
     instruction: str,
     prompt: str,
     blobs: tuple[ai.Blob, ...] = (),
-    media_id=None,
-    montage_id=None,
+    job_id: int,
 ) -> str:
     started = time.monotonic()
     try:
@@ -115,8 +111,7 @@ def text(
             usage=getattr(exc, "usage", None),
             duration=int((time.monotonic() - started) * 1000),
             error=str(exc),
-            media_id=media_id,
-            montage_id=montage_id,
+            job_id=job_id,
         )
         raise
     record(
@@ -126,8 +121,7 @@ def text(
         usage=usage,
         duration=int((time.monotonic() - started) * 1000),
         error=None,
-        media_id=media_id,
-        montage_id=montage_id,
+        job_id=job_id,
     )
     return answer
 
@@ -139,8 +133,7 @@ def as_json(
     instruction: str,
     prompt: str,
     blobs: tuple[ai.Blob, ...] = (),
-    media_id=None,
-    montage_id=None,
+    job_id: int,
 ) -> dict:
     started = time.monotonic()
     try:
@@ -153,8 +146,7 @@ def as_json(
             usage=getattr(exc, "usage", None),
             duration=int((time.monotonic() - started) * 1000),
             error=str(exc),
-            media_id=media_id,
-            montage_id=montage_id,
+            job_id=job_id,
         )
         raise
     record(
@@ -164,7 +156,6 @@ def as_json(
         usage=usage,
         duration=int((time.monotonic() - started) * 1000),
         error=None,
-        media_id=media_id,
-        montage_id=montage_id,
+        job_id=job_id,
     )
     return parsed

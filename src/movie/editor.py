@@ -7,6 +7,7 @@ import tempfile
 import uuid
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 from src import config
 from src.integrations import ffmpeg, storage
@@ -109,10 +110,12 @@ def _items(conn: psycopg.Connection, item_ids: list[str]) -> dict[str, Item]:
         return {}
     rows = conn.execute(
         """
-        select pi.id, pi.media_id, pi.kind, m.storage_key, m.duration,
-               (select pm.storage_key from media_items pm where pm.id = pi.thumbnail_id),
-               (select pm.storage_key from media_items pm where pm.id = pi.preview_id)
-        from project_items pi join media_items m on m.id = pi.media_id
+        select pi.id, pi.original_id, pi.kind, m.storage_key,
+               nullif(m.meta->>'duration', '')::float8,
+               (select pm.storage_key from media_items pm
+                 where pm.id = (pi.previews_ids->>'small')::uuid),
+               (select pm.storage_key from media_items pm where pm.id = pi.compressed_id)
+        from project_items pi join media_items m on m.id = pi.original_id
         where pi.id = any(%s)
         """,
         ([uuid.UUID(item_id) for item_id in item_ids],),
@@ -130,9 +133,9 @@ def _songs(conn: psycopg.Connection, media_ids: list[str]) -> dict[str, Song]:
         return {}
     rows = conn.execute(
         """
-        select s.media_id, m.storage_key, m.duration
-        from songs s join media_items m on m.id = s.media_id
-        where s.media_id = any(%s)
+        select s.original_id, m.storage_key, nullif(m.meta->>'duration', '')::float8
+        from songs s join media_items m on m.id = s.original_id
+        where s.original_id = any(%s)
         """,
         ([uuid.UUID(media_id) for media_id in media_ids],),
     ).fetchall()
@@ -658,6 +661,16 @@ def _preview(final: pathlib.Path, out: pathlib.Path) -> None:
     )
 
 
+def _meta(width: int | None, height: int | None, duration: float | None) -> dict:
+    return {
+        "dimensions": {"width": width, "height": height} if width and height else None,
+        "duration": duration,
+        "at": None,
+        "place": None,
+        "camera": None,
+    }
+
+
 def _store(
     conn: psycopg.Connection,
     montage: Montage,
@@ -668,102 +681,60 @@ def _store(
     width: int,
     height: int,
 ) -> None:
-    video_id = uuid.uuid5(uuid.NAMESPACE_URL, f"remember:montage:{montage.id}:video")
-    thumbnail_id = uuid.uuid5(uuid.NAMESPACE_URL, f"remember:montage:{montage.id}:thumbnail")
-    preview_id = uuid.uuid5(uuid.NAMESPACE_URL, f"remember:montage:{montage.id}:preview")
-    video_key = storage.media_key(str(video_id), "mp4")
-    thumbnail_key = storage.media_key(str(thumbnail_id), "jpeg")
-    preview_key = storage.media_key(str(preview_id), "mp4")
-    keys = [video_key, thumbnail_key, preview_key]
+    movie_id = uuid.uuid5(uuid.NAMESPACE_URL, f"remember:montage:{montage.id}:movie")
+    original_id = uuid.uuid5(uuid.NAMESPACE_URL, f"remember:montage:{montage.id}:video")
+    compressed_id = uuid.uuid5(uuid.NAMESPACE_URL, f"remember:montage:{montage.id}:compressed")
+    preview_id = uuid.uuid5(uuid.NAMESPACE_URL, f"remember:montage:{montage.id}:poster")
+    poster_width, poster_height = ffmpeg.dimensions(poster) or (None, None)
+    preview_width, preview_height = ffmpeg.dimensions(preview) or (None, None)
+    preview_length = ffmpeg.duration(preview) or total
+    files = [
+        (original_id, "video", "mp4", final, width, height, total),
+        (compressed_id, "video", "mp4", preview, preview_width, preview_height, preview_length),
+        (preview_id, "photo", "jpeg", poster, poster_width, poster_height, None),
+    ]
+    keys = [storage.media_key(str(media_id), fmt) for media_id, _, fmt, _, _, _, _ in files]
     try:
-        storage.upload(final, video_key, "video/mp4")
-        storage.upload(poster, thumbnail_key, "image/jpeg")
-        storage.upload(preview, preview_key, "video/mp4")
-        poster_width, poster_height = ffmpeg.dimensions(poster) or (None, None)
-        preview_width, preview_height = ffmpeg.dimensions(preview) or (None, None)
-        preview_length = ffmpeg.duration(preview) or total
+        for media_id, _, fmt, path, _, _, _ in files:
+            key = storage.media_key(str(media_id), fmt)
+            storage.upload(path, key, f"{'image' if fmt == 'jpeg' else 'video'}/{fmt}")
         with conn.transaction():
-            conn.execute(
-                """
-                insert into media_items
-                    (id, kind, storage_key, uploaded_by, format, bytes, width, height, duration)
-                values (%s, 'video', %s, %s, 'mp4', %s, %s, %s, %s)
-                on conflict (id) do update set
-                    storage_key = excluded.storage_key,
-                    uploaded_by = excluded.uploaded_by,
-                    bytes = excluded.bytes,
-                    width = excluded.width,
-                    height = excluded.height,
-                    duration = excluded.duration
-                """,
-                (
-                    video_id,
-                    video_key,
-                    montage.created_by,
-                    final.stat().st_size,
-                    width,
-                    height,
-                    total,
-                ),
-            )
-            conn.execute(
-                """
-                insert into media_items
-                    (id, kind, storage_key, uploaded_by, format, bytes, width, height, duration)
-                values (%s, 'photo', %s, %s, 'jpeg', %s, %s, %s, null)
-                on conflict (id) do update set
-                    storage_key = excluded.storage_key,
-                    uploaded_by = excluded.uploaded_by,
-                    bytes = excluded.bytes,
-                    width = excluded.width,
-                    height = excluded.height
-                """,
-                (
-                    thumbnail_id,
-                    thumbnail_key,
-                    montage.created_by,
-                    poster.stat().st_size,
-                    poster_width,
-                    poster_height,
-                ),
-            )
-            conn.execute(
-                """
-                insert into media_items
-                    (id, kind, storage_key, uploaded_by, format, bytes, width, height, duration)
-                values (%s, 'video', %s, %s, 'mp4', %s, %s, %s, %s)
-                on conflict (id) do update set
-                    storage_key = excluded.storage_key,
-                    uploaded_by = excluded.uploaded_by,
-                    bytes = excluded.bytes,
-                    width = excluded.width,
-                    height = excluded.height,
-                    duration = excluded.duration
-                """,
-                (
-                    preview_id,
-                    preview_key,
-                    montage.created_by,
-                    preview.stat().st_size,
-                    preview_width,
-                    preview_height,
-                    preview_length,
-                ),
-            )
+            for media_id, kind, fmt, path, w, h, duration in files:
+                conn.execute(
+                    """
+                    insert into media_items (id, kind, storage_key, format, bytes, meta)
+                    values (%s, %s, %s, %s, %s, %s)
+                    on conflict (id) do update set
+                        kind = excluded.kind,
+                        storage_key = excluded.storage_key,
+                        format = excluded.format,
+                        bytes = excluded.bytes,
+                        meta = excluded.meta
+                    """,
+                    (
+                        media_id,
+                        kind,
+                        storage.media_key(str(media_id), fmt),
+                        fmt,
+                        path.stat().st_size,
+                        Jsonb(_meta(w, h, duration)),
+                    ),
+                )
             conn.execute("delete from movies where montage_id = %s", (montage.id,))
             conn.execute(
                 """
                 insert into movies
-                    (name, project_id, created_by, montage_id, video_id, thumbnail_id, preview_id)
-                values (%s, %s, %s, %s, %s, %s, %s)
+                    (id, name, project_id, created_by, montage_id, original_id, compressed_id, preview_id)
+                values (%s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
+                    movie_id,
                     montage.title,
                     montage.project_id,
                     montage.created_by,
                     montage.id,
-                    video_id,
-                    thumbnail_id,
+                    original_id,
+                    compressed_id,
                     preview_id,
                 ),
             )

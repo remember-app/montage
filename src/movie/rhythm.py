@@ -232,8 +232,8 @@ def _durations(conn: psycopg.Connection, plan: EditPlan) -> dict[str, float | No
         return {}
     rows = conn.execute(
         """
-        select pi.id, m.duration
-        from project_items pi join media_items m on m.id = pi.media_id
+        select pi.id, nullif(m.meta->>'duration', '')::float8
+        from project_items pi join media_items m on m.id = pi.original_id
         where pi.id = any(%s)
         """,
         (list(set(ids)),),

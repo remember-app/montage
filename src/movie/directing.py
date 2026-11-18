@@ -53,7 +53,11 @@ def _store(conn: psycopg.Connection, montage_id: uuid.UUID, commands: list, summ
 
 
 def direct(
-    conn: psycopg.Connection, montage_id: uuid.UUID, data: dict | str, attempts: int = 2
+    conn: psycopg.Connection,
+    montage_id: uuid.UUID,
+    data: dict | str,
+    job_id: int,
+    attempts: int = 2,
 ) -> list:
     report = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False)
     problem = None
@@ -66,7 +70,7 @@ def direct(
             )
         try:
             answer = ai_usage.text(
-                conn, operation="text", montage_id=montage_id, instruction=SYSTEM, prompt=prompt
+                conn, operation="text", job_id=job_id, instruction=SYSTEM, prompt=prompt
             )
             summary, commands = _answer(answer)
             editor.validate(conn, montage_id, commands)

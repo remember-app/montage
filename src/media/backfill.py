@@ -12,8 +12,9 @@ log = logging.getLogger("media.backfill")
 MISSING = """
 select distinct m.id, t.storage_key
 from media_items m
-join project_items i on i.media_id = m.id
-join media_items t on t.id = i.thumbnail_id
+join project_items i on i.original_id = m.id
+join lateral jsonb_each_text(i.previews_ids) p on p.key = 'middle'
+join media_items t on t.id = p.value::uuid
 where m.kind in ('photo', 'video') and m.perceptual_hash = ''
 """
 
