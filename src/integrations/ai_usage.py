@@ -56,7 +56,13 @@ def _token(usage: object, name: str) -> int | None:
     return int(value) if isinstance(value, (int, float)) else None
 
 
-def _payload(conn: psycopg.Connection, model: str, usage: object, duration: int, error: str | None) -> dict:
+def _payload(
+    conn: psycopg.Connection,
+    model: str,
+    usage: object,
+    duration: int,
+    error: str | None,
+) -> dict:
     return {
         "tokens": {
             "inputTokens": _token(usage, "total_input_tokens"),

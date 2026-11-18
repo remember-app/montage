@@ -8,7 +8,9 @@ from src.media import derive
 log = logging.getLogger("jobs.derive")
 
 
-def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None, job_id: int | None = None) -> None:
+def run(
+    conn: psycopg.Connection, ref: uuid.UUID, level: str | None, job_id: int | None = None
+) -> None:
     derive.run(conn, ref, level)
 
 

@@ -599,7 +599,9 @@ def _item_exists(conn: psycopg.Connection, media_id: uuid.UUID) -> bool:
 
 
 def _song_exists(conn: psycopg.Connection, media_id: uuid.UUID) -> bool:
-    [row] = conn.execute("select count(*) from songs where original_id = %s", (media_id,)).fetchone()
+    [row] = conn.execute(
+        "select count(*) from songs where original_id = %s", (media_id,)
+    ).fetchone()
     return row > 0
 
 

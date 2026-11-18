@@ -723,8 +723,10 @@ def _store(
             conn.execute("delete from movies where montage_id = %s", (montage.id,))
             conn.execute(
                 """
-                insert into movies
-                    (id, name, project_id, created_by, montage_id, original_id, compressed_id, preview_id)
+                insert into movies (
+                    id, name, project_id, created_by, montage_id,
+                    original_id, compressed_id, preview_id
+                )
                 values (%s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
