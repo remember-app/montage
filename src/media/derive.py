@@ -17,6 +17,11 @@ log = logging.getLogger("media.derive")
 PREVIEW_SIDES = {"small": 160, "middle": 480, "large": 960}
 COMPRESSED_SIDE = 2048
 COMPRESSED_HEIGHT = 720
+SDR_TONEMAP = (
+    "zscale=t=linear:npl=100,format=gbrpf32le,"
+    "zscale=p=bt709,tonemap=hable:desat=0,"
+    "zscale=t=bt709:m=bt709:r=tv,format=yuv420p"
+)
 
 
 @dataclasses.dataclass
@@ -62,17 +67,8 @@ def _content_type(file_format: str) -> str:
     }.get(file_format, "application/octet-stream")
 
 
-def _video_frame(original: pathlib.Path, out: pathlib.Path, duration: float | None) -> None:
-    at = min(1.0, (duration or 2.0) / 2)
-    ffmpeg.run(
-        "-ss",
-        f"{at:.3f}",
-        "-i",
-        str(original),
-        "-frames:v",
-        "1",
-        str(out),
-    )
+def _video_frame(original: pathlib.Path, out: pathlib.Path) -> None:
+    ffmpeg.run("-i", str(original), "-frames:v", "1", "-vf", SDR_TONEMAP, str(out))
 
 
 def _video_compressed(original: pathlib.Path, out: pathlib.Path) -> None:
@@ -121,7 +117,6 @@ def _files(
     work: pathlib.Path,
     media_id: uuid.UUID,
     kind: str,
-    duration: float | None,
 ) -> list[Derivative]:
     result: list[Derivative] = []
     if kind == "photo":
@@ -172,13 +167,13 @@ def _files(
             )
         )
         frame = work / "frame.jpg"
-        _video_frame(original, frame, duration)
+        _video_frame(compressed, frame)
         for role, side in PREVIEW_SIDES.items():
             path = work / f"preview-{role}.jpg"
             size = probe.render_photo(frame, path, side)
             result.append(
                 Derivative(
-                    _derivative_id(media_id, role),
+                    _derivative_id(media_id, f"{role}:sdr"),
                     role,
                     "photo",
                     "jpeg",
@@ -268,6 +263,13 @@ def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None = None) -> N
         log.info("media item %s has no owner, nothing to derive", media_id)
         return
     owner_kind, owner_id = owner
+    old_previews: list[str] = []
+    if kind == "video" and owner_kind == "item":
+        stored = conn.execute(
+            "select previews_ids from project_items where id = %s", (owner_id,)
+        ).fetchone()
+        if stored and stored[0]:
+            old_previews = list(stored[0].values())
 
     with tempfile.TemporaryDirectory() as directory:
         work = pathlib.Path(directory)
@@ -275,7 +277,7 @@ def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None = None) -> N
         storage.download(storage_key, original)
         ffmpeg.refuse_playlists(original)
         info = probe.read(original, kind)
-        derivatives = _files(original, work, media_id, kind, info.get("duration"))
+        derivatives = _files(original, work, media_id, kind)
         middle = work / "preview-middle.jpg"
         perceptual_hash = perceptual.hash_of(middle) if middle.exists() else None
         meta = _original_meta(info, kind, current_meta or {})
@@ -335,5 +337,14 @@ def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None = None) -> N
                     "update songs set compressed_id = %s where id = %s",
                     (compressed.id if compressed else None, owner_id),
                 )
+            if kind == "video":
+                stale = [uuid.UUID(one) for one in set(old_previews) - set(previews.values())]
+                if stale:
+                    removed = conn.execute(
+                        "delete from media_items where id = any(%s) returning storage_key",
+                        (stale,),
+                    ).fetchall()
+                    for (key,) in removed:
+                        storage.delete(key)
 
     log.info("media item %s (%s) derived: %s files", media_id, kind, len(derivatives))

@@ -81,6 +81,19 @@ def _exif_time(value) -> str | None:
         return None
 
 
+def _clip_time(tags: dict) -> str | None:
+    value = tags.get("com.apple.quicktime.creationdate") or tags.get("creation_time")
+    if not value:
+        return None
+    raw = str(value).strip().replace("Z", "+00:00")
+    if len(raw) >= 5 and raw[-5] in "+-" and raw[-3] != ":":
+        raw = f"{raw[:-2]}:{raw[-2:]}"
+    try:
+        return datetime.fromisoformat(raw).isoformat()
+    except ValueError:
+        return None
+
+
 def _clip(path: pathlib.Path, kind: str) -> dict:
     data = ffmpeg.probe(path)
     tags = data.get("format", {}).get("tags", {})
@@ -95,7 +108,7 @@ def _clip(path: pathlib.Path, kind: str) -> dict:
         "width": width,
         "height": height,
         "duration": ffmpeg.duration(path),
-        "captured_at": tags.get("creation_time"),
+        "captured_at": _clip_time(tags),
         "camera_model": tags.get("com.apple.quicktime.model") or tags.get("model") or None,
         "focal_length_mm": None,
         "aperture": None,
