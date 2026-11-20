@@ -225,6 +225,7 @@ def _camera(info: dict) -> dict | None:
 
 def _original_meta(info: dict, kind: str, current: dict) -> dict:
     meta = dict(current)
+    captured = _time(info.get("captured_at"))
     updates = {
         "dimensions": (
             {"width": info.get("width"), "height": info.get("height")}
@@ -232,7 +233,7 @@ def _original_meta(info: dict, kind: str, current: dict) -> dict:
             else None
         ),
         "duration": info.get("duration") if kind != "photo" else None,
-        "at": _time(info.get("captured_at")),
+        "at": captured.isoformat() if captured is not None else None,
         "camera": _camera(info),
     }
     for key, value in updates.items():
