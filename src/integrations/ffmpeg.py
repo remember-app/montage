@@ -27,8 +27,17 @@ def probe(path: pathlib.Path) -> dict:
 
 
 def duration(path: pathlib.Path) -> float | None:
-    value = probe(path).get("format", {}).get("duration")
-    return float(value) if value else None
+    data = probe(path)
+    value = data.get("format", {}).get("duration")
+    if not value:
+        for stream in data.get("streams", []):
+            if stream.get("codec_type") == "video":
+                value = stream.get("duration")
+                break
+    try:
+        return float(value) if value else None
+    except (TypeError, ValueError):
+        return None
 
 
 def dimensions(path: pathlib.Path) -> tuple[int, int] | None:
