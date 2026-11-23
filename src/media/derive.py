@@ -10,7 +10,7 @@ from psycopg.types.json import Jsonb
 
 from src import config
 from src.integrations import ffmpeg, storage
-from src.media import perceptual, probe
+from src.media import fingerprint, perceptual, probe
 
 log = logging.getLogger("media.derive")
 
@@ -218,9 +218,9 @@ def _camera(info: dict) -> dict | None:
     }
 
 
-def _original_meta(info: dict, kind: str, current: dict) -> dict:
+def _original_meta(info: dict, kind: str, current: dict, fallback_at: str | None) -> dict:
     meta = dict(current)
-    captured = _time(info.get("captured_at"))
+    captured = _time(fallback_at) or _time(info.get("captured_at"))
     updates = {
         "dimensions": (
             {"width": info.get("width"), "height": info.get("height")}
@@ -238,18 +238,20 @@ def _original_meta(info: dict, kind: str, current: dict) -> dict:
 
 
 def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None = None) -> None:
-    upload = conn.execute("select media_id from uploads where id = %s", (ref,)).fetchone()
+    upload = conn.execute(
+        "select media_id, file->>'capturedAt' from uploads where id = %s", (ref,)
+    ).fetchone()
     if upload is None or upload[0] is None:
         log.info("upload %s has no media, nothing to derive", ref)
         return
-    media_id = upload[0]
+    media_id, device_at = upload
     row = conn.execute(
-        "select kind, storage_key, meta from media_items where id = %s", (media_id,)
+        "select kind, storage_key, meta, fingerprint from media_items where id = %s", (media_id,)
     ).fetchone()
     if row is None:
         log.info("media item %s is gone, nothing to derive", media_id)
         return
-    kind, storage_key, current_meta = row
+    kind, storage_key, current_meta, stored_fingerprint = row
     owner = conn.execute(
         """
         select 'item' as kind, id from project_items where original_id = %s
@@ -280,7 +282,8 @@ def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None = None) -> N
         derivatives = _files(original, work, media_id, kind)
         middle = work / "preview-middle.jpg"
         perceptual_hash = perceptual.hash_of(middle) if middle.exists() else None
-        meta = _original_meta(info, kind, current_meta or {})
+        content_hash = stored_fingerprint or fingerprint.sha256_of(original)
+        meta = _original_meta(info, kind, current_meta or {}, device_at)
 
         for derivative in derivatives:
             key = storage.media_key(str(derivative.id), derivative.format)
@@ -288,9 +291,10 @@ def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None = None) -> N
 
         with conn.transaction():
             conn.execute(
-                "update media_items set meta = %s, perceptual_hash = coalesce(%s, perceptual_hash) "
-                "where id = %s",
-                (Jsonb(meta), perceptual_hash, media_id),
+                "update media_items set meta = %s, "
+                "perceptual_hash = coalesce(%s, perceptual_hash), "
+                "fingerprint = %s where id = %s",
+                (Jsonb(meta), perceptual_hash, content_hash, media_id),
             )
             for derivative in derivatives:
                 conn.execute(

@@ -5,7 +5,7 @@ import pathlib
 import re
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from fractions import Fraction
 
 from src.integrations import ffmpeg
@@ -56,7 +56,10 @@ def _read_photo(path: str) -> dict:
             "width": width,
             "height": height,
             "duration": None,
-            "captured_at": _exif_time(optics.get(ExifTags.Base.DateTimeOriginal)),
+            "captured_at": _exif_time(
+                optics.get(ExifTags.Base.DateTimeOriginal),
+                optics.get(ExifTags.Base.OffsetTimeOriginal),
+            ),
             "camera_model": str(model or "").strip() or None,
             "focal_length_mm": _number(optics.get(ExifTags.Base.FocalLength)),
             "aperture": _number(optics.get(ExifTags.Base.FNumber)),
@@ -72,13 +75,24 @@ def _read_photo(path: str) -> dict:
         }
 
 
-def _exif_time(value) -> str | None:
+def _exif_time(value, offset=None) -> str | None:
     if not value:
         return None
     try:
-        return datetime.strptime(str(value), "%Y:%m:%d %H:%M:%S").isoformat()
+        stamp = datetime.strptime(str(value), "%Y:%m:%d %H:%M:%S")
     except ValueError:
         return None
+    zone = _exif_zone(offset)
+    return stamp.replace(tzinfo=zone).isoformat() if zone is not None else stamp.isoformat()
+
+
+def _exif_zone(offset):
+    match = re.fullmatch(r"([+-])(\d{2}):(\d{2})", str(offset or "").strip())
+    if not match:
+        return None
+    sign, hours, minutes = match.groups()
+    shift = timedelta(hours=int(hours), minutes=int(minutes))
+    return timezone(-shift if sign == "-" else shift)
 
 
 def _clip_time(tags: dict) -> str | None:
