@@ -71,18 +71,42 @@ def _video_frame(original: pathlib.Path, out: pathlib.Path) -> None:
     ffmpeg.run("-i", str(original), "-frames:v", "1", "-vf", SDR_TONEMAP, str(out))
 
 
+def _video_is_hdr(path: pathlib.Path) -> bool:
+    for stream in ffmpeg.probe(path).get("streams", []):
+        if stream.get("codec_type") != "video":
+            continue
+        transfer = str(stream.get("color_transfer") or "")
+        pixel = str(stream.get("pix_fmt") or "")
+        return transfer in {"smpte2084", "arib-std-b67"} or pixel.endswith(
+            ("10le", "12le", "14le", "16le")
+        )
+    return False
+
+
 def _video_compressed(original: pathlib.Path, out: pathlib.Path) -> None:
+    filters = f"scale=-2:'min({COMPRESSED_HEIGHT},ih)'"
+    filters += f",{SDR_TONEMAP}" if _video_is_hdr(original) else ",format=yuv420p"
     ffmpeg.run(
         "-i",
         str(original),
         "-vf",
-        f"scale=-2:'min({COMPRESSED_HEIGHT},ih)'",
+        filters,
         "-c:v",
         "libx264",
         "-preset",
         "veryfast",
         "-crf",
         "23",
+        "-pix_fmt",
+        "yuv420p",
+        "-profile:v",
+        "high",
+        "-color_primaries",
+        "bt709",
+        "-color_trc",
+        "bt709",
+        "-colorspace",
+        "bt709",
         "-c:a",
         "aac",
         "-b:a",
