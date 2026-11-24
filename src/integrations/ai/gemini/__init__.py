@@ -5,7 +5,7 @@ import urllib.error
 import urllib.request
 
 from src import config
-from src.integrations.ai.contract import AnswerError, Blob, Provider, Reply
+from src.integrations.ai.contract import AnswerError, Blob, Provider, Reply, Usage
 
 log = logging.getLogger("integrations.ai.gemini")
 
@@ -22,7 +22,31 @@ def _text(payload: dict) -> str:
     )
 
 
+def _usage(payload: dict) -> Usage | None:
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return None
+
+    def number(name: str) -> int | None:
+        value = usage.get(name)
+        return int(value) if isinstance(value, (int, float)) else None
+
+    return Usage(
+        input_tokens=number("total_input_tokens"),
+        output_tokens=number("total_output_tokens"),
+        total_tokens=number("total_tokens"),
+        cached_input_tokens=number("total_cached_tokens"),
+        reasoning_tokens=number("total_thought_tokens"),
+    )
+
+
 class GeminiProvider(Provider):
+    name = "gemini"
+
+    @property
+    def model(self) -> str:
+        return config.gemini_model()
+
     def ask(
         self,
         instruction: str,
@@ -40,7 +64,7 @@ class GeminiProvider(Provider):
             for blob in blobs
         ]
         body = {
-            "model": config.gemini_model(),
+            "model": self.model,
             "input": parts,
             "response_format": {"type": "text", "mime_type": "application/json"},
         }
@@ -60,9 +84,9 @@ class GeminiProvider(Provider):
             raise RuntimeError(f"model request failed: {exc.code} {detail}") from None
         except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as exc:
             raise RuntimeError(f"model request failed: {exc}") from None
-        usage = payload.get("usage") if isinstance(payload, dict) else None
-        identifier = payload.get("id") if isinstance(payload, dict) else None
         answer = _text(payload if isinstance(payload, dict) else {})
+        usage = _usage(payload if isinstance(payload, dict) else {})
+        identifier = payload.get("id") if isinstance(payload, dict) else None
         if not answer:
             raise AnswerError("the model answered with nothing", usage)
         return Reply(answer, usage, str(identifier) if identifier else None)

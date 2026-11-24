@@ -17,20 +17,35 @@ class Blob:
 
 
 @dataclass(frozen=True)
+class Usage:
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    cached_input_tokens: int | None = None
+    reasoning_tokens: int | None = None
+
+
+@dataclass(frozen=True)
 class Reply:
     text: str
-    usage: dict | None = None
+    usage: Usage | None = None
     interaction_id: str | None = None
 
 
 class AnswerError(RuntimeError):
-    def __init__(self, message: str, usage: dict | None = None) -> None:
+    def __init__(self, message: str, usage: Usage | None = None) -> None:
         super().__init__(message)
         self.usage = usage
 
 
 class Provider(ABC):
     """One provider of model replies: Gemini now, OpenRouter when it lands."""
+
+    name: str = ""
+
+    @property
+    def model(self) -> str:
+        return ""
 
     @abstractmethod
     def ask(

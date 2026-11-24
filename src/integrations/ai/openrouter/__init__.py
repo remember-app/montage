@@ -4,6 +4,8 @@ from src.integrations.ai.contract import Blob, Provider, Reply
 class OpenRouterProvider(Provider):
     """Placeholder: the contract is in place, the transport is not written yet."""
 
+    name = "openrouter"
+
     def ask(
         self,
         instruction: str,

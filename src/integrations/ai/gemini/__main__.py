@@ -3,6 +3,7 @@ import json
 import os
 from unittest import mock
 
+from src.integrations.ai.contract import Usage
 from src.integrations.ai.gemini import GeminiProvider
 
 os.environ.setdefault("GEMINI_API_KEY", "test")
@@ -34,6 +35,9 @@ with mock.patch("urllib.request.urlopen", respond):
         "be a director", "second", previous_interaction_id=first.interaction_id
     )
 assert (first.interaction_id, second.interaction_id) == ("i1", "i2")
+assert first.usage == Usage(input_tokens=1)
+assert GeminiProvider().name == "gemini"
+assert GeminiProvider().model
 assert seen[0]["input"][0]["text"] == "be a director"
 assert "previous_interaction_id" not in seen[0]
 assert seen[1]["input"][0]["text"] == "second"

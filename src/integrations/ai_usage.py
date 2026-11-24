@@ -1,10 +1,10 @@
+import json
 import logging
 import time
 
 import psycopg
 from psycopg.types.json import Jsonb
 
-from src import config
 from src.integrations import ai
 
 log = logging.getLogger("integrations.ai_usage")
@@ -32,40 +32,28 @@ def _rate(conn: psycopg.Connection, model: str) -> tuple[float, float, float] | 
     return _numbers(row[0].get(model))
 
 
-def _cost(rate: tuple[float, float, float] | None, usage: object) -> float | None:
-    if rate is None or not isinstance(usage, dict):
+def _cost(rate: tuple[float, float, float] | None, usage: ai.Usage | None) -> float | None:
+    if rate is None or usage is None:
         return None
-    inputs = usage.get("total_input_tokens")
-    outputs = usage.get("total_output_tokens")
-    if not isinstance(inputs, (int, float)) or not isinstance(outputs, (int, float)):
+    inputs, outputs = usage.input_tokens, usage.output_tokens
+    if not isinstance(inputs, int) or not isinstance(outputs, int):
         return None
-    cached = usage.get("total_cached_tokens")
-    thought = usage.get("total_thought_tokens")
-    cached_tokens = cached if isinstance(cached, (int, float)) else 0
-    thought_tokens = thought if isinstance(thought, (int, float)) else 0
-    uncached = max(0, inputs - cached_tokens)
-    return (
-        uncached * rate[0] + (outputs + thought_tokens) * rate[1] + cached_tokens * rate[2]
-    ) / 1_000_000
-
-
-def _token(usage: object, name: str) -> int | None:
-    if not isinstance(usage, dict):
-        return None
-    value = usage.get(name)
-    return int(value) if isinstance(value, (int, float)) else None
+    cached = usage.cached_input_tokens or 0
+    thought = usage.reasoning_tokens or 0
+    uncached = max(0, inputs - cached)
+    return (uncached * rate[0] + (outputs + thought) * rate[1] + cached * rate[2]) / 1_000_000
 
 
 def _payload(
-    conn: psycopg.Connection, model: str, usage: object, duration: int, error: str | None
+    conn: psycopg.Connection, model: str, usage: ai.Usage | None, duration: int, error: str | None
 ) -> dict:
     return {
         "tokens": {
-            "inputTokens": _token(usage, "total_input_tokens"),
-            "outputTokens": _token(usage, "total_output_tokens"),
-            "totalTokens": _token(usage, "total_tokens"),
-            "cachedTokens": _token(usage, "total_cached_tokens"),
-            "reasoningTokens": _token(usage, "total_thought_tokens"),
+            "inputTokens": usage.input_tokens if usage else None,
+            "outputTokens": usage.output_tokens if usage else None,
+            "totalTokens": usage.total_tokens if usage else None,
+            "cachedTokens": usage.cached_input_tokens if usage else None,
+            "reasoningTokens": usage.reasoning_tokens if usage else None,
         },
         "duration": duration,
         "costUsd": _cost(_rate(conn, model), usage),
@@ -78,30 +66,56 @@ def record(
     *,
     operation: str,
     status: str,
-    usage: object,
+    provider: str,
+    model: str,
+    usage: ai.Usage | None,
     duration: int,
     error: str | None,
     job_id: int,
 ) -> None:
-    model = config.gemini_model()
     conn.execute(
         """
         insert into ai_requests (job_id, operation, provider, model, status, usage)
-        values (%s, %s, 'gemini', %s, %s, %s)
+        values (%s, %s, %s, %s, %s, %s)
         """,
-        (job_id, operation, model, status, Jsonb(_payload(conn, model, usage, duration, error))),
+        (
+            job_id,
+            operation,
+            provider,
+            model,
+            status,
+            Jsonb(_payload(conn, model, usage, duration, error)),
+        ),
     )
 
 
-def _recorded(conn: psycopg.Connection, *, operation: str, job_id: int, call) -> tuple:
+def _json(reply: ai.Reply) -> dict:
+    try:
+        parsed = json.loads(reply.text)
+    except ValueError:
+        raise ai.AnswerError(
+            f"the model did not answer with JSON: {reply.text[:500]}", reply.usage
+        ) from None
+    if not isinstance(parsed, dict):
+        raise ai.AnswerError(
+            f"the model answered with {type(parsed).__name__}, not an object", reply.usage
+        )
+    return parsed
+
+
+def _recorded(conn: psycopg.Connection, *, operation: str, job_id: int, call, parse=None):
+    chosen = ai.provider()
     started = time.monotonic()
     try:
-        result = call()
+        reply = call()
+        result = parse(reply) if parse is not None else reply.text
     except RuntimeError as exc:
         record(
             conn,
             operation=operation,
             status="failed",
+            provider=chosen.name,
+            model=chosen.model,
             usage=getattr(exc, "usage", None),
             duration=int((time.monotonic() - started) * 1000),
             error=str(exc),
@@ -112,12 +126,14 @@ def _recorded(conn: psycopg.Connection, *, operation: str, job_id: int, call) ->
         conn,
         operation=operation,
         status="ok",
-        usage=result[1],
+        provider=chosen.name,
+        model=chosen.model,
+        usage=reply.usage,
         duration=int((time.monotonic() - started) * 1000),
         error=None,
         job_id=job_id,
     )
-    return result
+    return result, reply
 
 
 def text(
@@ -129,7 +145,7 @@ def text(
     blobs: tuple[ai.Blob, ...] = (),
     job_id: int,
 ) -> str:
-    answer, _, _ = _recorded(
+    answer, _ = _recorded(
         conn, operation=operation, job_id=job_id, call=lambda: ai.ask(instruction, prompt, blobs)
     )
     return answer
@@ -144,11 +160,12 @@ def as_json(
     blobs: tuple[ai.Blob, ...] = (),
     job_id: int,
 ) -> dict:
-    parsed, _, _ = _recorded(
+    parsed, _ = _recorded(
         conn,
         operation=operation,
         job_id=job_id,
-        call=lambda: ai.as_json(instruction, prompt, blobs),
+        call=lambda: ai.ask(instruction, prompt, blobs),
+        parse=_json,
     )
     return parsed
 
@@ -163,7 +180,7 @@ def reply(
     previous_interaction_id: str | None = None,
     job_id: int,
 ) -> tuple[str, str | None]:
-    answer, _, identifier = _recorded(
+    answer, response = _recorded(
         conn,
         operation=operation,
         job_id=job_id,
@@ -171,7 +188,7 @@ def reply(
             instruction, prompt, blobs, previous_interaction_id=previous_interaction_id
         ),
     )
-    return answer, identifier
+    return answer, response.interaction_id
 
 
 def reply_json(
@@ -184,12 +201,39 @@ def reply_json(
     previous_interaction_id: str | None = None,
     job_id: int,
 ) -> tuple[dict, str | None]:
-    parsed, _, identifier = _recorded(
+    parsed, response = _recorded(
         conn,
         operation=operation,
         job_id=job_id,
-        call=lambda: ai.as_json(
+        call=lambda: ai.ask(
             instruction, prompt, blobs, previous_interaction_id=previous_interaction_id
         ),
+        parse=_json,
     )
-    return parsed, identifier
+    return parsed, response.interaction_id
+
+
+if __name__ == "__main__":
+
+    class Conn:
+        def execute(self, *_):
+            return self
+
+        def fetchone(self):
+            return (
+                {
+                    "m": {
+                        "inputPerMillionUsd": 1,
+                        "outputPerMillionUsd": 2,
+                        "cachedInputPerMillionUsd": 0.1,
+                    }
+                },
+            )
+
+    rate = _rate(Conn(), "m")
+    assert rate == (1.0, 2.0, 0.1)
+    assert _cost(rate, ai.Usage(input_tokens=1_000_000, output_tokens=1_000_000)) == 3.0
+    cached = ai.Usage(input_tokens=1_000_000, output_tokens=0, cached_input_tokens=1_000_000)
+    assert _cost(rate, cached) == 0.1
+    assert _cost(rate, None) is None
+    print("ok")

@@ -1,5 +1,6 @@
 from src.integrations.ai.openrouter import OpenRouterProvider
 
+assert OpenRouterProvider().name == "openrouter"
 try:
     OpenRouterProvider().ask("", "")
 except NotImplementedError:
