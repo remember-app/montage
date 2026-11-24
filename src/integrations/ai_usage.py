@@ -57,11 +57,7 @@ def _token(usage: object, name: str) -> int | None:
 
 
 def _payload(
-    conn: psycopg.Connection,
-    model: str,
-    usage: object,
-    duration: int,
-    error: str | None,
+    conn: psycopg.Connection, model: str, usage: object, duration: int, error: str | None
 ) -> dict:
     return {
         "tokens": {
@@ -97,18 +93,10 @@ def record(
     )
 
 
-def text(
-    conn: psycopg.Connection,
-    *,
-    operation: str,
-    instruction: str,
-    prompt: str,
-    blobs: tuple[ai.Blob, ...] = (),
-    job_id: int,
-) -> str:
+def _recorded(conn: psycopg.Connection, *, operation: str, job_id: int, call) -> tuple:
     started = time.monotonic()
     try:
-        answer, usage = ai.ask(instruction, prompt, blobs)
+        result = call()
     except RuntimeError as exc:
         record(
             conn,
@@ -124,10 +112,25 @@ def text(
         conn,
         operation=operation,
         status="ok",
-        usage=usage,
+        usage=result[1],
         duration=int((time.monotonic() - started) * 1000),
         error=None,
         job_id=job_id,
+    )
+    return result
+
+
+def text(
+    conn: psycopg.Connection,
+    *,
+    operation: str,
+    instruction: str,
+    prompt: str,
+    blobs: tuple[ai.Blob, ...] = (),
+    job_id: int,
+) -> str:
+    answer, _, _ = _recorded(
+        conn, operation=operation, job_id=job_id, call=lambda: ai.ask(instruction, prompt, blobs)
     )
     return answer
 
@@ -141,27 +144,52 @@ def as_json(
     blobs: tuple[ai.Blob, ...] = (),
     job_id: int,
 ) -> dict:
-    started = time.monotonic()
-    try:
-        parsed, usage = ai.as_json(instruction, prompt, blobs)
-    except RuntimeError as exc:
-        record(
-            conn,
-            operation=operation,
-            status="failed",
-            usage=getattr(exc, "usage", None),
-            duration=int((time.monotonic() - started) * 1000),
-            error=str(exc),
-            job_id=job_id,
-        )
-        raise
-    record(
+    parsed, _, _ = _recorded(
         conn,
         operation=operation,
-        status="ok",
-        usage=usage,
-        duration=int((time.monotonic() - started) * 1000),
-        error=None,
         job_id=job_id,
+        call=lambda: ai.as_json(instruction, prompt, blobs),
     )
     return parsed
+
+
+def reply(
+    conn: psycopg.Connection,
+    *,
+    operation: str,
+    instruction: str,
+    prompt: str,
+    blobs: tuple[ai.Blob, ...] = (),
+    previous_interaction_id: str | None = None,
+    job_id: int,
+) -> tuple[str, str | None]:
+    answer, _, identifier = _recorded(
+        conn,
+        operation=operation,
+        job_id=job_id,
+        call=lambda: ai.ask(
+            instruction, prompt, blobs, previous_interaction_id=previous_interaction_id
+        ),
+    )
+    return answer, identifier
+
+
+def reply_json(
+    conn: psycopg.Connection,
+    *,
+    operation: str,
+    instruction: str,
+    prompt: str,
+    blobs: tuple[ai.Blob, ...] = (),
+    previous_interaction_id: str | None = None,
+    job_id: int,
+) -> tuple[dict, str | None]:
+    parsed, _, identifier = _recorded(
+        conn,
+        operation=operation,
+        job_id=job_id,
+        call=lambda: ai.as_json(
+            instruction, prompt, blobs, previous_interaction_id=previous_interaction_id
+        ),
+    )
+    return parsed, identifier
