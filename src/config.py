@@ -69,6 +69,10 @@ def worker_token() -> str | None:
     return env("INTERNAL_WORKER_TOKEN")
 
 
+def ai_provider() -> str:
+    return env("AI_PROVIDER") or "gemini"
+
+
 def ai_endpoint() -> str:
     return env("AI_ENDPOINT") or "https://generativelanguage.googleapis.com/v1beta/interactions"
 
