@@ -1,6 +1,7 @@
 import dataclasses
 import logging
 import pathlib
+import subprocess
 import tempfile
 import uuid
 from datetime import datetime
@@ -67,8 +68,12 @@ def _content_type(file_format: str) -> str:
     }.get(file_format, "application/octet-stream")
 
 
-def _video_frame(original: pathlib.Path, out: pathlib.Path) -> None:
-    ffmpeg.run("-i", str(original), "-frames:v", "1", "-vf", SDR_TONEMAP, str(out))
+def _video_frame(original: pathlib.Path, out: pathlib.Path, hdr: bool) -> None:
+    ffmpeg.run("-i", str(original), "-frames:v", "1", "-vf", _to_sdr(hdr), str(out))
+
+
+def _to_sdr(hdr: bool) -> str:
+    return SDR_TONEMAP if hdr else "format=yuv420p"
 
 
 def _video_is_hdr(path: pathlib.Path) -> bool:
@@ -83,9 +88,8 @@ def _video_is_hdr(path: pathlib.Path) -> bool:
     return False
 
 
-def _video_compressed(original: pathlib.Path, out: pathlib.Path) -> None:
-    filters = f"scale=-2:'min({COMPRESSED_HEIGHT},ih)'"
-    filters += f",{SDR_TONEMAP}" if _video_is_hdr(original) else ",format=yuv420p"
+def _video_compressed(original: pathlib.Path, out: pathlib.Path, hdr: bool) -> None:
+    filters = f"scale=-2:'min({COMPRESSED_HEIGHT},ih)',{_to_sdr(hdr)}"
     ffmpeg.run(
         "-i",
         str(original),
@@ -175,8 +179,9 @@ def _files(
             )
         return result
     if kind == "video":
+        hdr = _video_is_hdr(original)
         compressed = work / "compressed.mp4"
-        _video_compressed(original, compressed)
+        _video_compressed(original, compressed, hdr)
         cw, ch = ffmpeg.dimensions(compressed) or (None, None)
         result.append(
             Derivative(
@@ -191,7 +196,7 @@ def _files(
             )
         )
         frame = work / "frame.jpg"
-        _video_frame(compressed, frame)
+        _video_frame(original, frame, hdr)
         for role, side in PREVIEW_SIDES.items():
             path = work / f"preview-{role}.jpg"
             size = probe.render_photo(frame, path, side)
@@ -376,3 +381,37 @@ def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None = None) -> N
                         storage.delete(key)
 
     log.info("media item %s (%s) derived: %s files", media_id, kind, len(derivatives))
+
+
+def _brightness(path: pathlib.Path) -> float:
+    done = subprocess.run(
+        [
+            "ffmpeg", "-v", "error", "-i", str(path),
+            "-vf", "signalstats,metadata=print:file=-", "-f", "null", "-",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return float(next(line.split("=")[-1] for line in done.stdout.splitlines() if "YAVG" in line))
+
+
+if __name__ == "__main__":
+    with tempfile.TemporaryDirectory() as directory:
+        work = pathlib.Path(directory)
+        hdr, sdr = work / "hdr.mp4", work / "sdr.mp4"
+        for path, transfer in ((hdr, "arib-std-b67"), (sdr, None)):
+            args = ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=5:duration=1"]
+            if transfer:
+                args += ["-vf", f"setparams=color_primaries=bt2020:color_trc={transfer}:colorspace=bt2020nc"]
+            args += ["-pix_fmt", "yuv420p10le" if transfer else "yuv420p", "-c:v", "libx264"]
+            if transfer:
+                args += ["-color_primaries", "bt2020", "-color_trc", transfer, "-colorspace", "bt2020nc"]
+            subprocess.run([*args, str(path)], check=True)
+        assert _video_is_hdr(hdr) is True
+        assert _video_is_hdr(sdr) is False
+        _video_frame(sdr, work / "sdr.jpg", False)
+        _video_frame(hdr, work / "hdr.jpg", True)
+        assert abs(_brightness(work / "sdr.jpg") - _brightness(sdr)) < 3.0, "SDR poster is tonemapped"
+        assert 60.0 < _brightness(work / "hdr.jpg") < 200.0, "HDR poster is crushed or washed out"
+    print("ok")

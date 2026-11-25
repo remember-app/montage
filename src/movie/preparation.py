@@ -1,23 +1,16 @@
+"""Загрузка заказа монтажа: настройки, кадры, музыка и событие."""
+
 import dataclasses
 import logging
-import pathlib
-import tempfile
 import uuid
 
 import psycopg
-from psycopg.types.json import Jsonb
 
-from src.integrations import ffmpeg, storage
-from src.movie.types import MontageLevel, MontageReport
+from src.movie.types import MontageLevel
 
 log = logging.getLogger("movie.preparation")
 
 THRESHOLD = 0.95
-
-REPORT_SUMMARY_LIMIT = 500
-REPORT_DESCRIPTION_LIMIT = 1500
-REPORT_SEGMENT_LIMIT = 40
-REPORT_SEGMENT_TEXT_LIMIT = 400
 
 
 def level(settings: dict) -> MontageLevel:
@@ -30,15 +23,31 @@ class ShotRow:
     item_id: str
     media_id: str
     kind: str
-    description: str | None
+    comment: str | None
     analysis: dict | None
     duration: float | None
     width: int | None
     height: int | None
     captured_at: str | None
-    preview_key: str | None
+    thumbnail_key: str | None
+    perceptual_hash: str
     key: str
     labels: list[str]
+    place: tuple[float, float] | None = None
+
+    @property
+    def place_text(self) -> str | None:
+        if self.place is None:
+            return None
+        return f"{self.place[0]:.4f},{self.place[1]:.4f}"
+
+    @property
+    def orientation(self) -> str | None:
+        if not self.width or not self.height:
+            return None
+        if self.width > self.height:
+            return "landscape"
+        return "portrait" if self.height > self.width else "square"
 
 
 @dataclasses.dataclass
@@ -49,6 +58,16 @@ class SongRow:
     author: str | None
     duration: float | None
     analysis: dict | None
+    key: str
+    format: str
+
+
+@dataclasses.dataclass
+class Order:
+    settings: dict
+    event: dict
+    shots: list[ShotRow]
+    music: list[SongRow]
 
 
 def _settings(conn: psycopg.Connection, montage_id: uuid.UUID) -> dict:
@@ -59,19 +78,6 @@ def _settings(conn: psycopg.Connection, montage_id: uuid.UUID) -> dict:
     if not settings:
         raise RuntimeError(f"montage {montage_id} has no preparation settings")
     return settings
-
-
-def _has_audio(shot: ShotRow) -> bool:
-    if shot.kind == "audio":
-        return True
-    if shot.kind == "photo":
-        return False
-    key = shot.preview_key or shot.key
-    with tempfile.TemporaryDirectory() as directory:
-        path = pathlib.Path(directory) / "clip"
-        storage.download(key, path)
-        ffmpeg.refuse_playlists(path)
-        return ffmpeg.has_audio(path)
 
 
 def _labels(conn: psycopg.Connection, item_ids: list[uuid.UUID]) -> dict[str, list[str]]:
@@ -99,12 +105,21 @@ def _shots(conn: psycopg.Connection, settings: dict) -> list[ShotRow]:
     rows = conn.execute(
         """
         select pi.id, pi.original_id, pi.kind, pi.comment, pi.analysis,
-               nullif(m.meta->>'duration', '')::float8 as duration,
-               (m.meta->'dimensions'->>'width')::int as width,
-               (m.meta->'dimensions'->>'height')::int as height,
-               (m.meta->>'at')::timestamptz as captured_at,
-               (select pm.storage_key from media_items pm where pm.id = pi.compressed_id),
-               m.storage_key
+               nullif(m.meta->>'duration', '')::float8,
+               (m.meta->'dimensions'->>'width')::int,
+               (m.meta->'dimensions'->>'height')::int,
+               (m.meta->>'at')::timestamptz,
+               coalesce(
+                   (select pm.storage_key from media_items pm
+                     where pm.id = (pi.previews_ids->>'middle')::uuid),
+                   (select pm.storage_key from media_items pm
+                     where pm.id = (pi.previews_ids->>'small')::uuid),
+                   (select pm.storage_key from media_items pm where pm.id = pi.compressed_id)
+               ),
+               m.perceptual_hash,
+               m.storage_key,
+               (m.meta->'place'->>'latitude')::float8,
+               (m.meta->'place'->>'longitude')::float8
         from project_items pi join media_items m on m.id = pi.original_id
         where pi.id = any(%s)
         order by coalesce((m.meta->>'at')::timestamptz, pi.created_at), m.id
@@ -120,28 +135,33 @@ def _shots(conn: psycopg.Connection, settings: dict) -> list[ShotRow]:
             str(item_id),
             str(media_id),
             kind,
-            description,
+            comment,
             analysis,
             duration,
             width,
             height,
             captured.isoformat() if captured else None,
-            preview_key,
+            thumbnail_key,
+            perceptual_hash or "",
             key,
             labels.get(str(item_id), []),
+            (latitude, longitude) if latitude is not None and longitude is not None else None,
         )
         for (
             item_id,
             media_id,
             kind,
-            description,
+            comment,
             analysis,
             duration,
             width,
             height,
             captured,
-            preview_key,
+            thumbnail_key,
+            perceptual_hash,
             key,
+            latitude,
+            longitude,
         ) in rows
     ]
 
@@ -153,7 +173,15 @@ def _music(conn: psycopg.Connection, settings: dict) -> list[SongRow]:
     rows = conn.execute(
         """
         select s.id, s.original_id, s.name, s.author, s.analysis,
-               nullif(m.meta->>'duration', '')::float8
+               nullif(m.meta->>'duration', '')::float8,
+               coalesce(
+                   (select pc.storage_key from media_items pc where pc.id = s.compressed_id),
+                   m.storage_key
+               ),
+               coalesce(
+                   (select pc.format from media_items pc where pc.id = s.compressed_id),
+                   m.format
+               )
         from songs s join media_items m on m.id = s.original_id
         where s.original_id = any(%s)
         """,
@@ -165,7 +193,9 @@ def _music(conn: psycopg.Connection, settings: dict) -> list[SongRow]:
         row = by_media.get(str(media_id))
         if row is None:
             raise RuntimeError(f"song {media_id} is not available to this project")
-        tracks.append(SongRow(str(row[0]), str(row[1]), row[2], row[3], row[5], row[4]))
+        tracks.append(
+            SongRow(str(row[0]), str(row[1]), row[2], row[3], row[5], row[4], row[6], row[7])
+        )
     return tracks
 
 
@@ -185,69 +215,11 @@ def _coverage(shots: list[ShotRow], music: list[SongRow]) -> None:
         )
 
 
-def _text(value, limit: int) -> str | None:
-    if not isinstance(value, str):
-        return None
-    text = "".join(character for character in value if character >= " ").strip()
-    return text[:limit] or None
-
-
-def _tags(value) -> dict[str, str] | None:
-    if not isinstance(value, dict):
-        return None
-    tags = {
-        str(key): str(item)
-        for key, item in value.items()
-        if isinstance(key, str) and item is not None
-    }
-    return tags or None
-
-
-def _segments(value) -> list[dict] | None:
-    if not isinstance(value, list):
-        return None
-    items = [one for one in value if isinstance(one, dict)]
-    if len(items) > REPORT_SEGMENT_LIMIT:
-        step = len(items) / REPORT_SEGMENT_LIMIT
-        items = [items[int(index * step)] for index in range(REPORT_SEGMENT_LIMIT)]
-    trimmed = []
-    for one in items:
-        text = _text(one.get("description"), REPORT_SEGMENT_TEXT_LIMIT)
-        start, end = one.get("secStart"), one.get("secEnd")
-        if text is None or not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
-            continue
-        trimmed.append(
-            {
-                "secStart": round(float(start), 2),
-                "secEnd": round(float(end), 2),
-                "description": text,
-                "tags": _tags(one.get("tags")),
-            }
-        )
-    return trimmed or None
-
-
-def _analysis(value, scores: tuple[str, ...]) -> dict:
-    if not isinstance(value, dict):
-        return {}
-    fields = {key: value.get(key) for key in scores}
-    fields.update(
-        {
-            "summary": _text(value.get("summary"), REPORT_SUMMARY_LIMIT),
-            "description": _text(value.get("description"), REPORT_DESCRIPTION_LIMIT),
-            "tags": _tags(value.get("tags")),
-            "frames": _segments(value.get("frames")),
-            "sounds": _segments(value.get("sounds")),
-            "words": _segments(value.get("words")),
-        }
-    )
-    return {key: item for key, item in fields.items() if item is not None}
-
-
 def _event(conn: psycopg.Connection, montage_id: uuid.UUID) -> dict:
     row = conn.execute(
         """
-        select p.title, p.description
+        select p.title, p.description, p.event_start, p.event_end,
+               (select count(*) from project_members pm where pm.project_id = p.id)
         from montages m
         join projects p on p.id = m.project_id
         where m.id = %s
@@ -256,75 +228,18 @@ def _event(conn: psycopg.Connection, montage_id: uuid.UUID) -> dict:
     ).fetchone()
     if row is None:
         raise RuntimeError(f"montage {montage_id} has no event")
-    title, description = row
-    return {"title": title, "description": description}
-
-
-def _report(
-    settings: dict, shots: list[ShotRow], music: list[SongRow], event: dict
-) -> MontageReport:
-    dimensions = settings.get("dimensions") or {}
+    title, description, start, end, people = row
     return {
-        "movie": {
-            "event": event,
-            "targetSeconds": int(settings.get("targetSeconds") or 0),
-            "dimensions": {
-                "width": int(dimensions.get("width") or 0),
-                "height": int(dimensions.get("height") or 0),
-            },
-            "direction": settings.get("prompt"),
-            "requiredItemIds": [str(one) for one in settings.get("requiredItemIds") or []],
-            "level": level(settings),
-        },
-        "shots": [
-            {
-                "itemId": shot.item_id,
-                "mediaId": shot.media_id,
-                "kind": shot.kind,
-                "capturedAt": shot.captured_at,
-                "width": shot.width,
-                "height": shot.height,
-                "durationSeconds": shot.duration,
-                "hasAudio": _has_audio(shot),
-                "shownWithCover": shot.kind == "audio",
-                "comment": shot.description,
-                "labels": shot.labels,
-                **_analysis(shot.analysis, ("scoreImportance", "scoreQuality")),
-            }
-            for shot in shots
-        ],
-        "music": [
-            {
-                "songId": song.song_id,
-                "mediaId": song.media_id,
-                "name": song.name,
-                "author": song.author,
-                "durationSeconds": song.duration,
-                **_analysis(song.analysis, ("score",)),
-            }
-            for song in music
-        ],
+        "title": title,
+        "description": description,
+        "window": {"start": start.isoformat(), "end": end.isoformat() if end else None},
+        "people": int(people),
     }
 
 
-def build(conn: psycopg.Connection, montage_id: uuid.UUID) -> MontageReport:
+def load(conn: psycopg.Connection, montage_id: uuid.UUID) -> Order:
     settings = _settings(conn, montage_id)
     shots = _shots(conn, settings)
     music = _music(conn, settings)
     _coverage(shots, music)
-    report: MontageReport = _report(settings, shots, music, _event(conn, montage_id))
-    landed = conn.execute(
-        """
-        update montages
-        set manifest = jsonb_set(
-            manifest, '{directingInput}',
-            jsonb_build_object('mergedMontageData', %s::jsonb)
-        )
-        where id = %s
-        """,
-        (Jsonb(report), montage_id),
-    ).rowcount
-    if not landed:
-        raise RuntimeError(f"montage {montage_id} went away while preparing")
-    log.info("montage %s prepared: %s shots, %s tracks", montage_id, len(shots), len(music))
-    return report
+    return Order(settings, _event(conn, montage_id), shots, music)

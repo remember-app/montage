@@ -19,7 +19,7 @@ def hash_of(path: pathlib.Path) -> str:
     return f"{bits:016x}"
 
 
-def _distance(first: str, second: str) -> int:
+def distance(first: str, second: str) -> int:
     return (int(first, 16) ^ int(second, 16)).bit_count()
 
 
@@ -36,6 +36,6 @@ if __name__ == "__main__":
         return file
 
     near, far = sample(2), sample(40)
-    assert _distance(hash_of(sample(0)), hash_of(near)) <= 12, "small shift stays close"
-    assert _distance(hash_of(sample(0)), hash_of(far)) > 12, "different picture does not"
+    assert distance(hash_of(sample(0)), hash_of(near)) <= 12, "small shift stays close"
+    assert distance(hash_of(sample(0)), hash_of(far)) > 12, "different picture does not"
     print("ok")

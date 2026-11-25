@@ -87,3 +87,17 @@ def gemini_model() -> str:
 
 def ai_timeout_seconds() -> int:
     return positive("AI_TIMEOUT_SECONDS", 180)
+
+
+def ai_background() -> bool:
+    value = env("AI_BACKGROUND")
+    return value is None or value.lower() not in ("0", "false", "no")
+
+
+def ai_background_seconds() -> int:
+    return positive("AI_BACKGROUND_SECONDS", 900)
+
+
+def ai_stream() -> bool:
+    value = env("AI_STREAM")
+    return value is None or value.lower() not in ("0", "false", "no")

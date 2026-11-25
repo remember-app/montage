@@ -3,7 +3,8 @@ import uuid
 
 import psycopg
 
-from src.movie import directing, editor, notify, preparation, rhythm
+from src.harness import agent as harness
+from src.movie import editor, notify, preparation, rhythm
 
 log = logging.getLogger("jobs.montage")
 
@@ -25,16 +26,11 @@ def run(conn: psycopg.Connection, ref: uuid.UUID, level: str | None, job_id: int
     manifest = manifest or {}
     settings = manifest.get("preparationConfig") or {}
     level = preparation.level(settings)
-    if level != "low":
-        raise RuntimeError(f"montage level {level!r} is not implemented yet; only low is available")
-    conn.execute("update montages set status = 'processing' where id = %s", (ref,))
+    conn.execute("update montages set status = 'processing', error = null where id = %s", (ref,))
     log.info("montage %s level: %s", ref, level)
 
-    if not ((manifest.get("directingInput") or {}).get("mergedMontageData")):
-        preparation.build(conn, ref)
-        manifest = _manifest(conn, ref)
     if not ((manifest.get("editingParams") or {}).get("commands")):
-        directing.direct(conn, ref, manifest["directingInput"]["mergedMontageData"], job_id)
+        harness.run(conn, ref, level, job_id)
         manifest = _manifest(conn, ref)
 
     commands = (manifest.get("editingParams") or {}).get("commands") or []

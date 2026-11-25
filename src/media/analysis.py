@@ -11,7 +11,7 @@ import psycopg
 from PIL import Image
 from psycopg.types.json import Jsonb
 
-from src.integrations import ai, ai_usage, ffmpeg, storage
+from src.integrations import ai, ai_sessions, ffmpeg, storage
 from src.prompts.analysis import (
     AUDIO_PROMPT,
     FINAL_VIDEO_PROMPT,
@@ -266,7 +266,7 @@ def _photo_analysis(
     quality: str,
 ) -> dict:
     blob = _image_blob(source, workdir)
-    answer = ai_usage.as_json(
+    answer = ai_sessions.as_json(
         conn,
         operation="photo",
         job_id=job_id,
@@ -308,7 +308,7 @@ def _video_low(
         blobs.append(blob)
         measured.append(_metrics(blob))
     prompt = VIDEO_PROMPT.replace("{seconds}", ", ".join(f"{one:.2f}" for one in moments))
-    answer = ai_usage.as_json(
+    answer = ai_sessions.as_json(
         conn,
         operation="video",
         job_id=job_id,
@@ -398,7 +398,7 @@ def _video_medium(
         prompt = SEGMENT_PROMPT.replace(
             "{seconds}", ", ".join(f"{one:.2f}" for one in moments)
         ).replace("{context}", context or "nothing yet")
-        answer = ai_usage.as_json(
+        answer = ai_sessions.as_json(
             conn,
             operation="video",
             job_id=job_id,
@@ -425,7 +425,7 @@ def _video_medium(
         ensure_ascii=False,
     )
     prompt = FINAL_VIDEO_PROMPT.replace("{segments}", summary_input)
-    answer = ai_usage.as_json(
+    answer = ai_sessions.as_json(
         conn,
         operation="text",
         job_id=job_id,
@@ -456,7 +456,7 @@ def _sound_analysis(
     workdir: pathlib.Path,
     instruction: str,
 ) -> tuple[str | None, dict | None, list[dict] | None, list[dict] | None]:
-    answer = ai_usage.as_json(
+    answer = ai_sessions.as_json(
         conn,
         operation="video",
         job_id=job_id,
@@ -530,7 +530,7 @@ def _audio_analysis(
     importance: str,
     quality: str,
 ) -> dict:
-    answer = ai_usage.as_json(
+    answer = ai_sessions.as_json(
         conn,
         operation="audio",
         job_id=job_id,
@@ -562,7 +562,7 @@ def _music_analysis(
     workdir: pathlib.Path,
     grading: str,
 ) -> dict:
-    answer = ai_usage.as_json(
+    answer = ai_sessions.as_json(
         conn,
         operation="audio",
         job_id=job_id,
