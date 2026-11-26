@@ -15,7 +15,7 @@ from src.media import fingerprint, perceptual, probe
 
 log = logging.getLogger("media.derive")
 
-PREVIEW_SIDES = {"small": 160, "middle": 480, "large": 960}
+PREVIEW_SIDES = {"small": 160, "middle": 480, "large": 1200}
 COMPRESSED_SIDE = 2048
 COMPRESSED_HEIGHT = 720
 SDR_TONEMAP = (
