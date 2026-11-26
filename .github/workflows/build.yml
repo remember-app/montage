@@ -1,9 +1,10 @@
 name: build
 
-# Тест-контур собирается из main; префикс test- отделяет его образы от других контуров.
+# main -> test-<sha>, тег v* -> prod-<tag>.
 on:
   push:
     branches: [main]
+    tags: ['v*']
 
 permissions:
   contents: read
@@ -15,6 +16,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-      - run: |
-          docker build --tag "ghcr.io/${{ github.repository }}:test-${{ github.sha }}" .
-          docker push "ghcr.io/${{ github.repository }}:test-${{ github.sha }}"
+      - name: build and push
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            tag="prod-${GITHUB_REF#refs/tags/}"
+          else
+            tag="test-${GITHUB_SHA}"
+          fi
+          docker build --tag "ghcr.io/${{ github.repository }}:$tag" .
+          docker push "ghcr.io/${{ github.repository }}:$tag"
